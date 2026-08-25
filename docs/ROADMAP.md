@@ -399,15 +399,14 @@ cargo build
 
 已验证边界：
 
-- 当前 Graph 加载固定的首个 200 提交窗口，真正的增量分页仍属于后续优化。
-- 当前 Changes 支持文件级 stage/unstage/restore；hunk、commit、stash 和冲突工作流尚未完成。
+- 当前 Graph 加载所有本地分支、远端分支、tag、HEAD 和每条 stash 的完整可达历史；大型仓库的流式虚拟化仍属于后续优化。
+- 当前 Changes 已支持文件与 hunk 级 stage/unstage/discard；commit、stash 操作和冲突工作流尚未完成。
 - 当前无任务中心、Repo sync/upload、命令面板或 PTY takeover。
 - Repo 端到端测试使用本地 fake `repo list/version` 和真实 Git project，不依赖公网；真实大型 Repo client 的性能基准属于 M7。
 
 ## 15. 下一执行点
 
-1. 在现有 preview/token 模型上实现 hunk patch 解析与 stage/unstage/discard。
-2. 为 patch 失败保留用户选择和原始错误，并用 token 拒绝陈旧 hunk。
-3. 实现 commit/amend/signoff/signing 与 hook 失败时 message 恢复。
-4. 增加 stash 与基础 conflict/operation state 工作流，完成 M2 验收。
-5. M2 完成后再进入 M3，不提前实现远端和 Repo 批量写操作。
+1. 实现 commit/amend/signoff/signing 与 hook 失败时 message 恢复。
+2. 增加 stash 操作与基础 conflict/operation state 工作流，完成 M2 验收。
+3. 为大型 all-refs graph 设计保持全局拓扑和 ref 可见性的流式虚拟化。
+4. M2 完成后再进入 M3，不提前实现远端和 Repo 批量写操作。

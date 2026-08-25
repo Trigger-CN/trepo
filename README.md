@@ -2,7 +2,7 @@
 
 `repo-tui` is a terminal workspace for Android Repo clients and Git repositories. The current implementation discovers projects, scans Git status concurrently, browses commit history, and provides guarded file- and hunk-level stage, unstage, and discard operations.
 
-See [the design](docs/DESIGN.md) and [implementation roadmap](docs/ROADMAP.md) for the full product direction.
+See [the design](docs/DESIGN.md), [implementation roadmap](docs/ROADMAP.md), and [Agent guide](AGENTS.md) for the product direction and development rules.
 
 ## Requirements
 
