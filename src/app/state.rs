@@ -4,9 +4,9 @@ use tokio::sync::mpsc;
 
 use crate::adapters::git;
 use crate::domain::{
-    ChangeEntry, ChangeHunk, ChangePreview, Commit, HunkSource, OperationKind, OperationOutcome,
-    OperationSpec, OperationTarget, Project, ProjectId, ProjectSnapshot, RiskLevel, Workspace,
-    WorkspaceSummary,
+    ChangeEntry, ChangeHunk, ChangePreview, Commit, CommitOutcome, CommitSpec, HunkSource,
+    OperationKind, OperationOutcome, OperationSpec, OperationTarget, Project, ProjectId,
+    ProjectSnapshot, RiskLevel, Workspace, WorkspaceSummary,
 };
 use crate::services::operations::OperationRunner;
 use crate::services::scanner::{self, ScanResult};
@@ -59,6 +59,22 @@ pub struct OperationResult {
     pub result: anyhow::Result<OperationOutcome>,
 }
 
+#[derive(Debug)]
+pub struct CommitResult {
+    pub project_id: ProjectId,
+    pub changes_generation: u64,
+    pub commit_generation: u64,
+    pub result: anyhow::Result<CommitOutcome>,
+}
+#[derive(Debug, Clone, Copy)]
+pub enum CommitInput {
+    Character(char),
+    Backspace,
+    ToggleAmend,
+    ToggleSignoff,
+    ToggleSigning,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChangesMode {
     File,
@@ -94,6 +110,13 @@ pub struct ChangesState {
     pub operation_generation: u64,
     pub confirmation: Option<PendingOperation>,
     pub message: Option<(bool, String)>,
+    pub commit_message: String,
+    pub commit_editing: bool,
+    pub commit_amend: bool,
+    pub commit_signoff: bool,
+    pub commit_signing: bool,
+    pub commit_running: bool,
+    pub commit_generation: u64,
 }
 
 #[derive(Debug)]
@@ -118,19 +141,21 @@ pub struct App {
     pub changes_rx: mpsc::UnboundedReceiver<ChangesResult>,
     preview_tx: mpsc::UnboundedSender<PreviewResult>,
     pub preview_rx: mpsc::UnboundedReceiver<PreviewResult>,
-    operation_tx: mpsc::UnboundedSender<OperationResult>,
+    pub operation_tx: mpsc::UnboundedSender<OperationResult>,
     pub operation_rx: mpsc::UnboundedReceiver<OperationResult>,
+    pub commit_tx: mpsc::UnboundedSender<CommitResult>,
+    pub commit_rx: mpsc::UnboundedReceiver<CommitResult>,
     operation_runner: OperationRunner,
     concurrency: usize,
 }
-
 impl App {
     pub fn new(workspace: Workspace, concurrency: usize) -> Self {
         let (scan_tx, scan_rx) = mpsc::unbounded_channel();
         let (graph_tx, graph_rx) = mpsc::unbounded_channel();
         let (changes_tx, changes_rx) = mpsc::unbounded_channel();
-        let (preview_tx, preview_rx) = mpsc::unbounded_channel();
         let (operation_tx, operation_rx) = mpsc::unbounded_channel();
+        let (preview_tx, preview_rx) = mpsc::unbounded_channel();
+        let (commit_tx, commit_rx) = mpsc::unbounded_channel();
         let projects = workspace
             .projects
             .iter()
@@ -160,6 +185,8 @@ impl App {
             preview_rx,
             operation_tx,
             operation_rx,
+            commit_tx,
+            commit_rx,
             operation_runner: OperationRunner,
             concurrency: concurrency.max(1),
         }
@@ -359,16 +386,23 @@ impl App {
             selected_hunk_identity: None,
             loading: true,
             error: None,
-            generation,
-            preview: None,
-            preview_path: None,
             preview_loading: false,
             preview_generation: 0,
             preview_scroll: 0,
+            generation,
+            preview: None,
+            preview_path: None,
             operation_running: false,
             operation_generation: 0,
             confirmation: None,
             message: None,
+            commit_message: String::new(),
+            commit_editing: false,
+            commit_amend: false,
+            commit_signoff: false,
+            commit_signing: false,
+            commit_running: false,
+            commit_generation: 0,
         });
         let sender = self.changes_tx.clone();
         tokio::spawn(async move {
@@ -682,6 +716,109 @@ impl App {
         }
     }
 
+    pub fn start_commit_editing(&mut self) {
+        let Some(changes) = self.changes.as_mut() else {
+            return;
+        };
+        if changes.commit_running || changes.operation_running {
+            return;
+        }
+        changes.commit_editing = true;
+        changes.message = None;
+    }
+
+    pub fn cancel_commit_editing(&mut self) {
+        if let Some(changes) = self.changes.as_mut() {
+            changes.commit_editing = false;
+            changes.message = None;
+        }
+    }
+
+    pub fn edit_commit_message(&mut self, input: CommitInput) {
+        let Some(changes) = self.changes.as_mut() else {
+            return;
+        };
+        if !changes.commit_editing || changes.commit_running {
+            return;
+        }
+        match input {
+            CommitInput::Character(value) => changes.commit_message.push(value),
+            CommitInput::Backspace => {
+                changes.commit_message.pop();
+            }
+            CommitInput::ToggleAmend => changes.commit_amend = !changes.commit_amend,
+            CommitInput::ToggleSignoff => changes.commit_signoff = !changes.commit_signoff,
+            CommitInput::ToggleSigning => changes.commit_signing = !changes.commit_signing,
+        }
+    }
+
+    pub fn submit_commit(&mut self) {
+        let Some(changes) = self.changes.as_mut() else {
+            return;
+        };
+        if !changes.commit_editing || changes.commit_running {
+            return;
+        }
+        if changes.commit_message.trim().is_empty() {
+            changes.message = Some((true, "Commit message cannot be empty".to_owned()));
+            return;
+        }
+        changes.commit_editing = false;
+        changes.commit_running = true;
+        changes.message = None;
+        changes.commit_generation = changes.commit_generation.wrapping_add(1);
+        let commit_generation = changes.commit_generation;
+        let changes_generation = changes.generation;
+        let project = changes.project.clone();
+        let project_id = project.id.clone();
+        let spec = CommitSpec {
+            message: changes.commit_message.clone(),
+            amend: changes.commit_amend,
+            signoff: changes.commit_signoff,
+            signing: changes.commit_signing,
+        };
+        let runner = self.operation_runner.clone();
+        let sender = self.commit_tx.clone();
+        tokio::spawn(async move {
+            let result = runner.execute_commit(project, spec).await;
+            let _ = sender.send(CommitResult {
+                project_id,
+                changes_generation,
+                commit_generation,
+                result,
+            });
+        });
+    }
+
+    pub fn apply_commit(&mut self, result: CommitResult) {
+        let Some(changes) = self.changes.as_ref() else {
+            return;
+        };
+        if changes.project.id != result.project_id
+            || changes.generation != result.changes_generation
+            || changes.commit_generation != result.commit_generation
+        {
+            return;
+        }
+        match result.result {
+            Ok(outcome) => {
+                let project = changes.project.clone();
+                let return_screen = changes.return_screen;
+                self.refresh();
+                self.load_changes(project, return_screen);
+                if let Some(changes) = self.changes.as_mut() {
+                    changes.message = Some((false, outcome.message));
+                }
+            }
+            Err(error) => {
+                if let Some(changes) = self.changes.as_mut() {
+                    changes.commit_running = false;
+                    changes.commit_editing = true;
+                    changes.message = Some((true, error.to_string()));
+                }
+            }
+        }
+    }
     fn spawn_operation(&mut self, pending: PendingOperation) {
         let Some(changes) = self.changes.as_mut() else {
             return;
@@ -906,6 +1043,13 @@ mod tests {
             preview_loading: false,
             preview_generation: 3,
             preview_scroll: 0,
+            commit_message: String::new(),
+            commit_editing: false,
+            commit_amend: false,
+            commit_signoff: false,
+            commit_signing: false,
+            commit_running: false,
+            commit_generation: 0,
             operation_running: false,
             operation_generation: 0,
             confirmation: None,
@@ -986,6 +1130,13 @@ mod tests {
             preview_loading: false,
             preview_generation: 1,
             preview_scroll: 0,
+            commit_message: String::new(),
+            commit_editing: false,
+            commit_amend: false,
+            commit_signoff: false,
+            commit_signing: false,
+            commit_running: false,
+            commit_generation: 0,
             operation_running: false,
             operation_generation: 0,
             confirmation: None,

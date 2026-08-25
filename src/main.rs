@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -208,6 +208,9 @@ fn drain_background_messages(app: &mut App) {
     while let Ok(result) = app.operation_rx.try_recv() {
         app.apply_operation(result);
     }
+    while let Ok(result) = app.commit_rx.try_recv() {
+        app.apply_commit(result);
+    }
 }
 
 fn handle_key(app: &mut App, key: KeyEvent) {
@@ -219,6 +222,33 @@ fn handle_key(app: &mut App, key: KeyEvent) {
         match key.code {
             KeyCode::Char('y') | KeyCode::Char('Y') => app.confirm_operation(true),
             KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => app.confirm_operation(false),
+            _ => {}
+        }
+        return;
+    }
+    if app
+        .changes
+        .as_ref()
+        .is_some_and(|changes| changes.commit_editing)
+    {
+        match key.code {
+            KeyCode::Esc => app.cancel_commit_editing(),
+            KeyCode::Enter => app.submit_commit(),
+            KeyCode::Backspace => {
+                app.edit_commit_message(repo_tui::app::state::CommitInput::Backspace)
+            }
+            KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                app.edit_commit_message(repo_tui::app::state::CommitInput::ToggleAmend)
+            }
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                app.edit_commit_message(repo_tui::app::state::CommitInput::ToggleSignoff)
+            }
+            KeyCode::Char('g') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                app.edit_commit_message(repo_tui::app::state::CommitInput::ToggleSigning)
+            }
+            KeyCode::Char(character) => {
+                app.edit_commit_message(repo_tui::app::state::CommitInput::Character(character))
+            }
             _ => {}
         }
         return;
@@ -287,6 +317,7 @@ fn handle_key(app: &mut App, key: KeyEvent) {
             KeyCode::Char('G') | KeyCode::End => app.changes_last(),
             KeyCode::PageDown => app.scroll_preview(12),
             KeyCode::PageUp => app.scroll_preview(-12),
+            KeyCode::Char('m') => app.start_commit_editing(),
             _ => {}
         },
     }

@@ -50,6 +50,9 @@ pub fn render(frame: &mut Frame, app: &App) {
     if changes.confirmation.is_some() {
         render_confirmation(frame, changes);
     }
+    if changes.commit_editing {
+        render_commit_dialog(frame, changes);
+    }
 }
 
 fn render_header(frame: &mut Frame, changes: &ChangesState, area: Rect) {
@@ -248,7 +251,9 @@ fn render_preview(frame: &mut Frame, changes: &ChangesState, area: Rect) {
 }
 
 fn render_footer(frame: &mut Frame, changes: &ChangesState, area: Rect) {
-    let first = if changes.operation_running {
+    let first = if changes.commit_running {
+        Span::styled("Committing...", Style::default().fg(Color::Yellow))
+    } else if changes.operation_running {
         Span::styled("Writing...", Style::default().fg(Color::Yellow))
     } else if let Some((is_error, message)) = &changes.message {
         Span::styled(
@@ -256,7 +261,7 @@ fn render_footer(frame: &mut Frame, changes: &ChangesState, area: Rect) {
             Style::default().fg(if *is_error { Color::Red } else { Color::Green }),
         )
     } else {
-        Span::raw("s Stage   u Unstage   d Discard   PgUp/PgDn Diff")
+        Span::raw("s Stage   u Unstage   d Discard   m Commit   PgUp/PgDn Diff")
     };
     let mode = match changes.mode {
         ChangesMode::File => "FILE",
@@ -313,6 +318,44 @@ fn render_confirmation(frame: &mut Frame, changes: &ChangesState) {
     );
 }
 
+fn render_commit_dialog(frame: &mut Frame, changes: &ChangesState) {
+    let area = centered_rect(76, 58, frame.area());
+    frame.render_widget(Clear, area);
+    let title = if changes.commit_amend {
+        " Commit (amend) "
+    } else {
+        " Commit "
+    };
+    let options = format!(
+        "[Ctrl-A] amend: {}   [Ctrl-U] sign-off: {}   [Ctrl-G] signing: {}",
+        if changes.commit_amend { "on" } else { "off" },
+        if changes.commit_signoff { "on" } else { "off" },
+        if changes.commit_signing { "on" } else { "off" },
+    );
+    let text = vec![
+        Line::styled(
+            "Commit message:",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Line::raw(if changes.commit_message.is_empty() {
+            "_".to_owned()
+        } else {
+            changes.commit_message.clone()
+        }),
+        Line::raw(""),
+        Line::raw(options),
+        Line::raw(""),
+        Line::raw("Enter commit   Esc cancel"),
+    ];
+    frame.render_widget(
+        Paragraph::new(text)
+            .block(Block::default().title(title).borders(Borders::ALL))
+            .wrap(Wrap { trim: false }),
+        area,
+    );
+}
 fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
     let width = area.width.saturating_mul(percent_x) / 100;
     let height = area.height.saturating_mul(percent_y) / 100;

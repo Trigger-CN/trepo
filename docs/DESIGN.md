@@ -211,10 +211,11 @@ Git 提供提交及 parent 关系，`repo-tui` 负责视觉 lane 分配：
 
 1. 按 `--topo-order` 获取提交，保证父提交不会出现在子提交之前。
 2. 为当前 commit 复用等待它的 lane；若不存在则分配最左可用 lane。
-3. first parent 延续当前 lane，其余 parent 分配或复用其他 lane。
-4. merge edge 在当前行产生连接，已结束 lane 在后续行回收。
-5. octopus merge、boundary commit 和 shallow history 使用独立标记。
-6. ref 变化后使当前 graph generation 失效，保留选中 OID；如果 OID 不再可达，给出提示而不是静默跳行。
+3. 先按当前 lanes 绘制节点，再计算提交后的 parent lanes，避免 lane 插入掩盖来源位置。
+4. first parent 延续当前 lane，其余 parent 分配或复用其他 lane；每个 cell 根据上、下、左、右连接位动态选择 `─`、`│`、`├`、`┤`、`┬`、`┴`、`┼`、`┌`、`┐`、`└`、`┘` 等 box-drawing 字符。
+5. merge 节点使用菱形标记，多个 parent 连接从该节点展开；共同祖先重新进入同一 lane 时保留反向连接。
+6. octopus merge、boundary commit 和 shallow history 使用独立标记。
+7. ref 变化后使当前 graph generation 失效，保留选中 OID；如果 OID 不再可达，给出提示而不是静默跳行。
 
 内部数据以 OID 和 parents 构成 DAG，不把 `git log --graph` 的终端文本当数据源。渲染算法需覆盖直线、分叉、双亲 merge、octopus merge、交叉 lane、shallow boundary 和 replace/graft 等 fixture。
 
@@ -222,15 +223,16 @@ Git 提供提交及 parent 关系，`repo-tui` 负责视觉 lane 分配：
 
 ### 6.3 Changes 标签页
 
-Changes 页面分为文件树、hunk 列表和 diff 检查器：
+Changes 页面分为文件树、hunk 列表、diff 检查器和提交对话框：
 
 - 分类展示 staged、unstaged、untracked、conflicted、ignored（按需）。
 - 文件级 stage/unstage/restore/delete/intent-to-add。
 - hunk 级 stage、unstage、discard；必要时支持逐行选择生成 patch。
 - diff 模式支持 unified、side-by-side、word diff、忽略空白。
 - 二进制、重命名、submodule、mode change、大文件和不可解码文件明确降级。
-- commit 对话框支持 message、amend、signoff、GPG/SSH signing、author 和是否跳过 hooks；默认不跳过 hooks。
-- commit 失败时保留用户输入，展示 hook 输出并允许修正后重试。
+- commit 对话框支持 message、amend、signoff 和 GPG/SSH signing；当前 UI 通过独立开关控制后三项，默认不跳过 hooks。
+- 提交使用 project 级写锁并在锁内检查 `index.lock`；普通 commit 要求存在 staged 内容，amend 遵循 Git 当前 HEAD 语义。
+- commit 失败时合并 hook stdout/stderr，保留用户输入、选项和错误状态，允许修正后重试；成功后刷新 Changes 与 Workspace。
 
 文件名按原始字节保存，显示层才做可逆转义或 lossy 展示。Git 数据读取尽量使用 `-z`，正确处理空格、制表符、换行及非 UTF-8 路径。
 

@@ -36,7 +36,7 @@ fn render_help(frame: &mut Frame) {
         Line::raw("c              Open Changes"),
         Line::raw("Tab            Toggle file / hunk mode in Changes"),
         Line::raw("s/u/d          Stage / unstage / discard selection"),
-        Line::raw("PageUp/Down    Scroll diff"),
+        Line::raw("m              Commit staged changes; Ctrl-A/U/G toggle options"),
         Line::raw("/              Search projects"),
         Line::raw("r              Refresh current page"),
         Line::raw("Esc            Back / clear / quit"),
@@ -192,6 +192,13 @@ mod tests {
                 expected_token: 42,
             }),
             message: None,
+            commit_message: String::new(),
+            commit_editing: true,
+            commit_amend: false,
+            commit_signoff: false,
+            commit_signing: false,
+            commit_running: false,
+            commit_generation: 0,
         });
         draw(&app, 80, 24);
         draw(&app, 120, 40);
