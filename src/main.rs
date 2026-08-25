@@ -1,0 +1,299 @@
+use std::io::{self, IsTerminal, Stdout};
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+use anyhow::{Context, Result};
+use clap::{Parser, Subcommand};
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
+use crossterm::execute;
+use crossterm::terminal::{
+    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+};
+use ratatui::backend::CrosstermBackend;
+use ratatui::Terminal;
+use tracing_subscriber::EnvFilter;
+
+use repo_tui::adapters::repo;
+use repo_tui::app::state::{App, Screen};
+use repo_tui::services::discovery;
+
+#[derive(Debug, Parser)]
+#[command(name = "repo-tui", version, about)]
+struct Cli {
+    #[arg(default_value = ".")]
+    path: PathBuf,
+
+    #[arg(long, default_value_t = default_concurrency())]
+    scan_concurrency: usize,
+
+    #[arg(long)]
+    log_file: Option<PathBuf>,
+
+    #[command(subcommand)]
+    command: Option<Commands>,
+}
+
+#[derive(Debug, Subcommand)]
+enum Commands {
+    /// Diagnose Git, Repo and workspace discovery without starting the TUI.
+    Doctor {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+    },
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let cli = Cli::parse();
+    init_logging(cli.log_file.as_deref())?;
+
+    if let Some(Commands::Doctor { path }) = cli.command {
+        return doctor(&path).await;
+    }
+    if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
+        anyhow::bail!(
+            "repo-tui requires an interactive terminal; use `repo-tui doctor` for diagnostics"
+        );
+    }
+
+    let workspace = discovery::discover(&cli.path).await?;
+    let mut app = App::new(workspace, cli.scan_concurrency);
+    app.refresh();
+    run_tui(&mut app).await
+}
+
+fn init_logging(log_file: Option<&Path>) -> Result<()> {
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn"));
+    if let Some(path) = log_file {
+        let file = std::fs::File::create(path)
+            .with_context(|| format!("failed to create log file {}", path.display()))?;
+        tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_writer(file)
+            .with_ansi(false)
+            .try_init()
+            .ok();
+    } else {
+        tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_writer(io::stderr)
+            .try_init()
+            .ok();
+    }
+    Ok(())
+}
+
+async fn doctor(path: &Path) -> Result<()> {
+    println!("repo-tui {}", env!("CARGO_PKG_VERSION"));
+    println!("input: {}", path.display());
+    println!(
+        "terminal stdin/stdout: {}/{}",
+        io::stdin().is_terminal(),
+        io::stdout().is_terminal()
+    );
+
+    match command_version("git", &["--version"]).await {
+        Ok(version) => println!("git: {version}"),
+        Err(error) => println!("git: unavailable ({error})"),
+    }
+    match repo::version().await {
+        Ok(version) => println!("repo: {version}"),
+        Err(error) => println!("repo: unavailable ({error})"),
+    }
+    match discovery::discover(path).await {
+        Ok(workspace) => {
+            println!("workspace: {:?}", workspace.kind);
+            println!("root: {}", workspace.root.display());
+            println!("projects: {}", workspace.projects.len());
+            for project in workspace.projects.iter().take(5) {
+                println!("  {} [{}]", project.relative_path.display(), project.name);
+            }
+            if workspace.projects.len() > 5 {
+                println!("  ... {} more", workspace.projects.len() - 5);
+            }
+            Ok(())
+        }
+        Err(error) => anyhow::bail!("workspace discovery failed: {error}"),
+    }
+}
+
+async fn command_version(program: &str, args: &[&str]) -> Result<String> {
+    let output = tokio::process::Command::new(program)
+        .args(args)
+        .output()
+        .await
+        .with_context(|| format!("failed to run {program}"))?;
+    if !output.status.success() {
+        anyhow::bail!("{program} exited with {}", output.status);
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+}
+
+struct TerminalGuard {
+    terminal: Terminal<CrosstermBackend<Stdout>>,
+}
+
+impl TerminalGuard {
+    fn enter() -> Result<Self> {
+        enable_raw_mode().context("failed to enable terminal raw mode")?;
+        let mut stdout = io::stdout();
+        if let Err(error) = execute!(stdout, EnterAlternateScreen) {
+            let _ = disable_raw_mode();
+            return Err(error).context("failed to enter alternate screen");
+        }
+        let backend = CrosstermBackend::new(stdout);
+        let terminal = match Terminal::new(backend) {
+            Ok(terminal) => terminal,
+            Err(error) => {
+                let _ = disable_raw_mode();
+                let mut stdout = io::stdout();
+                let _ = execute!(stdout, LeaveAlternateScreen);
+                return Err(error).context("failed to initialize terminal");
+            }
+        };
+        Ok(Self { terminal })
+    }
+
+    fn terminal(&mut self) -> &mut Terminal<CrosstermBackend<Stdout>> {
+        &mut self.terminal
+    }
+}
+
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        let _ = disable_raw_mode();
+        let _ = execute!(self.terminal.backend_mut(), LeaveAlternateScreen);
+        let _ = self.terminal.show_cursor();
+    }
+}
+
+async fn run_tui(app: &mut App) -> Result<()> {
+    let mut terminal = TerminalGuard::enter()?;
+    loop {
+        terminal
+            .terminal()
+            .draw(|frame| repo_tui::ui::render(frame, app))
+            .context("failed to draw terminal UI")?;
+
+        drain_background_messages(app);
+        if app.should_quit {
+            break;
+        }
+
+        if event::poll(Duration::from_millis(50)).context("failed to poll terminal input")? {
+            match event::read().context("failed to read terminal input")? {
+                Event::Key(key) if key.kind == KeyEventKind::Press => handle_key(app, key),
+                Event::Resize(_, _) => {}
+                _ => {}
+            }
+        }
+        drain_background_messages(app);
+    }
+    Ok(())
+}
+
+fn drain_background_messages(app: &mut App) {
+    while let Ok(result) = app.scan_rx.try_recv() {
+        app.apply_scan(result);
+    }
+    while let Ok(result) = app.graph_rx.try_recv() {
+        app.apply_graph(result);
+    }
+    while let Ok(result) = app.changes_rx.try_recv() {
+        app.apply_changes(result);
+    }
+    while let Ok(result) = app.preview_rx.try_recv() {
+        app.apply_preview(result);
+    }
+    while let Ok(result) = app.operation_rx.try_recv() {
+        app.apply_operation(result);
+    }
+}
+
+fn handle_key(app: &mut App, key: KeyEvent) {
+    if app
+        .changes
+        .as_ref()
+        .is_some_and(|changes| changes.confirmation.is_some())
+    {
+        match key.code {
+            KeyCode::Char('y') | KeyCode::Char('Y') => app.confirm_operation(true),
+            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => app.confirm_operation(false),
+            _ => {}
+        }
+        return;
+    }
+    if app.help {
+        if matches!(key.code, KeyCode::Char('?') | KeyCode::Esc) {
+            app.help = false;
+        }
+        return;
+    }
+    if app.search_mode {
+        match key.code {
+            KeyCode::Esc | KeyCode::Enter => app.search_mode = false,
+            KeyCode::Backspace => {
+                app.search.pop();
+                app.selected = 0;
+            }
+            KeyCode::Char(character) => {
+                app.search.push(character);
+                app.selected = 0;
+            }
+            _ => {}
+        }
+        return;
+    }
+
+    match app.screen {
+        Screen::Workspace => match key.code {
+            KeyCode::Char('q') => app.should_quit = true,
+            KeyCode::Esc => app.back(),
+            KeyCode::Char('?') => app.help = true,
+            KeyCode::Char('/') => app.search_mode = true,
+            KeyCode::Char('r') => app.refresh(),
+            KeyCode::Char('c') => app.open_changes(),
+            KeyCode::Enter => app.open_graph(),
+            KeyCode::Down | KeyCode::Char('j') => app.move_selection(1),
+            KeyCode::Up | KeyCode::Char('k') => app.move_selection(-1),
+            KeyCode::Char('g') | KeyCode::Home => app.select_first(),
+            KeyCode::Char('G') | KeyCode::End => app.select_last(),
+            _ => {}
+        },
+        Screen::Graph => match key.code {
+            KeyCode::Esc => app.back(),
+            KeyCode::Char('?') => app.help = true,
+            KeyCode::Char('r') => app.reload_graph(),
+            KeyCode::Char('c') => app.open_changes(),
+            KeyCode::Down | KeyCode::Char('j') => app.move_graph_selection(1),
+            KeyCode::Up | KeyCode::Char('k') => app.move_graph_selection(-1),
+            KeyCode::Char('g') | KeyCode::Home => app.graph_first(),
+            KeyCode::Char('G') | KeyCode::End => app.graph_last(),
+            _ => {}
+        },
+        Screen::Changes => match key.code {
+            KeyCode::Esc => app.back(),
+            KeyCode::Char('?') => app.help = true,
+            KeyCode::Char('r') => app.reload_changes(),
+            KeyCode::Tab => app.toggle_changes_mode(),
+            KeyCode::Char('s') => app.begin_operation(repo_tui::domain::OperationKind::Stage),
+            KeyCode::Char('u') => app.begin_operation(repo_tui::domain::OperationKind::Unstage),
+            KeyCode::Char('d') => {
+                app.begin_operation(repo_tui::domain::OperationKind::RestoreWorktree)
+            }
+            KeyCode::Down | KeyCode::Char('j') => app.move_change_selection(1),
+            KeyCode::Up | KeyCode::Char('k') => app.move_change_selection(-1),
+            KeyCode::Char('g') | KeyCode::Home => app.changes_first(),
+            KeyCode::Char('G') | KeyCode::End => app.changes_last(),
+            KeyCode::PageDown => app.scroll_preview(12),
+            KeyCode::PageUp => app.scroll_preview(-12),
+            _ => {}
+        },
+    }
+}
+
+fn default_concurrency() -> usize {
+    std::thread::available_parallelism()
+        .map(|value| value.get().clamp(2, 16))
+        .unwrap_or(4)
+}
