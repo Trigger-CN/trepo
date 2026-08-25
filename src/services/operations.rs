@@ -8,7 +8,7 @@ use tokio::sync::Mutex;
 use crate::adapters::git;
 use crate::domain::{
     ChangeEntry, CommitOutcome, CommitSpec, HunkSource, OperationKind, OperationOutcome,
-    OperationSpec, OperationTarget, Project,
+    OperationSpec, OperationTarget, Project, RepositoryActionOutcome, RepositoryActionSpec,
 };
 
 #[derive(Debug, Default, Clone)]
@@ -67,6 +67,28 @@ impl OperationRunner {
                 git::apply_hunk(root, source, spec.kind, &hunk.patch).await?;
                 " hunk"
             }
+            OperationTarget::Line {
+                source,
+                hunk_fingerprint,
+                fingerprint,
+            } => {
+                ensure_hunk_applicable(spec.kind, source, &current)?;
+                let (token, matches) =
+                    git::resolve_lines(root, &current, source, hunk_fingerprint, fingerprint)
+                        .await?;
+                ensure_token(token, spec.expected_token, &current)?;
+                let [line] = matches.as_slice() else {
+                    bail!(
+                        "precondition failed: selected line in {} is no longer uniquely available; refresh and retry",
+                        current.path.display()
+                    );
+                };
+                debug_assert_eq!(line.source, source);
+                debug_assert_eq!(line.hunk_fingerprint, hunk_fingerprint);
+                debug_assert_eq!(line.fingerprint, fingerprint);
+                git::apply_hunk(root, source, spec.kind, &line.patch).await?;
+                " line"
+            }
         };
 
         Ok(OperationOutcome {
@@ -105,6 +127,20 @@ impl OperationRunner {
             oid: oid.clone(),
             message: format!("Committed {}", &oid[..oid.len().min(12)]),
         })
+    }
+
+    pub async fn execute_repository_action(
+        &self,
+        spec: RepositoryActionSpec,
+    ) -> Result<RepositoryActionOutcome> {
+        let lock = project_lock(spec.project.path.clone());
+        let _guard = lock.lock().await;
+        let root = &spec.project.path;
+        if git::git_path(root, "index.lock").await?.is_file() {
+            bail!("Git index is locked; another writer may be active");
+        }
+        git::validate_repository_action(root, &spec.action, Some(spec.expected_token)).await?;
+        git::execute_repository_action(root, &spec.action, false).await
     }
 }
 
@@ -545,5 +581,127 @@ mod tests {
         assert!(cached.contains("first"));
         assert!(cached.contains("second"));
         assert!(git_text(temp.path(), &["diff"]).is_empty());
+    }
+
+    #[tokio::test]
+    async fn line_operations_isolate_selected_lines_and_reject_stale_state() {
+        let temp = tempdir().unwrap();
+        initialize_multihunk(temp.path());
+        let original = fs::read_to_string(temp.path().join("tracked.txt")).unwrap();
+        let mut lines = original.lines().map(str::to_owned).collect::<Vec<_>>();
+        lines.insert(2, "insert A".into());
+        lines.insert(4, "insert B".into());
+        fs::write(
+            temp.path().join("tracked.txt"),
+            format!("{}\n", lines.join("\n")),
+        )
+        .unwrap();
+        let repository = project(temp.path());
+        let runner = OperationRunner;
+
+        let current = git::changes(temp.path()).await.unwrap().remove(0);
+        let preview = git::preview_change(temp.path(), &current).await.unwrap();
+        let inserted = preview
+            .lines
+            .iter()
+            .filter(|line| line.source == HunkSource::Worktree)
+            .collect::<Vec<_>>();
+        assert_eq!(inserted.len(), 2);
+        let first = inserted[0].clone();
+        runner
+            .execute(OperationSpec {
+                project: repository.clone(),
+                change: current,
+                kind: OperationKind::Stage,
+                target: OperationTarget::Line {
+                    source: first.source,
+                    hunk_fingerprint: first.hunk_fingerprint,
+                    fingerprint: first.fingerprint,
+                },
+                expected_token: preview.token,
+            })
+            .await
+            .unwrap();
+        let cached = git_text(temp.path(), &["show", ":tracked.txt"]);
+        let worktree = fs::read_to_string(temp.path().join("tracked.txt")).unwrap();
+        assert!(cached.contains("insert A"));
+        assert!(!cached.contains("insert B"));
+        assert!(worktree.contains("insert A"));
+        assert!(worktree.contains("insert B"));
+
+        let current = git::changes(temp.path()).await.unwrap().remove(0);
+        let preview = git::preview_change(temp.path(), &current).await.unwrap();
+        let staged = preview
+            .lines
+            .iter()
+            .find(|line| line.source == HunkSource::Staged)
+            .unwrap();
+        runner
+            .execute(OperationSpec {
+                project: repository.clone(),
+                change: current,
+                kind: OperationKind::Unstage,
+                target: OperationTarget::Line {
+                    source: staged.source,
+                    hunk_fingerprint: staged.hunk_fingerprint,
+                    fingerprint: staged.fingerprint,
+                },
+                expected_token: preview.token,
+            })
+            .await
+            .unwrap();
+        assert!(git_text(temp.path(), &["diff", "--cached"]).is_empty());
+
+        let current = git::changes(temp.path()).await.unwrap().remove(0);
+        let preview = git::preview_change(temp.path(), &current).await.unwrap();
+        let first = preview
+            .lines
+            .iter()
+            .find(|line| {
+                line.source == HunkSource::Worktree
+                    && preview.text.lines().nth(line.display_line) == Some("+insert A")
+            })
+            .unwrap();
+        runner
+            .execute(OperationSpec {
+                project: repository.clone(),
+                change: current,
+                kind: OperationKind::RestoreWorktree,
+                target: OperationTarget::Line {
+                    source: first.source,
+                    hunk_fingerprint: first.hunk_fingerprint,
+                    fingerprint: first.fingerprint,
+                },
+                expected_token: preview.token,
+            })
+            .await
+            .unwrap();
+        let content = fs::read_to_string(temp.path().join("tracked.txt")).unwrap();
+        assert!(!content.contains("insert A"));
+        assert!(content.contains("insert B"));
+
+        let current = git::changes(temp.path()).await.unwrap().remove(0);
+        let preview = git::preview_change(temp.path(), &current).await.unwrap();
+        let line = preview.lines.first().unwrap();
+        fs::write(
+            temp.path().join("tracked.txt"),
+            format!("{original}different\n"),
+        )
+        .unwrap();
+        let error = runner
+            .execute(OperationSpec {
+                project: repository,
+                change: current,
+                kind: OperationKind::RestoreWorktree,
+                target: OperationTarget::Line {
+                    source: line.source,
+                    hunk_fingerprint: line.hunk_fingerprint,
+                    fingerprint: line.fingerprint,
+                },
+                expected_token: preview.token,
+            })
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("changed after preview"));
     }
 }

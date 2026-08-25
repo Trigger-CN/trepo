@@ -227,7 +227,7 @@ Changes 页面分为文件树、hunk 列表、diff 检查器和提交对话框�
 
 - 分类展示 staged、unstaged、untracked、conflicted、ignored（按需）。
 - 文件级 stage/unstage/restore/delete/intent-to-add。
-- hunk 级 stage、unstage、discard；必要时支持逐行选择生成 patch。
+- hunk 与 changed-line 级 stage、unstage、discard；行操作使用当前 diff 重建零上下文 patch，执行 `git apply --check --unidiff-zero` 后写入。
 - diff 模式支持 unified、side-by-side、word diff、忽略空白。
 - 二进制、重命名、submodule、mode change、大文件和不可解码文件明确降级。
 - commit 对话框支持 message、amend、signoff 和 GPG/SSH signing；当前 UI 通过独立开关控制后三项，默认不跳过 hooks。
@@ -238,31 +238,29 @@ Changes 页面分为文件树、hunk 列表、diff 检查器和提交对话框�
 
 ### 6.4 Conflict Resolver
 
-- 识别 merge、rebase、cherry-pick、revert 和 apply 冲突状态。
-- 列出 unmerged entries 及 base/ours/theirs stage。
-- 提供 take ours、take theirs、打开配置的 merge tool、标记 resolved。
-- 文本三方合并视图是后续增强；首版不手写复杂语义合并器。
-- 显示 continue/skip/abort，并根据当前 operation state 只提供合法动作。
-- abort、ours/theirs 覆盖等操作必须显示将受影响文件并二次确认。
+- 当前实现识别 merge、rebase、cherry-pick 和 revert 冲突状态，列出 conflicted paths。
+- 提供 take ours、take theirs 和 mark resolved；文本三方合并视图不手写复杂语义。
+- 显示 continue/skip/abort，并由 Git operation 类型限制合法动作；merge 不提供 skip。
+- abort、ours/theirs 覆盖等操作显示风险并二次确认，执行前用 snapshot token 复核 refs、stash、conflicts 和 remotes。
+- 外部 mergetool/editor 需要离开 alternate screen 并接管 PTY，明确归入 M5；M3 后台任务不启动交互程序。
 
 ### 6.5 Branches、Tags 与 Remotes
 
 Branches：
 
-- 本地/远端分组，显示 OID、upstream、ahead/behind、最后提交时间和 worktree 占用。
-- create、switch/checkout、rename、copy、set/unset upstream、merge、rebase、delete。
-- 强制删除、覆盖 checkout、reset 等动作进入危险确认流程。
+- 当前 Repository 页面列出本地 branch OID、upstream、ahead/behind，并以固定表单提供 create、switch、rename、set upstream、merge、rebase 和 delete。
+- 强制 branch 删除和所有 ref 删除进入危险确认流程；执行时在 project 锁内重新核对 repository snapshot token。
 
 Tags：
 
-- lightweight/annotated tag、message、tagger、目标对象和签名状态。
-- create、verify、delete、push；支持选择是否签名。
+- 当前支持 lightweight tag create/delete；annotated/signed tag、verify 和独立 tag push 属于后续增强。
 
 Remotes：
 
-- 查看和编辑 remote URL、push URL、fetch refspec、mirror/prune 设置。
-- fetch、prune、pull、push、force-with-lease。
-- 禁止 UI 默认提供裸 `--force`；需要时从高级选项显式选择，并展示 lease/远端影响。
+- 当前列出 fetch/push URL，并提供 add、set-url、remove、fetch、prune、pull、pull-rebase、push 和 set-upstream。
+- RemoteWrite 确认展示 remote、`branch:branch` refspec、远端到本地 OID range、set-upstream 和 force-with-lease 状态。
+- URL 只在显示层隐藏 `scheme://userinfo@host` 的 userinfo；真实 URL 仍作为单独 argv 传给 Git。
+- UI 不提供裸 `--force`，只提供 `--force-with-lease`；确认后任何 ref/remote 状态变化都会使 snapshot token 失效并拒绝执行。
 
 ### 6.6 其他 Git 工作流
 

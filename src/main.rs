@@ -211,9 +211,66 @@ fn drain_background_messages(app: &mut App) {
     while let Ok(result) = app.commit_rx.try_recv() {
         app.apply_commit(result);
     }
+    while let Ok(result) = app.repository_rx.try_recv() {
+        app.apply_repository_load(result);
+    }
+    while let Ok(result) = app.repository_action_rx.try_recv() {
+        app.apply_repository_action(result);
+    }
 }
 
 fn handle_key(app: &mut App, key: KeyEvent) {
+    if app
+        .repository
+        .as_ref()
+        .is_some_and(|state| state.pending.is_some())
+    {
+        match key.code {
+            KeyCode::Char('y') | KeyCode::Char('Y') => app.confirm_repository_action(true),
+            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                app.confirm_repository_action(false)
+            }
+            _ => {}
+        }
+        return;
+    }
+    if app
+        .repository
+        .as_ref()
+        .is_some_and(|state| state.form.is_some())
+    {
+        match key.code {
+            KeyCode::Esc => app.cancel_repository_overlay(),
+            KeyCode::Enter => app.submit_repository_form(),
+            KeyCode::Backspace => {
+                app.edit_repository_form(repo_tui::app::state::CommitInput::Backspace)
+            }
+            KeyCode::Char(' ') => {
+                app.edit_repository_form(repo_tui::app::state::CommitInput::ToggleAmend)
+            }
+            KeyCode::Down | KeyCode::Tab => app.move_repository_selection(1),
+            KeyCode::Up | KeyCode::BackTab => app.move_repository_selection(-1),
+            KeyCode::Char(character) => {
+                app.edit_repository_form(repo_tui::app::state::CommitInput::Character(character))
+            }
+            _ => {}
+        }
+        return;
+    }
+    if app
+        .repository
+        .as_ref()
+        .is_some_and(|state| state.action_menu)
+    {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('a') => app.cancel_repository_overlay(),
+            KeyCode::Enter => app.select_repository_action(),
+            KeyCode::Down | KeyCode::Char('j') => app.move_repository_selection(1),
+            KeyCode::Up | KeyCode::Char('k') => app.move_repository_selection(-1),
+            _ => {}
+        }
+        return;
+    }
     if app
         .changes
         .as_ref()
@@ -283,6 +340,7 @@ fn handle_key(app: &mut App, key: KeyEvent) {
             KeyCode::Char('/') => app.search_mode = true,
             KeyCode::Char('r') => app.refresh(),
             KeyCode::Char('c') => app.open_changes(),
+            KeyCode::Char('o') => app.open_repository(),
             KeyCode::Enter => app.open_graph(),
             KeyCode::Down | KeyCode::Char('j') => app.move_selection(1),
             KeyCode::Up | KeyCode::Char('k') => app.move_selection(-1),
@@ -295,6 +353,7 @@ fn handle_key(app: &mut App, key: KeyEvent) {
             KeyCode::Char('?') => app.help = true,
             KeyCode::Char('r') => app.reload_graph(),
             KeyCode::Char('c') => app.open_changes(),
+            KeyCode::Char('o') => app.open_repository(),
             KeyCode::Down | KeyCode::Char('j') => app.move_graph_selection(1),
             KeyCode::Up | KeyCode::Char('k') => app.move_graph_selection(-1),
             KeyCode::Char('g') | KeyCode::Home => app.graph_first(),
@@ -306,6 +365,7 @@ fn handle_key(app: &mut App, key: KeyEvent) {
             KeyCode::Char('?') => app.help = true,
             KeyCode::Char('r') => app.reload_changes(),
             KeyCode::Tab => app.toggle_changes_mode(),
+            KeyCode::Char('o') => app.open_repository(),
             KeyCode::Char('s') => app.begin_operation(repo_tui::domain::OperationKind::Stage),
             KeyCode::Char('u') => app.begin_operation(repo_tui::domain::OperationKind::Unstage),
             KeyCode::Char('d') => {
@@ -318,6 +378,17 @@ fn handle_key(app: &mut App, key: KeyEvent) {
             KeyCode::PageDown => app.scroll_preview(12),
             KeyCode::PageUp => app.scroll_preview(-12),
             KeyCode::Char('m') => app.start_commit_editing(),
+            _ => {}
+        },
+        Screen::Repository => match key.code {
+            KeyCode::Esc => app.back(),
+            KeyCode::Char('?') => app.help = true,
+            KeyCode::Char('r') => app.reload_repository(),
+            KeyCode::Char('a') => app.toggle_repository_action_menu(),
+            KeyCode::Tab => app.next_repository_tab(1),
+            KeyCode::BackTab => app.next_repository_tab(-1),
+            KeyCode::Down | KeyCode::Char('j') => app.move_repository_selection(1),
+            KeyCode::Up | KeyCode::Char('k') => app.move_repository_selection(-1),
             _ => {}
         },
     }

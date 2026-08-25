@@ -2,7 +2,7 @@
 
 - 文档状态：Active
 - 设计依据：[DESIGN.md](./DESIGN.md)
-- 当前版本目标：`0.1.0` 只读 MVP
+- 当前版本目标：`0.3.0` M2 + M3
 - 状态更新时间：2026-08-25
 
 ## 1. 路线图原则
@@ -48,16 +48,16 @@ M1 是所有后续里程碑的共同数据与交互基础。M4 可以在 M2 后�
 
 ## 4. 当前交付范围
 
-当前实现已完成 `M0 + M1`，并正在推进 `M2`：
+当前实现已完成 `M0 + M1 + M2 + M3`：
 
-- 从任意子目录识别 Repo 工作区或单 Git 仓库。
-- 通过后台任务并发读取仓库状态，主页展示 project/path、状态、HEAD 和 ahead/behind。
-- 支持工作区搜索、刷新、提交图浏览和 Changes diff 检查。
-- 文件级与 hunk 级 stage、unstage、discard 复用统一锁、前置检查和刷新机制。
-- hunk 请求仅携带 source/fingerprint；执行器持锁后从当前 diff 重建 patch，并在写入前运行 `git apply --check`。
-- 提供 `repo-tui doctor` 非交互诊断，以及 parser、真实 Git 仓库和 TestBackend 测试。
+- 从任意子目录识别 Repo 工作区或单 Git 仓库，并并发扫描状态。
+- Workspace、完整 all-refs Graph、Changes 和 Repository 管理页面均已可用。
+- 文件、hunk 与 changed-line stage/unstage/discard，commit/amend/sign-off/signing 和 stash 全流程。
+- merge/rebase/cherry-pick/revert 冲突状态、ours/theirs/mark-resolved 与合法 continue/skip/abort。
+- branch/tag/remotes 管理，以及 fetch/pull/push/upstream/prune 和 `--force-with-lease`。
+- 所有写操作复用 project lock、index lock、实时 snapshot/token 前置检查、确认和 generation 结果隔离。
 
-M2 仍在进行中；commit/amend、stash 和 conflict/operation state 尚未实现。Git 分支/远端、Repo 批量写操作、命令面板和 PTY takeover 仍属于后续里程碑。
+下一执行点是 M4 Repo 批量工作流；外部 editor/mergetool 和任意受控命令的 PTY takeover 属于 M5。
 
 ## 5. M0：工程基础
 
@@ -214,7 +214,7 @@ cargo run -- doctor .
 
 ## 7. M2：单仓库变更与提交
 
-- 状态：`In progress`
+- 状态：`Done`
 - 优先级：`P0`
 - 目标版本：`0.2.0`
 - 依赖：M1
@@ -222,29 +222,19 @@ cargo run -- doctor .
 范围：
 
 - Changes 文件树和 diff 检查器。
-- 文件级 stage、unstage、restore。
-- hunk 级 stage/unstage/discard，patch 生成和失败保留。
+- 文件、hunk、changed-line stage/unstage/discard。
 - commit/amend/signoff/signing，hook 输出和 message 恢复。
 - stash list/show/push/apply/pop/drop。
-- operation state 和基础冲突列表。
+- operation state、冲突列表、ours/theirs/mark-resolved 和 continue/skip/abort。
 
-当前已完成：
+完成证据：
 
-- Changes 文件列表和 staged/worktree/untracked diff 检查器。
-- 文件级 stage、unstage、restore；unborn branch unstage 保留工作区文件。
-- file/hunk 模式、hunk 导航与高亮，以及 staged/worktree/untracked hunk 来源标识。
-- hunk 级 stage、unstage、discard；操作一个 hunk 不改变同文件其他 hunk。
+- File/Hunk/Line 三态导航和高亮，逐行 patch 从锁内当前 diff 重建。
 - `OperationSpec`、风险等级、per-project 写锁、worktree-aware index lock 检查。
-- 锁内重新读取目标状态、diff token 与 hunk fingerprint；陈旧或不唯一目标拒绝执行。
-- 当前 diff 重建 patch，固定 argv 执行 `git apply --check` 后再 apply。
-- destructive file/hunk discard 确认；失败保留选择与错误，成功后自动刷新。
-- Changes 内 commit/amend/sign-off/signing 对话框；message 作为独立 argv，普通提交要求 staged 内容。
-- commit 使用同 project 锁和 index lock 检查；hook stdout/stderr 合并展示，失败保留 message 并可重试。
-
-仍待完成：
-
-- 逐行 patch 操作。
-- stash 和 conflict/operation state 工作流。
+- diff token、hunk/line fingerprint 和 `git apply --check --unidiff-zero` 拒绝陈旧目标。
+- destructive file/hunk/line discard 确认；失败保留选择与错误，成功自动刷新。
+- commit hook 失败保留 message/选项；stash 和 conflict 操作均有真实临时仓库测试。
+- merge conflict 下 ours/theirs、mark-resolved、continue/abort，以及 cherry-pick skip 已验证。
 
 关键基础设施：
 
@@ -260,24 +250,26 @@ cargo run -- doctor .
 
 ## 8. M3：分支整合与远端
 
-- 状态：`Planned`
+- 状态：`Done`
 - 优先级：`P0`
 - 目标版本：`0.3.0`
 - 依赖：M2
 
 范围：
 
-- branch/tag/remotes 页面和 create/switch/rename/delete。
-- fetch、pull、push、set upstream、prune。
-- merge、rebase、cherry-pick、revert、continue/skip/abort。
-- conflict resolver 与外部 mergetool。
-- `force-with-lease` 预览；裸 `--force` 只在高级确认中出现。
+- Repository 页 Status、Stashes、Branches & Tags、Remotes 四个 tab。
+- branch/tag create/switch/rename/delete，merge/rebase/cherry-pick/revert。
+- fetch、pull/rebase、push、set upstream、prune 和 remote add/set-url/remove。
+- conflict resolver 与合法 continue/skip/abort。
+- remote-write 精确预览和 `force-with-lease`；不提供裸 `--force`。
 
-验收：
+验收证据：
 
-- ahead/behind 到 push 的闭环可完成。
-- merge/rebase 冲突可从任务结果跳转并继续或中止。
-- remote write 显示准确 refspec 和 commit range。
+- 真实临时仓库完成 branch/tag、merge/rebase/cherry-pick/revert 和 operation control 矩阵。
+- workspace-local seed/client/bare remote 完成 fetch/pull/push/upstream/prune 与 remote 管理闭环。
+- remote write 显示准确 `branch:branch` refspec、OID range、upstream 和 lease 状态，URL userinfo 脱敏。
+- repository snapshot token 在锁内拒绝确认后发生的 refs/stash/conflict/remote 状态变化。
+- 外部 mergetool/editor 依赖 M5 PTY takeover，明确不在 M3 后台任务中启动。
 
 ## 9. M4：Repo 批量工作流
 
@@ -382,12 +374,13 @@ cargo run -- doctor .
 | M1 工作区发现 | Done | 单 Git + fake Repo client 端到端通过 |
 | M1 状态扫描 | Done | porcelain fixture + 真实 Git + 缺失项目隔离通过 |
 | M1 Workspace UI | Done | 80x24/120x40 渲染和真实导航通过 |
-| M2 hunk 操作 | Done | stage/unstage/discard 隔离、stale 拒绝与真实 PTY 通过 |
-| M2 commit/amend | Done | sign-off、amend、hook 输出恢复与真实 Git 测试通过 |
-| M2 stash/conflict | Planned | M2 后续切片 |
-| M3-M7 | Planned | 依赖 M2 完成 |
+| M2 Changes/commit | Done | file/hunk/line、hook failure、stale/index lock 和真实 Git 通过 |
+| M2 stash/conflict | Done | stash 全流程、ours/theirs/resolved、continue/skip/abort 通过 |
+| M3 refs/integration | Done | branch/tag、merge/rebase/cherry-pick/revert 真实矩阵通过 |
+| M3 remotes | Done | bare remote fetch/pull/push/upstream/prune 与 remote 管理通过 |
+| M4-M7 | Planned | 下一步从 M4 Repo 批量工作流开始 |
 
-M0/M1 与 M2 第一切片最终验证（Rust 1.98、Git 2.43.0、Repo launcher 2.54）：
+M0-M3 最终验证（Rust 1.98、Git 2.43.0、Repo launcher 2.54）：
 
 ```bash
 cargo fmt --all -- --check
@@ -399,15 +392,13 @@ cargo build
 
 已验证边界：
 
-- 当前 Graph 加载所有本地分支、远端分支、tag、HEAD 和每条 stash 的完整可达历史；大型仓库的流式虚拟化仍属于后续优化。
-- 当前 Changes 已支持文件与 hunk 级 stage/unstage/discard，以及 commit/amend/sign-off/signing；stash 操作和冲突工作流尚未完成。
-- 当前无任务中心、Repo sync/upload、命令面板或 PTY takeover。
-- Repo 端到端测试使用本地 fake `repo list/version` 和真实 Git project，不依赖公网；真实大型 Repo client 的性能基准属于 M7。
+- Graph 加载所有本地分支、远端分支、tag、HEAD 和每条 stash 的完整可达历史；大型仓库流式虚拟化仍是后续优化。
+- Changes、commit、stash、冲突、refs/integration 和 remotes 均使用统一锁、snapshot/token、确认和 generation 机制。
+- 当前无任务中心、Repo sync/upload、命令面板或 PTY takeover；外部 editor/mergetool 明确依赖 M5。
+- Repo 端到端测试使用本地 fake `repo list/version` 和真实 Git project，不依赖公网；大型 Repo client 性能基准属于 M7。
 
 ## 15. 下一执行点
 
-1. 增加 stash 操作与基础 conflict/operation state 工作流，完成 M2 验收。
-2. 为大型 all-refs graph 设计保持全局拓扑和 ref 可见性的流式虚拟化。
-3. M2 完成后再进入 M3，不提前实现远端和 Repo 批量写操作。
+1. 实现 M4 项目多选、workspace exclusive lock 和 Repo 批量任务模型。
+2. 实现 `repo sync/start/checkout/abandon/prune/rebase` 的逐项目进度、取消和失败重试。
 3. 为大型 all-refs graph 设计保持全局拓扑和 ref 可见性的流式虚拟化。
-4. M2 完成后再进入 M3，不提前实现远端和 Repo 批量写操作。

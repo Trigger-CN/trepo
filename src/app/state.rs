@@ -3,10 +3,12 @@ use std::path::PathBuf;
 use tokio::sync::mpsc;
 
 use crate::adapters::git;
+use crate::app::repository::{choices, form_for, RepositoryChoice, RepositoryForm, RepositoryTab};
 use crate::domain::{
-    ChangeEntry, ChangeHunk, ChangePreview, Commit, CommitOutcome, CommitSpec, HunkSource,
-    OperationKind, OperationOutcome, OperationSpec, OperationTarget, Project, ProjectId,
-    ProjectSnapshot, RiskLevel, Workspace, WorkspaceSummary,
+    ChangeEntry, ChangePreview, Commit, CommitOutcome, CommitSpec, HunkSource, OperationKind,
+    OperationOutcome, OperationSpec, OperationTarget, Project, ProjectId, ProjectSnapshot,
+    RepositoryAction, RepositoryActionOutcome, RepositoryActionSpec, RepositorySnapshot, RiskLevel,
+    Workspace, WorkspaceSummary,
 };
 use crate::services::operations::OperationRunner;
 use crate::services::scanner::{self, ScanResult};
@@ -16,6 +18,7 @@ pub enum Screen {
     Workspace,
     Graph,
     Changes,
+    Repository,
 }
 
 #[derive(Debug)]
@@ -66,6 +69,41 @@ pub struct CommitResult {
     pub commit_generation: u64,
     pub result: anyhow::Result<CommitOutcome>,
 }
+
+#[derive(Debug)]
+pub struct RepositoryLoadResult {
+    pub project_id: ProjectId,
+    pub generation: u64,
+    pub result: anyhow::Result<RepositorySnapshot>,
+}
+
+#[derive(Debug)]
+pub struct RepositoryActionResult {
+    pub project_id: ProjectId,
+    pub generation: u64,
+    pub action_generation: u64,
+    pub result: anyhow::Result<RepositoryActionOutcome>,
+}
+
+#[derive(Debug)]
+pub struct RepositoryState {
+    pub project: Project,
+    pub return_screen: Screen,
+    pub snapshot: Option<RepositorySnapshot>,
+    pub tab: RepositoryTab,
+    pub selected: usize,
+    pub loading: bool,
+    pub error: Option<String>,
+    pub generation: u64,
+    pub action_menu: bool,
+    pub action_selected: usize,
+    pub form: Option<RepositoryForm>,
+    pub pending: Option<RepositoryAction>,
+    pub action_running: bool,
+    pub action_generation: u64,
+    pub message: Option<(bool, String)>,
+    pub detail: Option<String>,
+}
 #[derive(Debug, Clone, Copy)]
 pub enum CommitInput {
     Character(char),
@@ -79,6 +117,7 @@ pub enum CommitInput {
 pub enum ChangesMode {
     File,
     Hunk,
+    Line,
 }
 
 #[derive(Debug, Clone)]
@@ -98,6 +137,8 @@ pub struct ChangesState {
     pub mode: ChangesMode,
     pub selected_hunk: usize,
     pub selected_hunk_identity: Option<(HunkSource, u64)>,
+    pub selected_line: usize,
+    pub selected_line_identity: Option<(HunkSource, u64, u64)>,
     pub loading: bool,
     pub error: Option<String>,
     pub generation: u64,
@@ -132,6 +173,7 @@ pub struct App {
     pub scanning: usize,
     pub graph: Option<GraphState>,
     pub changes: Option<ChangesState>,
+    pub repository: Option<RepositoryState>,
     pub should_quit: bool,
     scan_tx: mpsc::UnboundedSender<ScanResult>,
     pub scan_rx: mpsc::UnboundedReceiver<ScanResult>,
@@ -145,6 +187,10 @@ pub struct App {
     pub operation_rx: mpsc::UnboundedReceiver<OperationResult>,
     pub commit_tx: mpsc::UnboundedSender<CommitResult>,
     pub commit_rx: mpsc::UnboundedReceiver<CommitResult>,
+    repository_tx: mpsc::UnboundedSender<RepositoryLoadResult>,
+    pub repository_rx: mpsc::UnboundedReceiver<RepositoryLoadResult>,
+    repository_action_tx: mpsc::UnboundedSender<RepositoryActionResult>,
+    pub repository_action_rx: mpsc::UnboundedReceiver<RepositoryActionResult>,
     operation_runner: OperationRunner,
     concurrency: usize,
 }
@@ -156,6 +202,8 @@ impl App {
         let (operation_tx, operation_rx) = mpsc::unbounded_channel();
         let (preview_tx, preview_rx) = mpsc::unbounded_channel();
         let (commit_tx, commit_rx) = mpsc::unbounded_channel();
+        let (repository_tx, repository_rx) = mpsc::unbounded_channel();
+        let (repository_action_tx, repository_action_rx) = mpsc::unbounded_channel();
         let projects = workspace
             .projects
             .iter()
@@ -174,6 +222,7 @@ impl App {
             scanning: 0,
             graph: None,
             changes: None,
+            repository: None,
             should_quit: false,
             scan_tx,
             scan_rx,
@@ -187,6 +236,10 @@ impl App {
             operation_rx,
             commit_tx,
             commit_rx,
+            repository_tx,
+            repository_rx,
+            repository_action_tx,
+            repository_action_rx,
             operation_runner: OperationRunner,
             concurrency: concurrency.max(1),
         }
@@ -355,6 +408,7 @@ impl App {
             Screen::Workspace => self.selected_project().map(|value| value.project.clone()),
             Screen::Graph => self.graph.as_ref().map(|graph| graph.project.clone()),
             Screen::Changes => self.changes.as_ref().map(|changes| changes.project.clone()),
+            Screen::Repository => self.repository.as_ref().map(|state| state.project.clone()),
         };
         if let Some(project) = project {
             self.screen = Screen::Changes;
@@ -384,6 +438,8 @@ impl App {
             mode: ChangesMode::File,
             selected_hunk: 0,
             selected_hunk_identity: None,
+            selected_line: 0,
+            selected_line_identity: None,
             loading: true,
             error: None,
             preview_loading: false,
@@ -448,17 +504,32 @@ impl App {
         if changes.operation_running {
             return;
         }
-        if changes.mode == ChangesMode::Hunk {
-            let hunk_count = changes
+        if changes.mode != ChangesMode::File {
+            let item_count = changes
                 .preview
                 .as_ref()
-                .map_or(0, |preview| preview.hunks.len());
-            if hunk_count == 0 {
+                .map_or(0, |preview| match changes.mode {
+                    ChangesMode::Hunk => preview.hunks.len(),
+                    ChangesMode::Line => preview.lines.len(),
+                    ChangesMode::File => 0,
+                });
+            if item_count == 0 {
                 return;
             }
-            changes.selected_hunk =
-                (changes.selected_hunk as isize + delta).clamp(0, hunk_count as isize - 1) as usize;
-            sync_hunk_selection(changes);
+            match changes.mode {
+                ChangesMode::Hunk => {
+                    changes.selected_hunk = (changes.selected_hunk as isize + delta)
+                        .clamp(0, item_count as isize - 1)
+                        as usize
+                }
+                ChangesMode::Line => {
+                    changes.selected_line = (changes.selected_line as isize + delta)
+                        .clamp(0, item_count as isize - 1)
+                        as usize
+                }
+                ChangesMode::File => unreachable!(),
+            }
+            sync_preview_selection(changes);
             changes.confirmation = None;
             changes.message = None;
             return;
@@ -477,9 +548,13 @@ impl App {
 
     pub fn changes_first(&mut self) {
         if let Some(changes) = self.changes.as_mut() {
-            if changes.mode == ChangesMode::Hunk {
-                changes.selected_hunk = 0;
-                sync_hunk_selection(changes);
+            if changes.mode != ChangesMode::File {
+                match changes.mode {
+                    ChangesMode::Hunk => changes.selected_hunk = 0,
+                    ChangesMode::Line => changes.selected_line = 0,
+                    ChangesMode::File => unreachable!(),
+                }
+                sync_preview_selection(changes);
                 changes.confirmation = None;
                 changes.message = None;
                 return;
@@ -495,12 +570,23 @@ impl App {
 
     pub fn changes_last(&mut self) {
         if let Some(changes) = self.changes.as_mut() {
-            if changes.mode == ChangesMode::Hunk {
-                changes.selected_hunk = changes
-                    .preview
-                    .as_ref()
-                    .map_or(0, |preview| preview.hunks.len().saturating_sub(1));
-                sync_hunk_selection(changes);
+            if changes.mode != ChangesMode::File {
+                match changes.mode {
+                    ChangesMode::Hunk => {
+                        changes.selected_hunk = changes
+                            .preview
+                            .as_ref()
+                            .map_or(0, |preview| preview.hunks.len().saturating_sub(1));
+                    }
+                    ChangesMode::Line => {
+                        changes.selected_line = changes
+                            .preview
+                            .as_ref()
+                            .map_or(0, |preview| preview.lines.len().saturating_sub(1));
+                    }
+                    ChangesMode::File => unreachable!(),
+                }
+                sync_preview_selection(changes);
                 changes.confirmation = None;
                 changes.message = None;
                 return;
@@ -538,9 +624,27 @@ impl App {
                 changes.selected_hunk = changes
                     .selected_hunk
                     .min(preview.hunks.len().saturating_sub(1));
-                sync_hunk_selection(changes);
+                sync_preview_selection(changes);
             }
             ChangesMode::Hunk => {
+                let Some(preview) = changes.preview.as_ref() else {
+                    return;
+                };
+                if preview.lines.is_empty() {
+                    changes.mode = ChangesMode::File;
+                    changes.message = Some((
+                        true,
+                        "No selectable changed lines are available for this file".to_owned(),
+                    ));
+                } else {
+                    changes.mode = ChangesMode::Line;
+                    changes.selected_line = changes
+                        .selected_line
+                        .min(preview.lines.len().saturating_sub(1));
+                    sync_preview_selection(changes);
+                }
+            }
+            ChangesMode::Line => {
                 changes.mode = ChangesMode::File;
                 changes.confirmation = None;
                 changes.message = None;
@@ -601,7 +705,7 @@ impl App {
         changes.preview_loading = false;
         match result.result {
             Ok(preview) => {
-                let selected = changes
+                changes.selected_hunk = changes
                     .selected_hunk_identity
                     .and_then(|identity| {
                         preview
@@ -614,16 +718,29 @@ impl App {
                             .selected_hunk
                             .min(preview.hunks.len().saturating_sub(1))
                     });
-                changes.selected_hunk = selected;
-                if changes.mode == ChangesMode::Hunk && preview.hunks.is_empty() {
+                changes.selected_line = changes
+                    .selected_line_identity
+                    .and_then(|identity| {
+                        preview.lines.iter().position(|line| {
+                            (line.source, line.hunk_fingerprint, line.fingerprint) == identity
+                        })
+                    })
+                    .unwrap_or_else(|| {
+                        changes
+                            .selected_line
+                            .min(preview.lines.len().saturating_sub(1))
+                    });
+                if (changes.mode == ChangesMode::Hunk && preview.hunks.is_empty())
+                    || (changes.mode == ChangesMode::Line && preview.lines.is_empty())
+                {
                     changes.mode = ChangesMode::File;
                     changes.message = Some((
                         true,
-                        "No selectable textual hunks are available for this file".to_owned(),
+                        "The selected diff scope is no longer available".to_owned(),
                     ));
                 }
                 changes.preview = Some(preview);
-                sync_hunk_selection(changes);
+                sync_preview_selection(changes);
             }
             Err(error) => changes.message = Some((true, error.to_string())),
         }
@@ -679,8 +796,23 @@ impl App {
                         source: hunk.source,
                         fingerprint: hunk.fingerprint,
                     },
-                    hunk_operation_applicable(kind, hunk, &change),
+                    hunk_operation_applicable(kind, hunk.source, &change),
                     "hunk",
+                )
+            }
+            ChangesMode::Line => {
+                let Some(line) = preview.lines.get(changes.selected_line) else {
+                    changes.message = Some((true, "Selected line is unavailable".to_owned()));
+                    return;
+                };
+                (
+                    OperationTarget::Line {
+                        source: line.source,
+                        hunk_fingerprint: line.hunk_fingerprint,
+                        fingerprint: line.fingerprint,
+                    },
+                    hunk_operation_applicable(kind, line.source, &change),
+                    "line",
                 )
             }
         };
@@ -880,8 +1012,330 @@ impl App {
         }
     }
 
+    pub fn open_repository(&mut self) {
+        let return_screen = self.screen;
+        let project = match self.screen {
+            Screen::Workspace => self.selected_project().map(|value| value.project.clone()),
+            Screen::Graph => self.graph.as_ref().map(|state| state.project.clone()),
+            Screen::Changes => self.changes.as_ref().map(|state| state.project.clone()),
+            Screen::Repository => self.repository.as_ref().map(|state| state.project.clone()),
+        };
+        if let Some(project) = project {
+            self.screen = Screen::Repository;
+            self.load_repository(project, return_screen);
+        }
+    }
+
+    pub fn reload_repository(&mut self) {
+        if let Some(state) = self.repository.as_ref() {
+            self.load_repository(state.project.clone(), state.return_screen);
+        }
+    }
+
+    fn load_repository(&mut self, project: Project, return_screen: Screen) {
+        let generation = self
+            .repository
+            .as_ref()
+            .filter(|state| state.project.id == project.id)
+            .map_or(1, |state| state.generation.wrapping_add(1));
+        let tab = self
+            .repository
+            .as_ref()
+            .map_or(RepositoryTab::Status, |state| state.tab);
+        self.repository = Some(RepositoryState {
+            project: project.clone(),
+            return_screen,
+            snapshot: None,
+            tab,
+            selected: 0,
+            loading: true,
+            error: None,
+            generation,
+            action_menu: false,
+            action_selected: 0,
+            form: None,
+            pending: None,
+            action_running: false,
+            action_generation: 0,
+            message: None,
+            detail: None,
+        });
+        let sender = self.repository_tx.clone();
+        tokio::spawn(async move {
+            let result = git::repository_snapshot(&project.path).await;
+            let _ = sender.send(RepositoryLoadResult {
+                project_id: project.id,
+                generation,
+                result,
+            });
+        });
+    }
+
+    pub fn apply_repository_load(&mut self, result: RepositoryLoadResult) {
+        let Some(state) = self.repository.as_mut() else {
+            return;
+        };
+        if state.project.id != result.project_id || state.generation != result.generation {
+            return;
+        }
+        state.loading = false;
+        match result.result {
+            Ok(snapshot) => state.snapshot = Some(snapshot),
+            Err(error) => state.error = Some(error.to_string()),
+        }
+        clamp_repository_selection(state);
+    }
+
+    pub fn next_repository_tab(&mut self, delta: isize) {
+        let Some(state) = self.repository.as_mut() else {
+            return;
+        };
+        if state.action_running || state.form.is_some() || state.action_menu {
+            return;
+        }
+        let current = RepositoryTab::ALL
+            .iter()
+            .position(|tab| *tab == state.tab)
+            .unwrap_or(0);
+        let next =
+            (current as isize + delta).rem_euclid(RepositoryTab::ALL.len() as isize) as usize;
+        state.tab = RepositoryTab::ALL[next];
+        state.selected = 0;
+        state.detail = None;
+    }
+
+    pub fn move_repository_selection(&mut self, delta: isize) {
+        let Some(state) = self.repository.as_mut() else {
+            return;
+        };
+        if let Some(form) = state.form.as_mut() {
+            let len = form.fields.len();
+            if len > 0 {
+                form.selected =
+                    (form.selected as isize + delta).clamp(0, len as isize - 1) as usize;
+            }
+        } else if state.action_menu {
+            let len = choices(state.tab).len();
+            if len > 0 {
+                state.action_selected =
+                    (state.action_selected as isize + delta).clamp(0, len as isize - 1) as usize;
+            }
+        } else {
+            let len = repository_item_count(state);
+            if len > 0 {
+                state.selected =
+                    (state.selected as isize + delta).clamp(0, len as isize - 1) as usize;
+            }
+        }
+    }
+
+    pub fn toggle_repository_action_menu(&mut self) {
+        let Some(state) = self.repository.as_mut() else {
+            return;
+        };
+        if state.action_running || state.loading || state.snapshot.is_none() {
+            return;
+        }
+        state.action_menu = !state.action_menu;
+        state.action_selected = 0;
+        state.form = None;
+        state.message = None;
+    }
+
+    pub fn select_repository_action(&mut self) {
+        let Some(state) = self.repository.as_mut() else {
+            return;
+        };
+        let Some(snapshot) = state.snapshot.as_ref() else {
+            return;
+        };
+        let Some(choice) = choices(state.tab).get(state.action_selected).copied() else {
+            return;
+        };
+        if matches!(
+            choice,
+            RepositoryChoice::Continue | RepositoryChoice::Skip | RepositoryChoice::Abort
+        ) {
+            let Some(operation) = snapshot.operation else {
+                state.message = Some((true, "No Git operation is active".to_owned()));
+                return;
+            };
+            let action = match choice {
+                RepositoryChoice::Continue => RepositoryAction::Continue { operation },
+                RepositoryChoice::Skip => RepositoryAction::Skip { operation },
+                RepositoryChoice::Abort => RepositoryAction::Abort { operation },
+                _ => unreachable!(),
+            };
+            state.action_menu = false;
+            self.begin_repository_action(action);
+            return;
+        }
+        match form_for(choice, snapshot, state.selected) {
+            Ok(Some(form)) => {
+                state.form = Some(form);
+                state.action_menu = false;
+            }
+            Ok(None) => {}
+            Err(error) => state.message = Some((true, error.to_string())),
+        }
+    }
+
+    pub fn edit_repository_form(&mut self, input: CommitInput) {
+        let Some(form) = self
+            .repository
+            .as_mut()
+            .and_then(|state| state.form.as_mut())
+        else {
+            return;
+        };
+        match input {
+            CommitInput::Character(value) => form.edit_char(value),
+            CommitInput::Backspace => form.backspace(),
+            CommitInput::ToggleAmend | CommitInput::ToggleSignoff | CommitInput::ToggleSigning => {
+                form.toggle()
+            }
+        }
+    }
+
+    pub fn cancel_repository_overlay(&mut self) {
+        if let Some(state) = self.repository.as_mut() {
+            if state.pending.take().is_some() {
+                return;
+            }
+            if state.form.take().is_some() {
+                return;
+            }
+            state.action_menu = false;
+        }
+    }
+
+    pub fn submit_repository_form(&mut self) {
+        let action = self
+            .repository
+            .as_ref()
+            .and_then(|state| state.form.as_ref())
+            .map(RepositoryForm::action);
+        match action {
+            Some(Ok(action)) => {
+                if let Some(state) = self.repository.as_mut() {
+                    state.form = None;
+                }
+                self.begin_repository_action(action);
+            }
+            Some(Err(error)) => {
+                if let Some(state) = self.repository.as_mut() {
+                    state.message = Some((true, error.to_string()));
+                }
+            }
+            None => {}
+        }
+    }
+
+    fn begin_repository_action(&mut self, action: RepositoryAction) {
+        let risk = action.risk();
+        if matches!(risk, RiskLevel::Destructive | RiskLevel::RemoteWrite) {
+            if let Some(state) = self.repository.as_mut() {
+                state.pending = Some(action);
+            }
+        } else {
+            self.spawn_repository_action(action);
+        }
+    }
+
+    pub fn confirm_repository_action(&mut self, accepted: bool) {
+        let action = self
+            .repository
+            .as_mut()
+            .and_then(|state| state.pending.take());
+        if accepted {
+            if let Some(action) = action {
+                self.spawn_repository_action(action);
+            }
+        }
+    }
+
+    fn spawn_repository_action(&mut self, action: RepositoryAction) {
+        let Some(state) = self.repository.as_mut() else {
+            return;
+        };
+        state.action_running = true;
+        state.message = None;
+        state.detail = None;
+        state.action_generation = state.action_generation.wrapping_add(1);
+        let action_generation = state.action_generation;
+        let generation = state.generation;
+        let project = state.project.clone();
+        let project_id = project.id.clone();
+        let sender = self.repository_action_tx.clone();
+        let runner = self.operation_runner.clone();
+        let expected_token = state.snapshot.as_ref().map_or(0, |snapshot| snapshot.token);
+        tokio::spawn(async move {
+            let result = runner
+                .execute_repository_action(RepositoryActionSpec {
+                    project,
+                    action,
+                    expected_token,
+                })
+                .await;
+            let _ = sender.send(RepositoryActionResult {
+                project_id,
+                generation,
+                action_generation,
+                result,
+            });
+        });
+    }
+
+    pub fn apply_repository_action(&mut self, result: RepositoryActionResult) {
+        let Some(state) = self.repository.as_ref() else {
+            return;
+        };
+        if state.project.id != result.project_id
+            || state.generation != result.generation
+            || state.action_generation != result.action_generation
+        {
+            return;
+        }
+        match result.result {
+            Ok(outcome) => {
+                let project = state.project.clone();
+                let return_screen = state.return_screen;
+                let detail = outcome.detail;
+                self.refresh();
+                self.load_repository(project, return_screen);
+                if let Some(state) = self.repository.as_mut() {
+                    state.message = Some((false, outcome.message));
+                    state.detail = detail;
+                }
+            }
+            Err(error) => {
+                if let Some(state) = self.repository.as_mut() {
+                    state.action_running = false;
+                    state.message = Some((true, error.to_string()));
+                }
+            }
+        }
+    }
     pub fn back(&mut self) {
         match self.screen {
+            Screen::Repository => {
+                if let Some(state) = self.repository.as_mut() {
+                    if state.pending.take().is_some()
+                        || state.form.take().is_some()
+                        || state.action_menu
+                    {
+                        state.action_menu = false;
+                        return;
+                    }
+                    if state.action_running {
+                        state.message = Some((true, "Wait for the operation to finish".to_owned()));
+                        return;
+                    }
+                    self.screen = state.return_screen;
+                } else {
+                    self.screen = Screen::Workspace;
+                }
+            }
             Screen::Graph => self.screen = Screen::Workspace,
             Screen::Changes => {
                 if let Some(changes) = self.changes.as_mut() {
@@ -932,28 +1386,68 @@ impl App {
             .min(self.filtered_indices().len().saturating_sub(1));
     }
 }
-fn reset_hunk_selection(changes: &mut ChangesState) {
-    changes.selected_hunk = 0;
-    changes.selected_hunk_identity = None;
-}
 
-fn sync_hunk_selection(changes: &mut ChangesState) {
-    let Some(hunk) = changes
-        .preview
-        .as_ref()
-        .and_then(|preview| preview.hunks.get(changes.selected_hunk))
-    else {
-        changes.selected_hunk_identity = None;
-        return;
+fn repository_item_count(state: &RepositoryState) -> usize {
+    let Some(snapshot) = state.snapshot.as_ref() else {
+        return 0;
     };
-    changes.selected_hunk_identity = Some((hunk.source, hunk.fingerprint));
-    if changes.mode == ChangesMode::Hunk {
-        changes.preview_scroll = hunk.display_start.saturating_sub(1);
+    match state.tab {
+        RepositoryTab::Status => snapshot.conflicts.len().max(1),
+        RepositoryTab::Stashes => snapshot.stashes.len(),
+        RepositoryTab::Refs => snapshot.branches.len() + snapshot.tags.len(),
+        RepositoryTab::Remotes => snapshot.remotes.len(),
     }
 }
 
-fn hunk_operation_applicable(kind: OperationKind, hunk: &ChangeHunk, change: &ChangeEntry) -> bool {
-    match (hunk.source, kind) {
+fn clamp_repository_selection(state: &mut RepositoryState) {
+    state.selected = state
+        .selected
+        .min(repository_item_count(state).saturating_sub(1));
+}
+fn reset_hunk_selection(changes: &mut ChangesState) {
+    changes.selected_hunk = 0;
+    changes.selected_hunk_identity = None;
+    changes.selected_line = 0;
+    changes.selected_line_identity = None;
+}
+
+fn sync_preview_selection(changes: &mut ChangesState) {
+    match changes.mode {
+        ChangesMode::File => {}
+        ChangesMode::Hunk => {
+            let Some(hunk) = changes
+                .preview
+                .as_ref()
+                .and_then(|preview| preview.hunks.get(changes.selected_hunk))
+            else {
+                changes.selected_hunk_identity = None;
+                return;
+            };
+            changes.selected_hunk_identity = Some((hunk.source, hunk.fingerprint));
+            changes.preview_scroll = hunk.display_start.saturating_sub(1);
+        }
+        ChangesMode::Line => {
+            let Some(line) = changes
+                .preview
+                .as_ref()
+                .and_then(|preview| preview.lines.get(changes.selected_line))
+            else {
+                changes.selected_line_identity = None;
+                return;
+            };
+            changes.selected_line_identity =
+                Some((line.source, line.hunk_fingerprint, line.fingerprint));
+            changes.preview_scroll = line.display_line.saturating_sub(1);
+        }
+    }
+}
+
+fn hunk_operation_applicable(
+    kind: OperationKind,
+    source: HunkSource,
+    change: &ChangeEntry,
+) -> bool {
+    match (source, kind) {
         (HunkSource::Staged, OperationKind::Unstage) => change.index.is_some(),
         (HunkSource::Worktree, OperationKind::Stage) => {
             change.worktree.is_some() || change.conflicted
@@ -969,7 +1463,7 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
-    use crate::domain::{WorkspaceKind, WorktreeSummary};
+    use crate::domain::{ChangeHunk, WorkspaceKind, WorktreeSummary};
 
     fn project(name: &str) -> Project {
         let path = PathBuf::from(format!("/tmp/{name}"));
@@ -1035,6 +1529,8 @@ mod tests {
             mode: ChangesMode::File,
             selected_hunk: 0,
             selected_hunk_identity: None,
+            selected_line: 0,
+            selected_line_identity: None,
             loading: true,
             error: None,
             generation: 2,
@@ -1071,6 +1567,7 @@ mod tests {
                 token: 1,
                 truncated: false,
                 hunks: Vec::new(),
+                lines: Vec::new(),
             }),
         });
         assert!(app.changes.as_ref().unwrap().preview.is_none());
@@ -1102,6 +1599,8 @@ mod tests {
             mode: ChangesMode::File,
             selected_hunk: 0,
             selected_hunk_identity: None,
+            selected_line: 0,
+            selected_line_identity: None,
             loading: false,
             error: None,
             generation: 4,
@@ -1125,6 +1624,7 @@ mod tests {
                         fingerprint: 22,
                     },
                 ],
+                lines: Vec::new(),
             }),
             preview_path: Some(entry.path.clone()),
             preview_loading: false,
