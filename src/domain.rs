@@ -309,6 +309,19 @@ pub struct OperationOutcome {
     pub message: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct CommitSpec {
+    pub message: String,
+    pub amend: bool,
+    pub signoff: bool,
+    pub signing: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct CommitOutcome {
+    pub oid: String,
+    pub message: String,
+}
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CommitRefKind {
     Head,

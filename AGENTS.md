@@ -25,9 +25,10 @@
 - 包含本地分支、远端分支、tag、HEAD 与每条 stash 的全引用 commit graph。
 - staged、worktree、untracked diff 预览。
 - 文件与 hunk 级 stage、unstage、discard。
+- commit/amend、sign-off、signing 与 hook 失败消息恢复。
 - 项目写锁、index lock 检查、陈旧状态拒绝和破坏性确认。
 
-当前仍在推进 M2，commit/amend、stash 操作和 conflict/operation state 尚未完成。不要跳过 M2 直接实现 M3 的分支/远端写操作或 Repo 批量写操作，除非任务明确改变路线图。
+当前仍在推进 M2，stash 操作和 conflict/operation state 尚未完成。任务已明确要求完成 M2/M3，因此后续应先闭合 M2，再实现 M3 的分支、整合与远端工作流。
 
 ## 3. 实际代码结构
 

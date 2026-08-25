@@ -184,13 +184,14 @@ cargo run -- doctor .
 - 使用显式 NUL 字段协议读取 `git log --topo-order --all` 的完整可达历史。
 - 独立解析本地分支、远端分支、annotated/lightweight tag、HEAD 和每条 stash reflog entry。
 - 展示不限四路的多色 topology lane、OID、refs、subject、author 和时间。
+- 分支从共同祖先分出、merge parent 展开以及重新汇入共同祖先时，显示方向明确的连接线。
 - HEAD/local/remote/tag/stash 使用独立颜色 badge，右侧检查器保持相同语义配色。
-- `j/k` 导航，`r` 重载，`Esc` 返回 Workspace。
 - 空仓库、unborn HEAD 和 log 错误可恢复。
 
 验收：
 
 - parser 覆盖普通 commit、merge commit、全部 ref 类型、stash 和含换行 message。
+- topology fixture 覆盖无 merge commit 的分支分叉、双亲 merge、octopus merge 和多 lane 连接。
 - 进入/返回不会丢失 Workspace selection 和搜索。
 - graph 加载不阻塞 event loop。
 
@@ -237,11 +238,12 @@ cargo run -- doctor .
 - 锁内重新读取目标状态、diff token 与 hunk fingerprint；陈旧或不唯一目标拒绝执行。
 - 当前 diff 重建 patch，固定 argv 执行 `git apply --check` 后再 apply。
 - destructive file/hunk discard 确认；失败保留选择与错误，成功后自动刷新。
+- Changes 内 commit/amend/sign-off/signing 对话框；message 作为独立 argv，普通提交要求 staged 内容。
+- commit 使用同 project 锁和 index lock 检查；hook stdout/stderr 合并展示，失败保留 message 并可重试。
 
 仍待完成：
 
 - 逐行 patch 操作。
-- commit/amend/signing 与 hook message 恢复。
 - stash 和 conflict/operation state 工作流。
 
 关键基础设施：
@@ -380,11 +382,9 @@ cargo run -- doctor .
 | M1 工作区发现 | Done | 单 Git + fake Repo client 端到端通过 |
 | M1 状态扫描 | Done | porcelain fixture + 真实 Git + 缺失项目隔离通过 |
 | M1 Workspace UI | Done | 80x24/120x40 渲染和真实导航通过 |
-| M1 Commit graph | Done | all refs、stash、6-lane 拓扑、类型配色与真实复杂仓库通过 |
-| M2 Changes/diff | Done | parser、真实 Git preview、80x24/120x40 UI 与 PTY 通过 |
-| M2 安全文件操作 | Done | stage/unstage/restore、stale token、index lock 与 destructive confirm 通过 |
 | M2 hunk 操作 | Done | stage/unstage/discard 隔离、stale 拒绝与真实 PTY 通过 |
-| M2 commit/stash/conflict | Planned | M2 后续切片 |
+| M2 commit/amend | Done | sign-off、amend、hook 输出恢复与真实 Git 测试通过 |
+| M2 stash/conflict | Planned | M2 后续切片 |
 | M3-M7 | Planned | 依赖 M2 完成 |
 
 M0/M1 与 M2 第一切片最终验证（Rust 1.98、Git 2.43.0、Repo launcher 2.54）：
@@ -400,13 +400,14 @@ cargo build
 已验证边界：
 
 - 当前 Graph 加载所有本地分支、远端分支、tag、HEAD 和每条 stash 的完整可达历史；大型仓库的流式虚拟化仍属于后续优化。
-- 当前 Changes 已支持文件与 hunk 级 stage/unstage/discard；commit、stash 操作和冲突工作流尚未完成。
+- 当前 Changes 已支持文件与 hunk 级 stage/unstage/discard，以及 commit/amend/sign-off/signing；stash 操作和冲突工作流尚未完成。
 - 当前无任务中心、Repo sync/upload、命令面板或 PTY takeover。
 - Repo 端到端测试使用本地 fake `repo list/version` 和真实 Git project，不依赖公网；真实大型 Repo client 的性能基准属于 M7。
 
 ## 15. 下一执行点
 
-1. 实现 commit/amend/signoff/signing 与 hook 失败时 message 恢复。
-2. 增加 stash 操作与基础 conflict/operation state 工作流，完成 M2 验收。
+1. 增加 stash 操作与基础 conflict/operation state 工作流，完成 M2 验收。
+2. 为大型 all-refs graph 设计保持全局拓扑和 ref 可见性的流式虚拟化。
+3. M2 完成后再进入 M3，不提前实现远端和 Repo 批量写操作。
 3. 为大型 all-refs graph 设计保持全局拓扑和 ref 可见性的流式虚拟化。
 4. M2 完成后再进入 M3，不提前实现远端和 Repo 批量写操作。

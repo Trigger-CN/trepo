@@ -7,7 +7,8 @@ use tokio::sync::Mutex;
 
 use crate::adapters::git;
 use crate::domain::{
-    ChangeEntry, HunkSource, OperationKind, OperationOutcome, OperationSpec, OperationTarget,
+    ChangeEntry, CommitOutcome, CommitSpec, HunkSource, OperationKind, OperationOutcome,
+    OperationSpec, OperationTarget, Project,
 };
 
 #[derive(Debug, Default, Clone)]
@@ -77,6 +78,32 @@ impl OperationRunner {
                 suffix,
                 current.path.display()
             ),
+        })
+    }
+
+    pub async fn execute_commit(
+        &self,
+        project: Project,
+        spec: CommitSpec,
+    ) -> Result<CommitOutcome> {
+        let lock = project_lock(project.path.clone());
+        let _guard = lock.lock().await;
+        let root = &project.path;
+        if git::git_path(root, "index.lock").await?.is_file() {
+            bail!("Git index is locked; another writer may be active");
+        }
+        if git::changes(root)
+            .await?
+            .iter()
+            .all(|entry| entry.index.is_none())
+            && !spec.amend
+        {
+            bail!("nothing is staged; stage at least one change before committing");
+        }
+        let oid = git::commit(root, &spec).await?;
+        Ok(CommitOutcome {
+            oid: oid.clone(),
+            message: format!("Committed {}", &oid[..oid.len().min(12)]),
         })
     }
 }

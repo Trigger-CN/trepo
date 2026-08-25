@@ -10,7 +10,7 @@ use tokio::process::Command;
 
 use crate::domain::{
     ChangeCode, ChangeEntry, ChangeHunk, ChangePreview, Commit, CommitRef, CommitRefKind,
-    HeadState, HunkSource, UpstreamState, WorktreeSummary,
+    CommitSpec, HeadState, HunkSource, UpstreamState, WorktreeSummary,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -650,6 +650,55 @@ pub async fn restore_worktree_path(root: &Path, path: &Path) -> Result<()> {
     Ok(())
 }
 
+pub async fn commit(root: &Path, spec: &CommitSpec) -> Result<String> {
+    if spec.message.trim().is_empty() {
+        bail!("commit message cannot be empty");
+    }
+    let mut args = vec![OsString::from("commit")];
+    if spec.amend {
+        args.push(OsString::from("--amend"));
+    }
+    if spec.signoff {
+        args.push(OsString::from("--signoff"));
+    }
+    if spec.signing {
+        args.push(OsString::from("--gpg-sign"));
+    }
+    args.push(OsString::from("--message"));
+    args.push(OsString::from(&spec.message));
+
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(root)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .output()
+        .await
+        .with_context(|| format!("failed to run git commit in {}", root.display()))?;
+    if !output.status.success() {
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        let details = [stdout, stderr]
+            .into_iter()
+            .filter(|value| !value.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n");
+        bail!(
+            "git commit exited with {}{}",
+            output.status,
+            if details.is_empty() {
+                String::new()
+            } else {
+                format!(": {details}")
+            }
+        );
+    }
+    let oid = git_output(root, ["rev-parse", "HEAD"]).await?;
+    let oid = String::from_utf8(oid).context("commit OID is not UTF-8")?;
+    Ok(oid.trim().to_owned())
+}
 fn path_args(prefix: &[&str], path: &Path) -> Vec<OsString> {
     let mut args: Vec<OsString> = prefix.iter().map(OsString::from).collect();
     args.push(OsString::from("--"));
@@ -1014,6 +1063,70 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn commits_signs_off_amends_and_preserves_hook_failure_output() {
+        let temp = tempdir().unwrap();
+        run_git(temp.path(), &["init", "-q", "-b", "main"]);
+        run_git(temp.path(), &["config", "user.name", "Test"]);
+        run_git(temp.path(), &["config", "user.email", "test@example.com"]);
+        commit_file(temp.path(), "tracked.txt", "base\n", "base");
+
+        fs::write(temp.path().join("tracked.txt"), "base\nsecond\n").unwrap();
+        run_git(temp.path(), &["add", "tracked.txt"]);
+        let oid = commit(
+            temp.path(),
+            &CommitSpec {
+                message: "second\n\nbody".into(),
+                amend: false,
+                signoff: true,
+                signing: false,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(oid, run_git(temp.path(), &["rev-parse", "HEAD"]));
+        let message = run_git(temp.path(), &["show", "-s", "--format=%B", "HEAD"]);
+        assert!(message.contains("second"));
+        assert!(message.contains("Signed-off-by: Test <test@example.com>"));
+
+        fs::write(temp.path().join("tracked.txt"), "base\nthird\n").unwrap();
+        run_git(temp.path(), &["add", "tracked.txt"]);
+        commit(
+            temp.path(),
+            &CommitSpec {
+                message: "amended".into(),
+                amend: true,
+                signoff: false,
+                signing: false,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(run_git(temp.path(), &["rev-list", "--count", "HEAD"]), "2");
+        assert!(run_git(temp.path(), &["show", "-s", "--format=%s", "HEAD"]) == "amended");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let hook = temp.path().join(".git/hooks/pre-commit");
+            fs::write(&hook, "#!/bin/sh\necho hook-output >&2\nexit 1\n").unwrap();
+            fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+            fs::write(temp.path().join("tracked.txt"), "base\nhook\n").unwrap();
+            run_git(temp.path(), &["add", "tracked.txt"]);
+            let error = commit(
+                temp.path(),
+                &CommitSpec {
+                    message: "hook failure".into(),
+                    amend: false,
+                    signoff: false,
+                    signing: false,
+                },
+            )
+            .await
+            .unwrap_err();
+            assert!(error.to_string().contains("hook-output"));
+        }
+    }
     #[test]
     fn parses_porcelain_v2_status() {
         let input = b"# branch.oid 0123456789abcdef\x00# branch.head feature/demo\x00# branch.upstream origin/feature/demo\x00# branch.ab +2 -3\x00\

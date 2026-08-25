@@ -32,6 +32,9 @@ Starting from a subdirectory is supported. If no `.repo` directory is found, rep
 | `Tab` | Toggle file / hunk mode in Changes |
 | `s` / `u` | Stage / unstage the selected file or hunk |
 | `d` | Preview and confirm discarding the selected file or worktree hunk |
+| `m` | Open commit dialog from Changes |
+| `Ctrl-A` / `Ctrl-U` / `Ctrl-G` | Toggle amend / sign-off / signing in commit dialog |
+| `Enter` / `Esc` | Submit / cancel commit dialog |
 | `PageUp` / `PageDown` | Scroll the selected diff |
 | `/` | Search projects |
 | `r` | Refresh current page |
@@ -48,12 +51,14 @@ Implemented:
 - staged, unstaged, untracked, conflict, HEAD and ahead/behind summary
 - searchable responsive Workspace page
 - complete all-refs commit graph covering local branches, remote branches, tags, HEAD, and every stash entry
-- multi-color topology lanes and distinct HEAD/local/remote/tag/stash badges
+- multi-color topology lanes with visible split/merge connectors and distinct HEAD/local/remote/tag/stash badges
 - Changes file list with staged, worktree, and untracked diff previews
 - guarded file-level stage, unstage, and restore with per-project locks and stale-state checks
 - selectable unified-diff hunks with isolated stage, unstage, and destructive discard
 - lock-time hunk revalidation, stable fingerprints, and `git apply --check` before patch writes
 - destructive confirmation, failure-state preservation, and automatic Workspace/Changes refresh
-- `doctor` diagnostics and parser/integration/UI-focused tests
+- commit dialog with commit/amend, sign-off, signing toggle, hook output, and message recovery
+- `doctor` diagnostics and parser/real Git/TestBackend-focused tests
+- commit workflow is implemented; stash and conflict/operation-state workflows remain planned
 
-Planned next: commit/amend, stash, and conflict workflows, followed by branch/remote workflows, Repo batch actions, command palette, and PTY takeover.
+Planned next: stash and conflict workflows, followed by branch/remote workflows, Repo batch actions, command palette, and PTY takeover.

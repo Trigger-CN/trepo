@@ -253,6 +253,11 @@ struct TopologyRow {
 }
 
 fn topology_rows(commits: &[Commit]) -> Vec<TopologyRow> {
+    const UP: u8 = 1;
+    const DOWN: u8 = 2;
+    const LEFT: u8 = 4;
+    const RIGHT: u8 = 8;
+
     let mut lanes: Vec<Lane> = Vec::new();
     let mut rows = Vec::with_capacity(commits.len());
     let positions: HashMap<&str, usize> = commits
@@ -263,46 +268,47 @@ fn topology_rows(commits: &[Commit]) -> Vec<TopologyRow> {
     let mut next_color = 0;
 
     for commit in commits {
-        let lane = lanes
-            .iter()
-            .position(|value| value.oid == commit.oid)
-            .unwrap_or_else(|| {
+        let (lane, inherited_color, display_lanes, mut next_lanes) =
+            if let Some(lane) = lanes.iter().position(|value| value.oid == commit.oid) {
+                let inherited_color = lanes[lane].color;
+                let mut next_lanes = lanes.clone();
+                next_lanes.remove(lane);
+                (lane, inherited_color, lanes.clone(), next_lanes)
+            } else {
                 let color = next_color;
                 next_color += 1;
-                lanes.insert(
-                    0,
-                    Lane {
-                        oid: commit.oid.clone(),
-                        color,
-                    },
-                );
-                0
-            });
-        rows.push(TopologyRow {
-            cells: lanes
-                .iter()
-                .enumerate()
-                .map(|(index, value)| {
-                    let glyph = if index == lane {
-                        if commit.parents.len() > 1 {
-                            '◆'
-                        } else {
-                            '●'
-                        }
-                    } else {
-                        '│'
-                    };
-                    (glyph, value.color)
-                })
-                .collect(),
-        });
+                let lane = lanes.len();
+                let mut display_lanes = lanes.clone();
+                display_lanes.push(Lane {
+                    oid: commit.oid.clone(),
+                    color,
+                });
+                (lane, color, display_lanes, lanes.clone())
+            };
+        let cell_count = display_lanes.len().max(next_lanes.len()).max(lane + 1);
+        let mut connections = vec![0u8; cell_count];
+        let mut colors = (0..cell_count)
+            .map(|index| {
+                display_lanes
+                    .get(index)
+                    .or_else(|| next_lanes.get(index))
+                    .map_or(inherited_color, |value| value.color)
+            })
+            .collect::<Vec<_>>();
 
-        let inherited_color = lanes[lane].color;
-        lanes.remove(lane);
-        let mut insert_at = lane.min(lanes.len());
+        for (index, connection) in connections.iter_mut().enumerate().take(cell_count) {
+            if display_lanes.get(index).is_some() {
+                *connection |= UP;
+            }
+            if next_lanes.get(index).is_some() {
+                *connection |= DOWN;
+            }
+        }
+
+        let mut insert_at = lane.min(next_lanes.len());
         for (parent_index, parent) in commit.parents.iter().enumerate() {
             if !positions.contains_key(parent.as_str())
-                || lanes.iter().any(|value| value.oid == *parent)
+                || next_lanes.iter().any(|value| value.oid == *parent)
             {
                 continue;
             }
@@ -313,7 +319,7 @@ fn topology_rows(commits: &[Commit]) -> Vec<TopologyRow> {
                 next_color += 1;
                 color
             };
-            lanes.insert(
+            next_lanes.insert(
                 insert_at,
                 Lane {
                     oid: parent.clone(),
@@ -322,8 +328,89 @@ fn topology_rows(commits: &[Commit]) -> Vec<TopologyRow> {
             );
             insert_at += 1;
         }
+
+        let next_cell_count = cell_count.max(next_lanes.len());
+        connections.resize(next_cell_count, 0);
+        colors.resize(next_cell_count, inherited_color);
+        for index in cell_count..next_cell_count {
+            if next_lanes.get(index).is_some() {
+                connections[index] |= DOWN;
+                colors[index] = next_lanes[index].color;
+            }
+        }
+
+        for (parent_index, parent) in commit.parents.iter().enumerate() {
+            let Some(target) = next_lanes.iter().position(|value| value.oid == *parent) else {
+                continue;
+            };
+            if target == lane && parent_index == 0 {
+                continue;
+            }
+            let (start, end) = if target < lane {
+                (target, lane)
+            } else {
+                (lane, target)
+            };
+            if target < lane {
+                connections[target] |= RIGHT;
+            } else {
+                connections[target] |= LEFT;
+            }
+            for connection in connections.iter_mut().take(end).skip(start + 1) {
+                *connection |= LEFT | RIGHT;
+            }
+        }
+
+        connections[lane] = 0;
+        if display_lanes.get(lane).is_some() {
+            connections[lane] |= UP;
+        }
+        if next_lanes.get(lane).is_some() {
+            connections[lane] |= DOWN;
+        }
+        let node = if commit.parents.len() > 1 {
+            '◆'
+        } else {
+            '●'
+        };
+        let cells = connections
+            .into_iter()
+            .zip(colors)
+            .enumerate()
+            .map(|(index, (mask, color))| {
+                if index == lane {
+                    (node, inherited_color)
+                } else {
+                    (box_glyph(mask), color)
+                }
+            })
+            .collect();
+        rows.push(TopologyRow { cells });
+        lanes = next_lanes;
     }
     rows
+}
+
+fn box_glyph(mask: u8) -> char {
+    match mask {
+        0 => ' ',
+        1 => '│',
+        2 => '│',
+        3 => '│',
+        4 => '─',
+        8 => '─',
+        5 => '┘',
+        6 => '┐',
+        9 => '└',
+        10 => '┌',
+        12 => '─',
+        7 => '┤',
+        11 => '├',
+        13 => '┴',
+        14 => '┬',
+        15 => '┼',
+        _ => ' ',
+    }
 }
 
 fn topology_line(row: &TopologyRow) -> Line<'static> {
@@ -341,7 +428,6 @@ fn topology_line(row: &TopologyRow) -> Line<'static> {
             .collect::<Vec<_>>(),
     )
 }
-
 fn lane_color(index: usize) -> Color {
     const COLORS: [Color; 8] = [
         Color::Cyan,
@@ -425,17 +511,31 @@ mod tests {
     }
 
     #[test]
-    fn renders_basic_topology_lanes() {
+    fn renders_branch_split_and_merge_edges() {
         let commits = vec![
-            commit("merge", &["left", "right"]),
-            commit("left", &["base"]),
-            commit("right", &["base"]),
+            commit("merge", &["feature", "main"]),
+            commit("feature", &["base"]),
+            commit("main", &["base"]),
             commit("base", &[]),
         ];
         let rows = topology_rows(&commits);
         assert_eq!(rows.len(), commits.len());
         assert_eq!(rows[0].cells[0].0, '◆');
+        assert!(rows[0].cells.iter().any(|(glyph, _)| *glyph == '┐'));
+        assert!(rows[2].cells.iter().any(|(glyph, _)| *glyph == '├'));
         assert!(rows.iter().any(|row| row.cells.len() >= 2));
+    }
+
+    #[test]
+    fn renders_split_without_merge_commit() {
+        let commits = vec![
+            commit("feature", &["base"]),
+            commit("main", &["base"]),
+            commit("base", &[]),
+        ];
+        let rows = topology_rows(&commits);
+        assert!(rows[1].cells.iter().any(|(glyph, _)| *glyph == '├'));
+        assert!(rows[1].cells.len() >= 2);
     }
 
     #[test]
@@ -461,6 +561,28 @@ mod tests {
             .map(|(_, color)| *color)
             .collect::<std::collections::HashSet<_>>();
         assert_eq!(colors.len(), 6);
+    }
+
+    #[test]
+    fn box_glyph_covers_line_junction_combinations() {
+        assert_eq!(box_glyph(12), '─');
+        assert_eq!(box_glyph(7), '┤');
+        assert_eq!(box_glyph(11), '├');
+        assert_eq!(box_glyph(13), '┴');
+        assert_eq!(box_glyph(14), '┬');
+        assert_eq!(box_glyph(15), '┼');
+        assert_eq!(box_glyph(5), '┘');
+        assert_eq!(box_glyph(6), '┐');
+        assert_eq!(box_glyph(9), '└');
+        assert_eq!(box_glyph(10), '┌');
+    }
+
+    #[test]
+    fn box_glyph_uses_solid_single_direction_lines() {
+        assert_eq!(box_glyph(1), '│');
+        assert_eq!(box_glyph(2), '│');
+        assert_eq!(box_glyph(4), '─');
+        assert_eq!(box_glyph(8), '─');
     }
 
     #[test]
