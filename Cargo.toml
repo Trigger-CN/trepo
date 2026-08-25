@@ -1,0 +1,23 @@
+[package]
+name = "repo-tui"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.81"
+description = "A terminal workspace for Android Repo and Git repositories"
+license = "MIT"
+
+[dependencies]
+anyhow = "1.0"
+clap = { version = "4.5", features = ["derive"] }
+crossterm = "0.28"
+ratatui = "0.29"
+tokio = { version = "1.43", features = ["io-util", "macros", "process", "rt-multi-thread", "sync", "time"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+[dev-dependencies]
+tempfile = "3.15"
+
+[profile.release]
+lto = "thin"
+strip = true
