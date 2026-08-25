@@ -23,12 +23,13 @@
 - Repo client 与单 Git 仓库发现。
 - 多项目并发状态扫描和 Workspace 汇总。
 - 包含本地分支、远端分支、tag、HEAD 与每条 stash 的全引用 commit graph。
-- staged、worktree、untracked diff 预览。
-- 文件与 hunk 级 stage、unstage、discard。
+- staged、worktree、untracked diff，以及文件、hunk、changed-line stage/unstage/discard。
 - commit/amend、sign-off、signing 与 hook 失败消息恢复。
-- 项目写锁、index lock 检查、陈旧状态拒绝和破坏性确认。
+- stash、conflict/operation state、branch/tag、merge/rebase/cherry-pick/revert 和 remote 工作流。
+- fetch/pull/push/upstream/prune，精确 remote-write 预览，以及仅 `--force-with-lease` 的强制推送。
+- 项目写锁、index lock、snapshot/token、generation、陈旧状态拒绝和破坏性/远端确认。
 
-当前仍在推进 M2，stash 操作和 conflict/operation state 尚未完成。任务已明确要求完成 M2/M3，因此后续应先闭合 M2，再实现 M3 的分支、整合与远端工作流。
+M0-M3 已完成。下一执行点是 M4 Repo 批量工作流；需要外部 editor、mergetool 或任意交互命令的终端接管属于 M5。
 
 ## 3. 实际代码结构
 
@@ -37,9 +38,9 @@
 - `src/main.rs`
   - Clap CLI、日志初始化、终端 RAII、Crossterm 事件循环和按键分发。
 - `src/domain.rs`
-  - 与 UI 解耦的 workspace、project、status、commit、change、hunk 和 operation 模型。
+  - 与 UI 解耦的 workspace、project、status、commit/change line 和 repository action 模型。
 - `src/adapters/git.rs`
-  - Git argv、机器可读协议、路径处理、diff/hunk 解析和受控 `git apply`。
+  - Git argv、机器协议、diff/line patch、repository snapshot token 和固定动作映射。
 - `src/adapters/repo.rs`
   - Repo 版本、project 列表和能力相关适配。
 - `src/services/discovery.rs`
@@ -48,8 +49,8 @@
   - 有界并发状态扫描。
 - `src/services/operations.rs`
   - 项目写锁、实时前置检查和受保护写操作。
-- `src/app/state.rs`
-  - 页面状态、selection、generation、异步结果归并和 operation 流程。
+- `src/app/state.rs`、`src/app/repository.rs`
+  - 页面状态、typed forms、selection、generation、确认和异步结果归并。
 - `src/ui/*.rs`
   - Ratatui 纯渲染与 TestBackend 测试，不执行外部命令。
 
@@ -94,19 +95,20 @@ cargo run -- doctor .
 ### 5.3 异步状态
 
 - 长任务不得阻塞输入和绘制循环。
-- scan、graph、changes、preview 和 operation 结果必须携带并校验 generation。
-- 过期结果不得覆盖新页面、新 project、新 path 或新 generation。
+- scan、graph、changes、preview、commit、repository load 和 repository action 结果必须携带并校验 generation。
+- 过期结果不得覆盖新页面、新 project、新 path、新 snapshot 或新 generation。
 - selection 应绑定稳定 identity；列表刷新后必须 clamp，不能依赖旧行号代表同一对象。
 
 ### 5.4 Git 写操作
 
 - 同一 project 的写操作必须经过 `OperationRunner` 和项目锁。
 - 执行前检查 worktree-aware index lock，并在锁内重新读取当前状态。
-- 文件操作必须验证 preview token；hunk 操作必须重新解析当前 diff，以 source + fingerprint 唯一定位。
+- 文件操作必须验证 preview token；hunk/line 操作必须重新解析当前 diff，以 source + fingerprint 唯一定位。
 - UI 不得提交任意 patch 字节作为执行输入；patch 必须由 adapter 从当前 Git 输出重建。
-- hunk apply 先执行对应的 `git apply --check`，检查成功后才真正 apply。
-- 外部变化、hunk 移动、内容变化或不唯一匹配必须返回 precondition/stale 错误。
-- discard、删除、reset、force 等破坏性行为必须有明确作用域预览和显式确认。
+- hunk/line apply 先执行对应的 `git apply --check`，零上下文 line patch 使用 `--unidiff-zero`。
+- Repository 动作必须携带 snapshot token；执行器持锁后重新读取 refs、stash、conflicts 和 remotes。
+- ref、remote、OID 等用户值不得以 `-` 开头；支持的 Git 子命令显式使用 `--`，所有值保持独立 argv。
+- discard、删除、abort、remote write 等行为必须有明确作用域预览和显式确认；push 不提供裸 `--force`。
 - 操作失败应尽量保留用户选择、输入和原始错误；成功后按影响范围刷新真实状态。
 
 ### 5.5 终端与 UI

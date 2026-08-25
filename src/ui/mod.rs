@@ -1,5 +1,6 @@
 mod changes;
 mod graph;
+mod repository;
 mod workspace;
 
 use ratatui::layout::{Alignment, Rect};
@@ -15,6 +16,7 @@ pub fn render(frame: &mut Frame, app: &App) {
         Screen::Workspace => workspace::render(frame, app),
         Screen::Graph => graph::render(frame, app),
         Screen::Changes => changes::render(frame, app),
+        Screen::Repository => repository::render(frame, app),
     }
     if app.help {
         render_help(frame);
@@ -74,10 +76,15 @@ mod tests {
     use ratatui::Terminal;
 
     use super::*;
-    use crate::app::state::{App, ChangesMode, ChangesState, GraphState, PendingOperation, Screen};
+    use crate::app::repository::{form_for, RepositoryChoice, RepositoryTab};
+    use crate::app::state::{
+        App, ChangesMode, ChangesState, GraphState, PendingOperation, RepositoryState, Screen,
+    };
     use crate::domain::{
-        ChangeCode, ChangeEntry, ChangeHunk, ChangePreview, Commit, CommitRef, CommitRefKind,
-        HunkSource, OperationKind, OperationTarget, Project, ProjectId, Workspace, WorkspaceKind,
+        BranchEntry, ChangeCode, ChangeEntry, ChangeHunk, ChangeLine, ChangePreview, Commit,
+        CommitRef, CommitRefKind, GitOperationKind, HunkSource, OperationKind, OperationTarget,
+        Project, ProjectId, RemoteBranchEntry, RemoteEntry, RepositoryAction, RepositorySnapshot,
+        StashEntry, TagEntry, Workspace, WorkspaceKind,
     };
 
     fn app() -> App {
@@ -161,6 +168,8 @@ mod tests {
             mode: ChangesMode::Hunk,
             selected_hunk: 0,
             selected_hunk_identity: Some((HunkSource::Worktree, 7)),
+            selected_line: 0,
+            selected_line_identity: None,
             loading: false,
             error: None,
             generation: 1,
@@ -174,6 +183,12 @@ mod tests {
                     display_start: 1,
                     display_end: 3,
                     fingerprint: 7,
+                }],
+                lines: vec![ChangeLine {
+                    source: HunkSource::Worktree,
+                    hunk_fingerprint: 7,
+                    fingerprint: 8,
+                    display_line: 3,
                 }],
             }),
             preview_path: Some(entry.path.clone()),
@@ -202,5 +217,119 @@ mod tests {
         });
         draw(&app, 80, 24);
         draw(&app, 120, 40);
+    }
+
+    fn repository_snapshot() -> RepositorySnapshot {
+        RepositorySnapshot {
+            operation: Some(GitOperationKind::Merge),
+            conflicts: vec![PathBuf::from("src/conflict.rs")],
+            stashes: vec![StashEntry {
+                selector: "stash@{0}".into(),
+                oid: "cccccccc".into(),
+                subject: "WIP".into(),
+            }],
+            branches: vec![BranchEntry {
+                name: "main".into(),
+                oid: "bbbbbbbb".into(),
+                upstream: Some("origin/main".into()),
+                ahead: 1,
+                behind: 0,
+                current: true,
+            }],
+            tags: vec![TagEntry {
+                name: "v0.3.0".into(),
+                target: "bbbbbbbb".into(),
+            }],
+            remotes: vec![RemoteEntry {
+                name: "origin".into(),
+                fetch_url: "https://example.com/repo.git".into(),
+                push_url: "https://example.com/repo.git".into(),
+            }],
+            remote_branches: vec![RemoteBranchEntry {
+                name: "origin/main".into(),
+                oid: "aaaaaaaa".into(),
+            }],
+            worktree_token: 0,
+            token: 7,
+        }
+    }
+
+    fn repository_state(app: &App) -> RepositoryState {
+        RepositoryState {
+            project: app.workspace.projects[0].clone(),
+            return_screen: Screen::Workspace,
+            snapshot: Some(repository_snapshot()),
+            tab: RepositoryTab::Status,
+            selected: 0,
+            loading: false,
+            error: None,
+            generation: 1,
+            action_menu: false,
+            action_selected: 0,
+            form: None,
+            pending: None,
+            action_running: false,
+            action_generation: 0,
+            message: None,
+            detail: Some("Operation detail".into()),
+        }
+    }
+
+    #[test]
+    fn renders_repository_tabs_overlays_and_states_at_supported_sizes() {
+        let mut app = app();
+        app.screen = Screen::Repository;
+        app.repository = Some(repository_state(&app));
+        for tab in RepositoryTab::ALL {
+            app.repository.as_mut().unwrap().tab = tab;
+            draw(&app, 80, 24);
+            draw(&app, 120, 40);
+        }
+
+        {
+            let state = app.repository.as_mut().unwrap();
+            state.tab = RepositoryTab::Remotes;
+            state.action_menu = true;
+        }
+        draw(&app, 80, 24);
+        draw(&app, 120, 40);
+
+        {
+            let state = app.repository.as_mut().unwrap();
+            state.action_menu = false;
+            state.form =
+                form_for(RepositoryChoice::Push, state.snapshot.as_ref().unwrap(), 0).unwrap();
+        }
+        draw(&app, 80, 24);
+        draw(&app, 120, 40);
+
+        {
+            let state = app.repository.as_mut().unwrap();
+            state.form = None;
+            state.pending = Some(RepositoryAction::Push {
+                remote: "origin".into(),
+                branch: "main".into(),
+                set_upstream: true,
+                force_with_lease: true,
+            });
+        }
+        draw(&app, 80, 24);
+        draw(&app, 120, 40);
+
+        {
+            let state = app.repository.as_mut().unwrap();
+            state.pending = None;
+            state.snapshot = None;
+            state.loading = true;
+        }
+        draw(&app, 80, 24);
+        {
+            let state = app.repository.as_mut().unwrap();
+            state.loading = false;
+            state.error = Some("repository error".into());
+        }
+        draw(&app, 120, 40);
+        app.repository.as_mut().unwrap().error = None;
+        draw(&app, 80, 24);
     }
 }

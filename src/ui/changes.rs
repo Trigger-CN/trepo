@@ -158,33 +158,49 @@ fn render_files(frame: &mut Frame, changes: &ChangesState, area: Rect) {
 fn render_preview(frame: &mut Frame, changes: &ChangesState, area: Rect) {
     let title = changes.preview_path.as_ref().map_or_else(
         || " Diff ".to_owned(),
-        |path| {
-            if changes.mode == ChangesMode::Hunk {
-                changes
-                    .preview
-                    .as_ref()
-                    .and_then(|preview| preview.hunks.get(changes.selected_hunk))
-                    .map_or_else(
-                        || format!(" Diff: {} [hunk] ", path.display()),
-                        |hunk| {
-                            format!(
-                                " Diff: {} [hunk {}/{} {}] ",
-                                path.display(),
-                                changes.selected_hunk + 1,
-                                changes
-                                    .preview
-                                    .as_ref()
-                                    .map_or(0, |preview| preview.hunks.len()),
-                                hunk.source.label()
-                            )
-                        },
-                    )
-            } else {
-                format!(" Diff: {} [file] ", path.display())
-            }
+        |path| match changes.mode {
+            ChangesMode::Hunk => changes
+                .preview
+                .as_ref()
+                .and_then(|preview| preview.hunks.get(changes.selected_hunk))
+                .map_or_else(
+                    || format!(" Diff: {} [hunk] ", path.display()),
+                    |hunk| {
+                        format!(
+                            " Diff: {} [hunk {}/{} {}] ",
+                            path.display(),
+                            changes.selected_hunk + 1,
+                            changes
+                                .preview
+                                .as_ref()
+                                .map_or(0, |preview| preview.hunks.len()),
+                            hunk.source.label()
+                        )
+                    },
+                ),
+            ChangesMode::Line => changes
+                .preview
+                .as_ref()
+                .and_then(|preview| preview.lines.get(changes.selected_line))
+                .map_or_else(
+                    || format!(" Diff: {} [line] ", path.display()),
+                    |line| {
+                        format!(
+                            " Diff: {} [line {}/{} {}] ",
+                            path.display(),
+                            changes.selected_line + 1,
+                            changes
+                                .preview
+                                .as_ref()
+                                .map_or(0, |preview| preview.lines.len()),
+                            line.source.label()
+                        )
+                    },
+                ),
+            ChangesMode::File => format!(" Diff: {} [file] ", path.display()),
         },
     );
-    let border_style = if changes.mode == ChangesMode::Hunk {
+    let border_style = if changes.mode != ChangesMode::File {
         Style::default().fg(Color::Cyan)
     } else {
         Style::default()
@@ -209,13 +225,16 @@ fn render_preview(frame: &mut Frame, changes: &ChangesState, area: Rect) {
         );
         return;
     };
-    let selected_range = if changes.mode == ChangesMode::Hunk {
-        preview
+    let selected_range = match changes.mode {
+        ChangesMode::Hunk => preview
             .hunks
             .get(changes.selected_hunk)
-            .map(|hunk| hunk.display_start..=hunk.display_end)
-    } else {
-        None
+            .map(|hunk| hunk.display_start..=hunk.display_end),
+        ChangesMode::Line => preview
+            .lines
+            .get(changes.selected_line)
+            .map(|line| line.display_line..=line.display_line),
+        ChangesMode::File => None,
     };
     let lines = preview.text.lines().enumerate().map(|(index, line)| {
         let mut style = if line.starts_with("+++") || line.starts_with("---") {
@@ -266,6 +285,7 @@ fn render_footer(frame: &mut Frame, changes: &ChangesState, area: Rect) {
     let mode = match changes.mode {
         ChangesMode::File => "FILE",
         ChangesMode::Hunk => "HUNK",
+        ChangesMode::Line => "LINE",
     };
     frame.render_widget(
         Paragraph::new(vec![
@@ -294,6 +314,9 @@ fn render_confirmation(frame: &mut Frame, changes: &ChangesState) {
                     OperationTarget::Hunk { .. } => {
                         "This permanently discards the selected worktree hunk."
                     }
+                    OperationTarget::Line { .. } => {
+                        "This permanently discards the selected worktree line."
+                    }
                 },
                 Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
             ),
@@ -303,6 +326,9 @@ fn render_confirmation(frame: &mut Frame, changes: &ChangesState) {
                 OperationTarget::File => "Scope: entire file".to_owned(),
                 OperationTarget::Hunk { source, .. } => {
                     format!("Scope: selected {} hunk", source.label())
+                }
+                OperationTarget::Line { source, .. } => {
+                    format!("Scope: selected {} line", source.label())
                 }
             }),
             Line::raw(""),

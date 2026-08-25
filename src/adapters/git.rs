@@ -9,8 +9,10 @@ use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
 use crate::domain::{
-    ChangeCode, ChangeEntry, ChangeHunk, ChangePreview, Commit, CommitRef, CommitRefKind,
-    CommitSpec, HeadState, HunkSource, UpstreamState, WorktreeSummary,
+    BranchEntry, ChangeCode, ChangeEntry, ChangeHunk, ChangeLine, ChangePreview, Commit, CommitRef,
+    CommitRefKind, CommitSpec, GitOperationKind, HeadState, HunkSource, RemoteBranchEntry,
+    RemoteEntry, RepositoryAction, RepositoryActionOutcome, RepositorySnapshot, StashEntry,
+    TagEntry, UpstreamState, WorktreeSummary,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -32,6 +34,8 @@ where
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_EDITOR", "true")
+        .env("GIT_SEQUENCE_EDITOR", "true")
         .output()
         .await
         .with_context(|| format!("failed to run git in {}", cwd.display()))?;
@@ -63,6 +67,8 @@ where
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_EDITOR", "true")
+        .env("GIT_SEQUENCE_EDITOR", "true")
         .output()
         .await
         .with_context(|| format!("failed to run git in {}", cwd.display()))?;
@@ -269,6 +275,14 @@ pub(crate) struct ResolvedHunk {
     pub patch: Vec<u8>,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct ResolvedLine {
+    pub source: HunkSource,
+    pub hunk_fingerprint: u64,
+    pub fingerprint: u64,
+    pub patch: Vec<u8>,
+}
+
 #[derive(Debug)]
 struct ParsedHunk {
     source: HunkSource,
@@ -277,12 +291,21 @@ struct ParsedHunk {
     diff_end_line: usize,
     fingerprint: u64,
     patch: Vec<u8>,
+    lines: Vec<ParsedLine>,
+}
+
+#[derive(Debug)]
+struct ParsedLine {
+    fingerprint: u64,
+    diff_line: usize,
+    patch: Vec<u8>,
 }
 
 pub async fn preview_change(root: &Path, entry: &ChangeEntry) -> Result<ChangePreview> {
     let (status_bytes, parts) = load_change_parts(root, entry).await?;
     let token = token_for_parts(&status_bytes, &parts);
     let mut text = String::new();
+    let mut lines = Vec::new();
     let mut hunks = Vec::new();
 
     for part in parts {
@@ -295,13 +318,22 @@ pub async fn preview_change(root: &Path, entry: &ChangeEntry) -> Result<ChangePr
         let diff_base_line = text.lines().count();
         let parsed = parse_unified_diff(part.source, &part.bytes)?;
         text.push_str(&String::from_utf8_lossy(&part.bytes));
-        hunks.extend(parsed.into_iter().map(|hunk| ChangeHunk {
-            source: hunk.source,
-            header: hunk.header,
-            display_start: diff_base_line + hunk.diff_start_line,
-            display_end: diff_base_line + hunk.diff_end_line,
-            fingerprint: hunk.fingerprint,
-        }));
+        for hunk in parsed {
+            let hunk_fingerprint = hunk.fingerprint;
+            hunks.push(ChangeHunk {
+                source: hunk.source,
+                header: hunk.header,
+                display_start: diff_base_line + hunk.diff_start_line,
+                display_end: diff_base_line + hunk.diff_end_line,
+                fingerprint: hunk_fingerprint,
+            });
+            lines.extend(hunk.lines.into_iter().map(|line| ChangeLine {
+                source: hunk.source,
+                hunk_fingerprint,
+                fingerprint: line.fingerprint,
+                display_line: diff_base_line + line.diff_line,
+            }));
+        }
     }
     if text.is_empty() {
         text.push_str("No textual diff is available for this change.");
@@ -310,11 +342,15 @@ pub async fn preview_change(root: &Path, entry: &ChangeEntry) -> Result<ChangePr
     if truncated {
         hunks.retain(|hunk| hunk.display_end < complete_lines);
     }
+    if truncated {
+        lines.retain(|line| line.display_line < complete_lines);
+    }
     Ok(ChangePreview {
         text,
         token,
         truncated,
         hunks,
+        lines,
     })
 }
 
@@ -343,6 +379,37 @@ pub(crate) async fn resolve_hunks(
                     patch: hunk.patch,
                 }),
         );
+    }
+    Ok((token, matches))
+}
+
+pub(crate) async fn resolve_lines(
+    root: &Path,
+    entry: &ChangeEntry,
+    source: HunkSource,
+    hunk_fingerprint: u64,
+    fingerprint: u64,
+) -> Result<(u64, Vec<ResolvedLine>)> {
+    let (status_bytes, parts) = load_change_parts(root, entry).await?;
+    let token = token_for_parts(&status_bytes, &parts);
+    let mut matches = Vec::new();
+    for part in parts.into_iter().filter(|part| part.source == source) {
+        for hunk in parse_unified_diff(part.source, &part.bytes)?
+            .into_iter()
+            .filter(|hunk| hunk.fingerprint == hunk_fingerprint)
+        {
+            matches.extend(
+                hunk.lines
+                    .into_iter()
+                    .filter(|line| line.fingerprint == fingerprint)
+                    .map(|line| ResolvedLine {
+                        source,
+                        hunk_fingerprint,
+                        fingerprint: line.fingerprint,
+                        patch: line.patch,
+                    }),
+            );
+        }
     }
     Ok((token, matches))
 }
@@ -479,20 +546,132 @@ fn parse_unified_diff(source: HunkSource, bytes: &[u8]) -> Result<Vec<ParsedHunk
             let mut hasher = DefaultHasher::new();
             source.hash(&mut hasher);
             patch.hash(&mut hasher);
+            let fingerprint = hasher.finish();
+            let parsed_lines = if source == HunkSource::Untracked {
+                Vec::new()
+            } else {
+                parse_changed_lines(
+                    source,
+                    fingerprint,
+                    bytes,
+                    &lines,
+                    (file_start, header_end),
+                    (hunk_line, next_hunk_line),
+                )?
+            };
             let header = String::from_utf8_lossy(trim_line_ending(header_line)).into_owned();
             hunks.push(ParsedHunk {
                 source,
                 header,
                 diff_start_line: hunk_line,
                 diff_end_line: next_hunk_line - 1,
-                fingerprint: hasher.finish(),
+                fingerprint,
                 patch,
+                lines: parsed_lines,
             });
             hunk_line = next_hunk_line;
         }
         line_index = file_end_line;
     }
     Ok(hunks)
+}
+
+fn parse_changed_lines(
+    source: HunkSource,
+    hunk_fingerprint: u64,
+    bytes: &[u8],
+    ranges: &[(usize, usize)],
+    file_bounds: (usize, usize),
+    hunk_bounds: (usize, usize),
+) -> Result<Vec<ParsedLine>> {
+    let (file_start, header_end) = file_bounds;
+    let (hunk_line, next_hunk_line) = hunk_bounds;
+    let (mut old_line, mut new_line) =
+        parse_hunk_coordinates(line_bytes(bytes, ranges[hunk_line]))?;
+    let mut parsed = Vec::new();
+    let mut index = hunk_line + 1;
+    while index < next_hunk_line {
+        let line = line_bytes(bytes, ranges[index]);
+        let marker = (index + 1 < next_hunk_line
+            && line_bytes(bytes, ranges[index + 1]).starts_with(b"\\ No newline"))
+        .then(|| line_bytes(bytes, ranges[index + 1]));
+        let (old_start, old_count, new_start, new_count) = match line.first() {
+            Some(b' ') => {
+                old_line += 1;
+                new_line += 1;
+                index += 1;
+                continue;
+            }
+            Some(b'-') => (old_line, 1, new_line.saturating_sub(1), 0),
+            Some(b'+') => (old_line.saturating_sub(1), 0, new_line, 1),
+            Some(b'\\') => {
+                index += 1;
+                continue;
+            }
+            _ => bail!("invalid unified diff body line"),
+        };
+        let header = format!(
+            "@@ -{}{} +{}{} @@\n",
+            old_start,
+            range_count(old_count),
+            new_start,
+            range_count(new_count)
+        );
+        let mut patch = Vec::new();
+        patch.extend_from_slice(&bytes[file_start..header_end]);
+        patch.extend_from_slice(header.as_bytes());
+        patch.extend_from_slice(line);
+        if let Some(marker) = marker {
+            patch.extend_from_slice(marker);
+        }
+        let mut hasher = DefaultHasher::new();
+        source.hash(&mut hasher);
+        hunk_fingerprint.hash(&mut hasher);
+        index.hash(&mut hasher);
+        line.hash(&mut hasher);
+        parsed.push(ParsedLine {
+            fingerprint: hasher.finish(),
+            diff_line: index,
+            patch,
+        });
+        match line.first() {
+            Some(b'-') => old_line += 1,
+            Some(b'+') => new_line += 1,
+            _ => unreachable!(),
+        }
+        index += if marker.is_some() { 2 } else { 1 };
+    }
+    Ok(parsed)
+}
+
+fn range_count(count: usize) -> String {
+    if count == 1 {
+        String::new()
+    } else {
+        format!(",{count}")
+    }
+}
+
+fn parse_hunk_coordinates(line: &[u8]) -> Result<(usize, usize)> {
+    let line = trim_line_ending(line);
+    let Some(rest) = line.strip_prefix(b"@@ -") else {
+        bail!("invalid unified diff hunk header");
+    };
+    let Some((old_range, rest)) = split_once(rest, b" +") else {
+        bail!("invalid unified diff hunk old range");
+    };
+    let Some((new_range, _)) = split_once(rest, b" @@") else {
+        bail!("invalid unified diff hunk new range");
+    };
+    Ok((range_start(old_range)?, range_start(new_range)?))
+}
+
+fn range_start(range: &[u8]) -> Result<usize> {
+    let start = range.split(|byte| *byte == b',').next().unwrap_or_default();
+    std::str::from_utf8(start)
+        .context("invalid unified diff range encoding")?
+        .parse()
+        .context("invalid unified diff range start")
 }
 
 fn line_ranges(bytes: &[u8]) -> Vec<(usize, usize)> {
@@ -583,7 +762,7 @@ async fn git_apply(
     check: bool,
 ) -> Result<()> {
     let mut command = Command::new("git");
-    command.arg("apply").arg("--recount");
+    command.arg("apply").arg("--recount").arg("--unidiff-zero");
     if cached {
         command.arg("--cached");
     }
@@ -698,6 +877,557 @@ pub async fn commit(root: &Path, spec: &CommitSpec) -> Result<String> {
     let oid = git_output(root, ["rev-parse", "HEAD"]).await?;
     let oid = String::from_utf8(oid).context("commit OID is not UTF-8")?;
     Ok(oid.trim().to_owned())
+}
+
+const BRANCH_FORMAT: &str =
+    "%(refname:short)%00%(objectname)%00%(upstream:short)%00%(upstream:track)%00%(HEAD)%00";
+const TAG_FORMAT: &str = "%(refname:short)%00%(objectname)%00";
+const STASH_DETAIL_FORMAT: &str = "%gd%x00%H%x00%gs%x00";
+
+pub async fn repository_snapshot(root: &Path) -> Result<RepositorySnapshot> {
+    let branch_bytes = git_output(
+        root,
+        [
+            "for-each-ref",
+            "refs/heads",
+            format!("--format={BRANCH_FORMAT}").as_str(),
+        ],
+    )
+    .await?;
+    let tag_bytes = git_output(
+        root,
+        [
+            "for-each-ref",
+            "refs/tags",
+            format!("--format={TAG_FORMAT}").as_str(),
+        ],
+    )
+    .await?;
+    let stash_bytes = git_output(
+        root,
+        [
+            "stash",
+            "list",
+            format!("--format={STASH_DETAIL_FORMAT}").as_str(),
+        ],
+    )
+    .await?;
+    let remote_bytes = git_output(
+        root,
+        [
+            "for-each-ref",
+            "refs/remotes",
+            "--format=%(refname:short)%00%(objectname)%00",
+        ],
+    )
+    .await?;
+    let remote_branch_entries = parse_remote_branch_entries(&remote_bytes)?;
+    let conflicts = git_output(root, ["diff", "--name-only", "--diff-filter=U", "-z"]).await?;
+    let worktree_bytes = git_output(root, ["status", "--porcelain=v2", "-z"]).await?;
+    let mut worktree_hasher = DefaultHasher::new();
+    worktree_bytes.hash(&mut worktree_hasher);
+    let operation = detect_operation(root).await?;
+    let mut snapshot = RepositorySnapshot {
+        operation,
+        conflicts: parse_path_list(&conflicts)?,
+        stashes: parse_stash_entries(&stash_bytes)?,
+        branches: parse_branch_entries(&branch_bytes)?,
+        tags: parse_tag_entries(&tag_bytes)?,
+        remotes: load_remotes(root, &remote_bytes).await?,
+        remote_branches: remote_branch_entries,
+        worktree_token: worktree_hasher.finish(),
+        token: 0,
+    };
+    snapshot.token = repository_snapshot_token(&snapshot);
+    Ok(snapshot)
+}
+
+async fn detect_operation(root: &Path) -> Result<Option<GitOperationKind>> {
+    let checks = [
+        ("MERGE_HEAD", GitOperationKind::Merge),
+        ("rebase-merge", GitOperationKind::Rebase),
+        ("rebase-apply", GitOperationKind::Rebase),
+        ("CHERRY_PICK_HEAD", GitOperationKind::CherryPick),
+        ("REVERT_HEAD", GitOperationKind::Revert),
+    ];
+    for (name, kind) in checks {
+        if git_path(root, name).await?.exists() {
+            return Ok(Some(kind));
+        }
+    }
+    Ok(None)
+}
+
+fn parse_path_list(bytes: &[u8]) -> Result<Vec<PathBuf>> {
+    bytes
+        .split(|byte| *byte == 0)
+        .filter(|field| !field.is_empty())
+        .map(validate_repo_path)
+        .collect()
+}
+
+fn parse_stash_entries(bytes: &[u8]) -> Result<Vec<StashEntry>> {
+    let fields = split_nul_records(bytes);
+    fields
+        .chunks_exact(3)
+        .map(|record| {
+            Ok(StashEntry {
+                selector: text(record[0]).trim().to_owned(),
+                oid: text(record[1]).trim().to_owned(),
+                subject: text(record[2]).trim().to_owned(),
+            })
+        })
+        .collect()
+}
+
+fn parse_branch_entries(bytes: &[u8]) -> Result<Vec<BranchEntry>> {
+    let fields = split_nul_records(bytes);
+    fields
+        .chunks_exact(5)
+        .map(|record| {
+            let track = text(record[3]);
+            let (ahead, behind) = parse_track_counts(&track)?;
+            let upstream = text(record[2]).trim().to_owned();
+            Ok(BranchEntry {
+                name: text(record[0]).trim().to_owned(),
+                oid: text(record[1]).trim().to_owned(),
+                upstream: (!upstream.is_empty()).then_some(upstream),
+                ahead,
+                behind,
+                current: text(record[4]).trim() == "*",
+            })
+        })
+        .collect()
+}
+
+fn parse_track_counts(track: &str) -> Result<(usize, usize)> {
+    let mut ahead = 0;
+    let mut behind = 0;
+    for value in track.trim_matches(['[', ']']).split(',') {
+        let value = value.trim();
+        if let Some(count) = value.strip_prefix("ahead ") {
+            ahead = count.parse().context("invalid branch ahead count")?;
+        } else if let Some(count) = value.strip_prefix("behind ") {
+            behind = count.parse().context("invalid branch behind count")?;
+        }
+    }
+    Ok((ahead, behind))
+}
+
+fn parse_tag_entries(bytes: &[u8]) -> Result<Vec<TagEntry>> {
+    let fields = split_nul_records(bytes);
+    Ok(fields
+        .chunks_exact(2)
+        .map(|record| TagEntry {
+            name: text(record[0]).trim().to_owned(),
+            target: text(record[1]).trim().to_owned(),
+        })
+        .collect())
+}
+
+fn split_nul_records(bytes: &[u8]) -> Vec<&[u8]> {
+    let mut fields = bytes
+        .split(|byte| *byte == 0)
+        .map(trim_record_separator)
+        .collect::<Vec<_>>();
+    while fields.last().is_some_and(|field| field.is_empty()) {
+        fields.pop();
+    }
+    fields
+}
+
+fn parse_remote_branch_entries(bytes: &[u8]) -> Result<Vec<RemoteBranchEntry>> {
+    let fields = split_nul_records(bytes);
+    Ok(fields
+        .chunks_exact(2)
+        .filter_map(|record| {
+            let name = text(record[0]).trim().to_owned();
+            let oid = text(record[1]).trim().to_owned();
+            (!name.ends_with("/HEAD")).then_some(RemoteBranchEntry { name, oid })
+        })
+        .collect())
+}
+
+fn repository_snapshot_token(snapshot: &RepositorySnapshot) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    format!("{:?}", snapshot.operation).hash(&mut hasher);
+    snapshot.worktree_token.hash(&mut hasher);
+    snapshot.conflicts.hash(&mut hasher);
+    for stash in &snapshot.stashes {
+        stash.selector.hash(&mut hasher);
+        stash.oid.hash(&mut hasher);
+    }
+    for branch in &snapshot.branches {
+        branch.name.hash(&mut hasher);
+        branch.oid.hash(&mut hasher);
+        branch.upstream.hash(&mut hasher);
+        branch.current.hash(&mut hasher);
+    }
+    for tag in &snapshot.tags {
+        tag.name.hash(&mut hasher);
+        tag.target.hash(&mut hasher);
+    }
+    for remote in &snapshot.remotes {
+        remote.name.hash(&mut hasher);
+        remote.fetch_url.hash(&mut hasher);
+        remote.push_url.hash(&mut hasher);
+    }
+    for branch in &snapshot.remote_branches {
+        branch.name.hash(&mut hasher);
+        branch.oid.hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
+async fn load_remotes(root: &Path, _bytes: &[u8]) -> Result<Vec<RemoteEntry>> {
+    let mut names = Vec::new();
+    let configured = git_output(root, ["remote"]).await?;
+    names.extend(
+        String::from_utf8_lossy(&configured)
+            .lines()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(str::to_owned),
+    );
+    names.sort();
+    names.dedup();
+    let mut remotes = Vec::with_capacity(names.len());
+    for name in names {
+        let fetch_url =
+            String::from_utf8_lossy(&git_output(root, ["remote", "get-url", name.as_str()]).await?)
+                .trim()
+                .to_owned();
+        let push_url = String::from_utf8_lossy(
+            &git_output(root, ["remote", "get-url", "--push", name.as_str()]).await?,
+        )
+        .trim()
+        .to_owned();
+        remotes.push(RemoteEntry {
+            name,
+            fetch_url,
+            push_url,
+        });
+    }
+    Ok(remotes)
+}
+
+pub async fn execute_repository_action(
+    root: &Path,
+    action: &RepositoryAction,
+    check_only: bool,
+) -> Result<RepositoryActionOutcome> {
+    if check_only {
+        validate_repository_action(root, action, None).await?;
+        return Ok(RepositoryActionOutcome {
+            message: format!("{} is ready", action.label()),
+            detail: None,
+        });
+    }
+    let (args, detail_output) = action_args(action)?;
+    let output = git_output(root, args).await?;
+    Ok(RepositoryActionOutcome {
+        message: format!("{} completed", action.label()),
+        detail: detail_output.then(|| String::from_utf8_lossy(&output).into_owned()),
+    })
+}
+
+pub(crate) async fn validate_repository_action(
+    root: &Path,
+    action: &RepositoryAction,
+    expected_token: Option<u64>,
+) -> Result<()> {
+    if let Some(expected_token) = expected_token {
+        let current = repository_snapshot(root).await?;
+        if current.token != expected_token {
+            bail!("precondition failed: repository state changed after confirmation; refresh and retry");
+        }
+    }
+    validate_repository_action_values(action)?;
+    match action {
+        RepositoryAction::StashShow { selector }
+        | RepositoryAction::StashApply { selector }
+        | RepositoryAction::StashPop { selector }
+        | RepositoryAction::StashDrop { selector } => {
+            git_output(root, ["rev-parse", "--verify", selector.as_str()]).await?;
+        }
+        RepositoryAction::ConflictTakeOurs { path }
+        | RepositoryAction::ConflictTakeTheirs { path }
+        | RepositoryAction::ConflictMarkResolved { path } => {
+            validate_path(path)?;
+            if !repository_snapshot(root).await?.conflicts.contains(path) {
+                bail!(
+                    "precondition failed: {} is no longer conflicted",
+                    path.display()
+                );
+            }
+        }
+        RepositoryAction::Continue { operation }
+        | RepositoryAction::Skip { operation }
+        | RepositoryAction::Abort { operation } => {
+            if detect_operation(root).await? != Some(*operation) {
+                bail!(
+                    "precondition failed: {} is no longer active",
+                    operation.label()
+                );
+            }
+        }
+        RepositoryAction::BranchDelete { name, .. } => {
+            git_output(
+                root,
+                [
+                    "show-ref",
+                    "--verify",
+                    format!("refs/heads/{name}").as_str(),
+                ],
+            )
+            .await?;
+        }
+        RepositoryAction::TagDelete { name } => {
+            git_output(
+                root,
+                ["show-ref", "--verify", format!("refs/tags/{name}").as_str()],
+            )
+            .await?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn validate_repository_action_values(action: &RepositoryAction) -> Result<()> {
+    let mut values = Vec::new();
+    match action {
+        RepositoryAction::StashShow { selector }
+        | RepositoryAction::StashApply { selector }
+        | RepositoryAction::StashPop { selector }
+        | RepositoryAction::StashDrop { selector } => values.push(("stash", selector.as_str())),
+        RepositoryAction::BranchCreate { name, start } => {
+            values.push(("branch", name));
+            if let Some(start) = start {
+                values.push(("start ref", start));
+            }
+        }
+        RepositoryAction::BranchSwitch { name } | RepositoryAction::BranchDelete { name, .. } => {
+            values.push(("branch", name))
+        }
+        RepositoryAction::BranchRename { old, new } => {
+            values.push(("branch", old));
+            values.push(("new branch", new));
+        }
+        RepositoryAction::TagCreate { name, target } => {
+            values.push(("tag", name));
+            values.push(("target", target));
+        }
+        RepositoryAction::TagDelete { name } => values.push(("tag", name)),
+        RepositoryAction::Merge { reference } | RepositoryAction::Rebase { reference } => {
+            values.push(("reference", reference))
+        }
+        RepositoryAction::CherryPick { oid } | RepositoryAction::Revert { oid } => {
+            values.push(("commit", oid));
+        }
+        RepositoryAction::RemoteAdd { name, url }
+        | RepositoryAction::RemoteSetUrl { name, url } => {
+            values.push(("remote", name));
+            values.push(("URL", url));
+        }
+        RepositoryAction::RemoteRemove { name } => values.push(("remote", name)),
+        RepositoryAction::Fetch { remote, .. } | RepositoryAction::RemotePrune { remote } => {
+            values.push(("remote", remote))
+        }
+        RepositoryAction::Pull { remote, branch, .. }
+        | RepositoryAction::Push { remote, branch, .. } => {
+            values.push(("remote", remote));
+            values.push(("branch", branch));
+        }
+        RepositoryAction::SetUpstream { branch, upstream } => {
+            values.push(("branch", branch));
+            values.push(("upstream", upstream));
+        }
+        RepositoryAction::StashPush { .. }
+        | RepositoryAction::ConflictTakeOurs { .. }
+        | RepositoryAction::ConflictTakeTheirs { .. }
+        | RepositoryAction::ConflictMarkResolved { .. }
+        | RepositoryAction::Continue { .. }
+        | RepositoryAction::Skip { .. }
+        | RepositoryAction::Abort { .. } => {}
+    }
+    for (label, value) in values {
+        if value.is_empty() || value.starts_with('-') || value.contains('\0') {
+            bail!("invalid {label}: {value:?}");
+        }
+    }
+    Ok(())
+}
+
+fn action_args(action: &RepositoryAction) -> Result<(Vec<OsString>, bool)> {
+    let mut args = Vec::new();
+    let mut detail = false;
+    match action {
+        RepositoryAction::StashShow { selector } => {
+            args.extend(["stash", "show", "--patch", "--no-color"].map(OsString::from));
+            args.push(selector.into());
+            detail = true;
+        }
+        RepositoryAction::StashPush {
+            message,
+            include_untracked,
+        } => {
+            args.extend(["stash", "push"].map(OsString::from));
+            if *include_untracked {
+                args.push("--include-untracked".into());
+            }
+            if !message.is_empty() {
+                args.extend(["--message".into(), message.into()]);
+            }
+        }
+        RepositoryAction::StashApply { selector } => {
+            args.extend(["stash", "apply"].map(OsString::from));
+            args.push(selector.into());
+        }
+        RepositoryAction::StashPop { selector } => {
+            args.extend(["stash", "pop"].map(OsString::from));
+            args.push(selector.into());
+        }
+        RepositoryAction::StashDrop { selector } => {
+            args.extend(["stash", "drop"].map(OsString::from));
+            args.push(selector.into());
+        }
+        RepositoryAction::ConflictTakeOurs { path } => {
+            args.extend(["checkout", "--ours", "--"].map(OsString::from));
+            args.push(path.into());
+        }
+        RepositoryAction::ConflictTakeTheirs { path } => {
+            args.extend(["checkout", "--theirs", "--"].map(OsString::from));
+            args.push(path.into());
+        }
+        RepositoryAction::ConflictMarkResolved { path } => {
+            args.extend(["add", "--"].map(OsString::from));
+            args.push(path.into());
+        }
+        RepositoryAction::Continue { operation } => {
+            operation_args(&mut args, *operation, "--continue")?
+        }
+        RepositoryAction::Skip { operation } => operation_args(&mut args, *operation, "--skip")?,
+        RepositoryAction::Abort { operation } => operation_args(&mut args, *operation, "--abort")?,
+        RepositoryAction::BranchCreate { name, start } => {
+            args.extend(["branch".into(), "--".into(), name.into()]);
+            if let Some(start) = start {
+                args.push(start.into());
+            }
+        }
+        RepositoryAction::BranchSwitch { name } => {
+            args.extend(["switch".into(), "--".into(), name.into()]);
+        }
+        RepositoryAction::BranchRename { old, new } => {
+            args.extend([
+                "branch".into(),
+                "--move".into(),
+                "--".into(),
+                old.into(),
+                new.into(),
+            ]);
+        }
+        RepositoryAction::BranchDelete { name, force } => {
+            args.extend([
+                "branch".into(),
+                if *force { "-D".into() } else { "-d".into() },
+                "--".into(),
+                name.into(),
+            ]);
+        }
+        RepositoryAction::TagCreate { name, target } => {
+            args.extend(["tag".into(), "--".into(), name.into(), target.into()]);
+        }
+        RepositoryAction::TagDelete { name } => {
+            args.extend(["tag".into(), "--delete".into(), "--".into(), name.into()]);
+        }
+        RepositoryAction::Merge { reference } => {
+            args.extend([
+                "merge".into(),
+                "--no-edit".into(),
+                "--".into(),
+                reference.into(),
+            ]);
+        }
+        RepositoryAction::Rebase { reference } => {
+            args.extend(["rebase".into(), "--".into(), reference.into()]);
+        }
+        RepositoryAction::CherryPick { oid } => {
+            args.extend(["cherry-pick".into(), "--".into(), oid.into()]);
+        }
+        RepositoryAction::Revert { oid } => {
+            args.extend(["revert".into(), "--no-edit".into(), "--".into(), oid.into()]);
+        }
+        RepositoryAction::RemoteAdd { name, url } => {
+            args.extend(["remote".into(), "add".into(), name.into(), url.into()]);
+        }
+        RepositoryAction::RemoteSetUrl { name, url } => {
+            args.extend(["remote".into(), "set-url".into(), name.into(), url.into()]);
+        }
+        RepositoryAction::RemoteRemove { name } => {
+            args.extend(["remote".into(), "remove".into(), name.into()]);
+        }
+        RepositoryAction::Fetch { remote, prune } => {
+            args.extend(["fetch".into(), remote.into()]);
+            if *prune {
+                args.push("--prune".into());
+            }
+        }
+        RepositoryAction::Pull {
+            remote,
+            branch,
+            rebase,
+        } => {
+            args.extend(["pull".into()]);
+            if *rebase {
+                args.push("--rebase".into());
+            }
+            args.extend([remote.into(), branch.into()]);
+        }
+        RepositoryAction::Push {
+            remote,
+            branch,
+            set_upstream,
+            force_with_lease,
+        } => {
+            args.extend(["push".into()]);
+            if *set_upstream {
+                args.push("--set-upstream".into());
+            }
+            if *force_with_lease {
+                args.push("--force-with-lease".into());
+            }
+            args.extend([remote.into(), format!("{branch}:{branch}").into()]);
+        }
+        RepositoryAction::SetUpstream { branch, upstream } => {
+            args.extend([
+                "branch".into(),
+                "--set-upstream-to".into(),
+                upstream.into(),
+                branch.into(),
+            ]);
+        }
+        RepositoryAction::RemotePrune { remote } => {
+            args.extend(["remote".into(), "prune".into(), remote.into()]);
+        }
+    }
+    Ok((args, detail))
+}
+
+fn operation_args(args: &mut Vec<OsString>, operation: GitOperationKind, flag: &str) -> Result<()> {
+    let command = match operation {
+        GitOperationKind::Merge => {
+            if flag == "--skip" {
+                bail!("merge does not support skip");
+            }
+            "merge"
+        }
+        GitOperationKind::Rebase => "rebase",
+        GitOperationKind::CherryPick => "cherry-pick",
+        GitOperationKind::Revert => "revert",
+    };
+    args.extend([command.into(), flag.into()]);
+    Ok(())
 }
 fn path_args(prefix: &[&str], path: &Path) -> Vec<OsString> {
     let mut args: Vec<OsString> = prefix.iter().map(OsString::from).collect();
@@ -1406,6 +2136,627 @@ u UU N... 100644 100644 100644 100644 a b c conflict.txt\x00\
         assert_eq!(stash[1].1.name, "stash@{1}");
     }
 
+    #[tokio::test]
+    async fn repository_actions_cover_stash_conflict_refs_and_remote_workflows() {
+        let temp = tempdir().unwrap();
+        let remote = tempdir().unwrap();
+        run_git(temp.path(), &["init", "-q", "-b", "main"]);
+        run_git(temp.path(), &["config", "user.name", "Test"]);
+        run_git(temp.path(), &["config", "user.email", "test@example.com"]);
+        commit_file(temp.path(), "tracked.txt", "base\n", "base");
+        run_git(remote.path(), &["init", "--bare", "-q"]);
+
+        fs::write(temp.path().join("tracked.txt"), "stash\n").unwrap();
+        execute_repository_action(
+            temp.path(),
+            &RepositoryAction::StashPush {
+                message: "saved".into(),
+                include_untracked: false,
+            },
+            false,
+        )
+        .await
+        .unwrap();
+        let snapshot = repository_snapshot(temp.path()).await.unwrap();
+        assert_eq!(snapshot.stashes.len(), 1);
+        let shown = execute_repository_action(
+            temp.path(),
+            &RepositoryAction::StashShow {
+                selector: "stash@{0}".into(),
+            },
+            false,
+        )
+        .await
+        .unwrap();
+        assert!(shown.detail.unwrap().contains("tracked.txt"));
+        execute_repository_action(
+            temp.path(),
+            &RepositoryAction::StashApply {
+                selector: "stash@{0}".into(),
+            },
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            fs::read_to_string(temp.path().join("tracked.txt")).unwrap(),
+            "stash\n"
+        );
+        run_git(temp.path(), &["restore", "tracked.txt"]);
+        execute_repository_action(
+            temp.path(),
+            &RepositoryAction::StashDrop {
+                selector: "stash@{0}".into(),
+            },
+            false,
+        )
+        .await
+        .unwrap();
+        fs::write(temp.path().join("tracked.txt"), "stash pop\n").unwrap();
+        execute_repository_action(
+            temp.path(),
+            &RepositoryAction::StashPush {
+                message: "pop".into(),
+                include_untracked: false,
+            },
+            false,
+        )
+        .await
+        .unwrap();
+        execute_repository_action(
+            temp.path(),
+            &RepositoryAction::StashPop {
+                selector: "stash@{0}".into(),
+            },
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            fs::read_to_string(temp.path().join("tracked.txt")).unwrap(),
+            "stash pop\n"
+        );
+        assert!(repository_snapshot(temp.path())
+            .await
+            .unwrap()
+            .stashes
+            .is_empty());
+        run_git(temp.path(), &["restore", "tracked.txt"]);
+
+        execute_repository_action(
+            temp.path(),
+            &RepositoryAction::BranchCreate {
+                name: "feature".into(),
+                start: None,
+            },
+            false,
+        )
+        .await
+        .unwrap();
+        execute_repository_action(
+            temp.path(),
+            &RepositoryAction::TagCreate {
+                name: "v1".into(),
+                target: "HEAD".into(),
+            },
+            false,
+        )
+        .await
+        .unwrap();
+        execute_repository_action(
+            temp.path(),
+            &RepositoryAction::RemoteAdd {
+                name: "origin".into(),
+                url: remote.path().to_string_lossy().into_owned(),
+            },
+            false,
+        )
+        .await
+        .unwrap();
+        execute_repository_action(
+            temp.path(),
+            &RepositoryAction::Push {
+                remote: "origin".into(),
+                branch: "main".into(),
+                set_upstream: true,
+                force_with_lease: false,
+            },
+            false,
+        )
+        .await
+        .unwrap();
+        let snapshot = repository_snapshot(temp.path()).await.unwrap();
+        assert!(snapshot
+            .branches
+            .iter()
+            .any(|branch| branch.name == "feature"));
+        let main = snapshot
+            .branches
+            .iter()
+            .find(|branch| branch.name == "main")
+            .unwrap();
+        assert_eq!(main.upstream.as_deref(), Some("origin/main"));
+        assert!(snapshot.tags.iter().any(|tag| tag.name == "v1"));
+        assert!(snapshot
+            .remotes
+            .iter()
+            .any(|remote| remote.name == "origin"));
+
+        run_git(temp.path(), &["switch", "-q", "feature"]);
+        fs::write(temp.path().join("tracked.txt"), "feature\n").unwrap();
+        run_git(temp.path(), &["add", "tracked.txt"]);
+        run_git(temp.path(), &["commit", "-q", "-m", "feature"]);
+        run_git(temp.path(), &["switch", "-q", "main"]);
+        fs::write(temp.path().join("tracked.txt"), "main\n").unwrap();
+        run_git(temp.path(), &["add", "tracked.txt"]);
+        run_git(temp.path(), &["commit", "-q", "-m", "main"]);
+        let merge = execute_repository_action(
+            temp.path(),
+            &RepositoryAction::Merge {
+                reference: "feature".into(),
+            },
+            false,
+        )
+        .await;
+        assert!(merge.is_err());
+        let snapshot = repository_snapshot(temp.path()).await.unwrap();
+        assert_eq!(snapshot.operation, Some(GitOperationKind::Merge));
+        assert_eq!(snapshot.conflicts, vec![PathBuf::from("tracked.txt")]);
+        execute_repository_action(
+            temp.path(),
+            &RepositoryAction::ConflictTakeTheirs {
+                path: "tracked.txt".into(),
+            },
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            fs::read_to_string(temp.path().join("tracked.txt")).unwrap(),
+            "feature\n"
+        );
+        execute_repository_action(
+            temp.path(),
+            &RepositoryAction::ConflictTakeOurs {
+                path: "tracked.txt".into(),
+            },
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            fs::read_to_string(temp.path().join("tracked.txt")).unwrap(),
+            "main\n"
+        );
+        execute_repository_action(
+            temp.path(),
+            &RepositoryAction::ConflictMarkResolved {
+                path: "tracked.txt".into(),
+            },
+            false,
+        )
+        .await
+        .unwrap();
+        assert!(repository_snapshot(temp.path())
+            .await
+            .unwrap()
+            .conflicts
+            .is_empty());
+        execute_repository_action(
+            temp.path(),
+            &RepositoryAction::Continue {
+                operation: GitOperationKind::Merge,
+            },
+            false,
+        )
+        .await
+        .unwrap();
+        assert!(repository_snapshot(temp.path())
+            .await
+            .unwrap()
+            .operation
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn repository_actions_cover_branch_tag_merge_and_rebase() {
+        let temp = tempdir().unwrap();
+        run_git(temp.path(), &["init", "-q", "-b", "main"]);
+        run_git(temp.path(), &["config", "user.name", "Test"]);
+        run_git(temp.path(), &["config", "user.email", "test@example.com"]);
+        commit_file(temp.path(), "base.txt", "base\n", "base");
+
+        execute_repository_action(
+            temp.path(),
+            &RepositoryAction::BranchCreate {
+                name: "topic".into(),
+                start: None,
+            },
+            false,
+        )
+        .await
+        .unwrap();
+        execute_repository_action(
+            temp.path(),
+            &RepositoryAction::BranchSwitch {
+                name: "topic".into(),
+            },
+            false,
+        )
+        .await
+        .unwrap();
+        commit_file(temp.path(), "topic.txt", "topic\n", "topic");
+        execute_repository_action(
+            temp.path(),
+            &RepositoryAction::BranchRename {
+                old: "topic".into(),
+                new: "renamed".into(),
+            },
+            false,
+        )
+        .await
+        .unwrap();
+        execute_repository_action(
+            temp.path(),
+            &RepositoryAction::TagCreate {
+                name: "temp-tag".into(),
+                target: "HEAD".into(),
+            },
+            false,
+        )
+        .await
+        .unwrap();
+        execute_repository_action(
+            temp.path(),
+            &RepositoryAction::BranchSwitch {
+                name: "main".into(),
+            },
+            false,
+        )
+        .await
+        .unwrap();
+        execute_repository_action(
+            temp.path(),
+            &RepositoryAction::Merge {
+                reference: "renamed".into(),
+            },
+            false,
+        )
+        .await
+        .unwrap();
+        assert!(temp.path().join("topic.txt").is_file());
+        execute_repository_action(
+            temp.path(),
+            &RepositoryAction::TagDelete {
+                name: "temp-tag".into(),
+            },
+            false,
+        )
+        .await
+        .unwrap();
+        execute_repository_action(
+            temp.path(),
+            &RepositoryAction::BranchDelete {
+                name: "renamed".into(),
+                force: false,
+            },
+            false,
+        )
+        .await
+        .unwrap();
+        let snapshot = repository_snapshot(temp.path()).await.unwrap();
+        assert!(!snapshot
+            .branches
+            .iter()
+            .any(|branch| branch.name == "renamed"));
+        assert!(!snapshot.tags.iter().any(|tag| tag.name == "temp-tag"));
+
+        execute_repository_action(
+            temp.path(),
+            &RepositoryAction::BranchCreate {
+                name: "rebased".into(),
+                start: None,
+            },
+            false,
+        )
+        .await
+        .unwrap();
+        execute_repository_action(
+            temp.path(),
+            &RepositoryAction::BranchSwitch {
+                name: "rebased".into(),
+            },
+            false,
+        )
+        .await
+        .unwrap();
+        commit_file(temp.path(), "rebased.txt", "rebased\n", "rebased");
+        execute_repository_action(
+            temp.path(),
+            &RepositoryAction::BranchSwitch {
+                name: "main".into(),
+            },
+            false,
+        )
+        .await
+        .unwrap();
+        commit_file(temp.path(), "main.txt", "main\n", "main");
+        execute_repository_action(
+            temp.path(),
+            &RepositoryAction::BranchSwitch {
+                name: "rebased".into(),
+            },
+            false,
+        )
+        .await
+        .unwrap();
+        execute_repository_action(
+            temp.path(),
+            &RepositoryAction::Rebase {
+                reference: "main".into(),
+            },
+            false,
+        )
+        .await
+        .unwrap();
+        assert!(run_git(
+            temp.path(),
+            &["merge-base", "--is-ancestor", "main", "HEAD"]
+        )
+        .is_empty());
+    }
+
+    #[tokio::test]
+    async fn repository_actions_cover_cherry_pick_revert_and_stale_snapshot() {
+        let temp = tempdir().unwrap();
+        run_git(temp.path(), &["init", "-q", "-b", "main"]);
+        run_git(temp.path(), &["config", "user.name", "Test"]);
+        run_git(temp.path(), &["config", "user.email", "test@example.com"]);
+        commit_file(temp.path(), "base.txt", "base\n", "base");
+        run_git(temp.path(), &["switch", "-q", "-c", "source"]);
+        commit_file(temp.path(), "picked.txt", "picked\n", "picked");
+        let picked = run_git(temp.path(), &["rev-parse", "HEAD"]);
+        run_git(temp.path(), &["switch", "-q", "main"]);
+
+        execute_repository_action(
+            temp.path(),
+            &RepositoryAction::CherryPick {
+                oid: picked.clone(),
+            },
+            false,
+        )
+        .await
+        .unwrap();
+        assert!(temp.path().join("picked.txt").is_file());
+        execute_repository_action(
+            temp.path(),
+            &RepositoryAction::Revert { oid: "HEAD".into() },
+            false,
+        )
+        .await
+        .unwrap();
+        assert!(!temp.path().join("picked.txt").exists());
+
+        let snapshot = repository_snapshot(temp.path()).await.unwrap();
+        run_git(temp.path(), &["branch", "changed-after-confirmation"]);
+        let error = validate_repository_action(
+            temp.path(),
+            &RepositoryAction::TagCreate {
+                name: "stale".into(),
+                target: "HEAD".into(),
+            },
+            Some(snapshot.token),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("changed after confirmation"));
+        assert!(operation_args(&mut Vec::new(), GitOperationKind::Merge, "--skip").is_err());
+    }
+
+    #[tokio::test]
+    async fn repository_actions_cover_remote_round_trip_and_force_with_lease() {
+        let root = tempdir().unwrap();
+        let remote = root.path().join("remote.git");
+        let seed = root.path().join("seed");
+        let client = root.path().join("client");
+        run_git(
+            root.path(),
+            &["init", "--bare", "-q", remote.to_str().unwrap()],
+        );
+        run_git(
+            root.path(),
+            &["init", "-q", "-b", "main", seed.to_str().unwrap()],
+        );
+        run_git(&seed, &["config", "user.name", "Test"]);
+        run_git(&seed, &["config", "user.email", "test@example.com"]);
+        commit_file(&seed, "shared.txt", "base\n", "base");
+        run_git(
+            &seed,
+            &["remote", "add", "origin", remote.to_str().unwrap()],
+        );
+        run_git(&seed, &["push", "-q", "-u", "origin", "main"]);
+        run_git(&remote, &["symbolic-ref", "HEAD", "refs/heads/main"]);
+        run_git(
+            root.path(),
+            &[
+                "clone",
+                "-q",
+                remote.to_str().unwrap(),
+                client.to_str().unwrap(),
+            ],
+        );
+        run_git(&client, &["config", "user.name", "Test"]);
+        run_git(&client, &["config", "user.email", "test@example.com"]);
+
+        commit_file(&seed, "upstream.txt", "upstream\n", "upstream");
+        run_git(&seed, &["push", "-q", "origin", "main"]);
+        execute_repository_action(
+            &client,
+            &RepositoryAction::Fetch {
+                remote: "origin".into(),
+                prune: true,
+            },
+            false,
+        )
+        .await
+        .unwrap();
+        execute_repository_action(
+            &client,
+            &RepositoryAction::Pull {
+                remote: "origin".into(),
+                branch: "main".into(),
+                rebase: true,
+            },
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            run_git(&client, &["rev-parse", "HEAD"]),
+            run_git(&seed, &["rev-parse", "HEAD"])
+        );
+
+        run_git(&client, &["branch", "--unset-upstream"]);
+        execute_repository_action(
+            &client,
+            &RepositoryAction::SetUpstream {
+                branch: "main".into(),
+                upstream: "origin/main".into(),
+            },
+            false,
+        )
+        .await
+        .unwrap();
+        commit_file(&client, "client.txt", "client\n", "client");
+        let push = RepositoryAction::Push {
+            remote: "origin".into(),
+            branch: "main".into(),
+            set_upstream: true,
+            force_with_lease: true,
+        };
+        let (args, _) = action_args(&push).unwrap();
+        assert!(args.iter().any(|arg| arg == "--force-with-lease"));
+        assert!(!args.iter().any(|arg| arg == "--force"));
+        assert!(args.iter().any(|arg| arg == "main:main"));
+        execute_repository_action(&client, &push, false)
+            .await
+            .unwrap();
+        assert_eq!(
+            run_git(&remote, &["rev-parse", "refs/heads/main"]),
+            run_git(&client, &["rev-parse", "main"])
+        );
+
+        let head = run_git(&client, &["rev-parse", "HEAD"]);
+        run_git(&remote, &["update-ref", "refs/heads/stale", &head]);
+        execute_repository_action(
+            &client,
+            &RepositoryAction::Fetch {
+                remote: "origin".into(),
+                prune: false,
+            },
+            false,
+        )
+        .await
+        .unwrap();
+        run_git(&remote, &["update-ref", "-d", "refs/heads/stale"]);
+        execute_repository_action(
+            &client,
+            &RepositoryAction::RemotePrune {
+                remote: "origin".into(),
+            },
+            false,
+        )
+        .await
+        .unwrap();
+        let stale = std::process::Command::new("git")
+            .args(["show-ref", "--verify", "refs/remotes/origin/stale"])
+            .current_dir(&client)
+            .status()
+            .unwrap();
+        assert!(!stale.success());
+
+        execute_repository_action(
+            &client,
+            &RepositoryAction::RemoteSetUrl {
+                name: "origin".into(),
+                url: remote.to_string_lossy().into_owned(),
+            },
+            false,
+        )
+        .await
+        .unwrap();
+        execute_repository_action(
+            &client,
+            &RepositoryAction::RemoteAdd {
+                name: "backup".into(),
+                url: remote.to_string_lossy().into_owned(),
+            },
+            false,
+        )
+        .await
+        .unwrap();
+        execute_repository_action(
+            &client,
+            &RepositoryAction::RemoteRemove {
+                name: "backup".into(),
+            },
+            false,
+        )
+        .await
+        .unwrap();
+        assert!(!repository_snapshot(&client)
+            .await
+            .unwrap()
+            .remotes
+            .iter()
+            .any(|remote| remote.name == "backup"));
+        assert!(validate_repository_action_values(&RepositoryAction::Fetch {
+            remote: "--all".into(),
+            prune: false,
+        })
+        .is_err());
+    }
+
+    #[tokio::test]
+    async fn repository_action_skip_finishes_conflicting_cherry_pick() {
+        let temp = tempdir().unwrap();
+        run_git(temp.path(), &["init", "-q", "-b", "main"]);
+        run_git(temp.path(), &["config", "user.name", "Test"]);
+        run_git(temp.path(), &["config", "user.email", "test@example.com"]);
+        commit_file(temp.path(), "tracked.txt", "base\n", "base");
+        run_git(temp.path(), &["switch", "-q", "-c", "source"]);
+        fs::write(temp.path().join("tracked.txt"), "source\n").unwrap();
+        run_git(temp.path(), &["commit", "-qam", "source"]);
+        let oid = run_git(temp.path(), &["rev-parse", "HEAD"]);
+        run_git(temp.path(), &["switch", "-q", "main"]);
+        fs::write(temp.path().join("tracked.txt"), "main\n").unwrap();
+        run_git(temp.path(), &["commit", "-qam", "main"]);
+        assert!(execute_repository_action(
+            temp.path(),
+            &RepositoryAction::CherryPick { oid },
+            false,
+        )
+        .await
+        .is_err());
+        assert_eq!(
+            repository_snapshot(temp.path()).await.unwrap().operation,
+            Some(GitOperationKind::CherryPick)
+        );
+        execute_repository_action(
+            temp.path(),
+            &RepositoryAction::Skip {
+                operation: GitOperationKind::CherryPick,
+            },
+            false,
+        )
+        .await
+        .unwrap();
+        assert!(repository_snapshot(temp.path())
+            .await
+            .unwrap()
+            .operation
+            .is_none());
+    }
     #[test]
     fn rejects_incomplete_log_record() {
         assert!(parse_log(b"oid\0parent\0").is_err());

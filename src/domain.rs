@@ -247,11 +247,20 @@ pub struct ChangeHunk {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChangeLine {
+    pub source: HunkSource,
+    pub hunk_fingerprint: u64,
+    pub fingerprint: u64,
+    pub display_line: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChangePreview {
     pub text: String,
     pub token: u64,
     pub truncated: bool,
     pub hunks: Vec<ChangeHunk>,
+    pub lines: Vec<ChangeLine>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -280,7 +289,9 @@ impl OperationKind {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RiskLevel {
+    ReadOnly,
     ReversibleWrite,
+    RemoteWrite,
     Destructive,
 }
 
@@ -289,6 +300,11 @@ pub enum OperationTarget {
     File,
     Hunk {
         source: HunkSource,
+        fingerprint: u64,
+    },
+    Line {
+        source: HunkSource,
+        hunk_fingerprint: u64,
         fingerprint: u64,
     },
 }
@@ -321,6 +337,243 @@ pub struct CommitSpec {
 pub struct CommitOutcome {
     pub oid: String,
     pub message: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GitOperationKind {
+    Merge,
+    Rebase,
+    CherryPick,
+    Revert,
+}
+
+impl GitOperationKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Merge => "merge",
+            Self::Rebase => "rebase",
+            Self::CherryPick => "cherry-pick",
+            Self::Revert => "revert",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StashEntry {
+    pub selector: String,
+    pub oid: String,
+    pub subject: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BranchEntry {
+    pub name: String,
+    pub oid: String,
+    pub upstream: Option<String>,
+    pub ahead: usize,
+    pub behind: usize,
+    pub current: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TagEntry {
+    pub name: String,
+    pub target: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteBranchEntry {
+    pub name: String,
+    pub oid: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteEntry {
+    pub name: String,
+    pub fetch_url: String,
+    pub push_url: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepositorySnapshot {
+    pub operation: Option<GitOperationKind>,
+    pub conflicts: Vec<PathBuf>,
+    pub stashes: Vec<StashEntry>,
+    pub branches: Vec<BranchEntry>,
+    pub tags: Vec<TagEntry>,
+    pub remotes: Vec<RemoteEntry>,
+    pub remote_branches: Vec<RemoteBranchEntry>,
+    pub worktree_token: u64,
+    pub token: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RepositoryAction {
+    StashShow {
+        selector: String,
+    },
+    StashPush {
+        message: String,
+        include_untracked: bool,
+    },
+    StashApply {
+        selector: String,
+    },
+    StashPop {
+        selector: String,
+    },
+    StashDrop {
+        selector: String,
+    },
+    ConflictTakeOurs {
+        path: PathBuf,
+    },
+    ConflictTakeTheirs {
+        path: PathBuf,
+    },
+    ConflictMarkResolved {
+        path: PathBuf,
+    },
+    Continue {
+        operation: GitOperationKind,
+    },
+    Skip {
+        operation: GitOperationKind,
+    },
+    Abort {
+        operation: GitOperationKind,
+    },
+    BranchCreate {
+        name: String,
+        start: Option<String>,
+    },
+    BranchSwitch {
+        name: String,
+    },
+    BranchRename {
+        old: String,
+        new: String,
+    },
+    BranchDelete {
+        name: String,
+        force: bool,
+    },
+    TagCreate {
+        name: String,
+        target: String,
+    },
+    TagDelete {
+        name: String,
+    },
+    Merge {
+        reference: String,
+    },
+    Rebase {
+        reference: String,
+    },
+    CherryPick {
+        oid: String,
+    },
+    Revert {
+        oid: String,
+    },
+    RemoteAdd {
+        name: String,
+        url: String,
+    },
+    RemoteSetUrl {
+        name: String,
+        url: String,
+    },
+    RemoteRemove {
+        name: String,
+    },
+    Fetch {
+        remote: String,
+        prune: bool,
+    },
+    Pull {
+        remote: String,
+        branch: String,
+        rebase: bool,
+    },
+    Push {
+        remote: String,
+        branch: String,
+        set_upstream: bool,
+        force_with_lease: bool,
+    },
+    SetUpstream {
+        branch: String,
+        upstream: String,
+    },
+    RemotePrune {
+        remote: String,
+    },
+}
+
+impl RepositoryAction {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::StashShow { .. } => "Show stash",
+            Self::StashPush { .. } => "Create stash",
+            Self::StashApply { .. } => "Apply stash",
+            Self::StashPop { .. } => "Pop stash",
+            Self::StashDrop { .. } => "Drop stash",
+            Self::ConflictTakeOurs { .. } => "Take ours",
+            Self::ConflictTakeTheirs { .. } => "Take theirs",
+            Self::ConflictMarkResolved { .. } => "Mark resolved",
+            Self::Continue { .. } => "Continue operation",
+            Self::Skip { .. } => "Skip commit",
+            Self::Abort { .. } => "Abort operation",
+            Self::BranchCreate { .. } => "Create branch",
+            Self::BranchSwitch { .. } => "Switch branch",
+            Self::BranchRename { .. } => "Rename branch",
+            Self::BranchDelete { .. } => "Delete branch",
+            Self::TagCreate { .. } => "Create tag",
+            Self::TagDelete { .. } => "Delete tag",
+            Self::Merge { .. } => "Merge",
+            Self::Rebase { .. } => "Rebase",
+            Self::CherryPick { .. } => "Cherry-pick",
+            Self::Revert { .. } => "Revert",
+            Self::RemoteAdd { .. } => "Add remote",
+            Self::RemoteSetUrl { .. } => "Set remote URL",
+            Self::RemoteRemove { .. } => "Remove remote",
+            Self::Fetch { .. } => "Fetch",
+            Self::Pull { .. } => "Pull",
+            Self::Push { .. } => "Push",
+            Self::SetUpstream { .. } => "Set upstream",
+            Self::RemotePrune { .. } => "Prune remote",
+        }
+    }
+
+    pub fn risk(&self) -> RiskLevel {
+        match self {
+            Self::StashDrop { .. }
+            | Self::ConflictTakeOurs { .. }
+            | Self::ConflictTakeTheirs { .. }
+            | Self::Abort { .. }
+            | Self::BranchDelete { .. }
+            | Self::TagDelete { .. }
+            | Self::RemoteRemove { .. } => RiskLevel::Destructive,
+            Self::Push { .. } => RiskLevel::RemoteWrite,
+            Self::StashShow { .. } => RiskLevel::ReadOnly,
+            _ => RiskLevel::ReversibleWrite,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct RepositoryActionSpec {
+    pub project: Project,
+    pub action: RepositoryAction,
+    pub expected_token: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct RepositoryActionOutcome {
+    pub message: String,
+    pub detail: Option<String>,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CommitRefKind {
