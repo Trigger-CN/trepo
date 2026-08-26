@@ -52,10 +52,13 @@ M1 是所有后续里程碑的共同数据与交互基础。M4 可以在 M2 后�
 
 - 从任意子目录识别 Repo 工作区或单 Git 仓库，并并发扫描状态。
 - Workspace、完整 all-refs Graph、Changes 和 Repository 管理页面均已可用。
+- Graph 支持两级上下文操作：选中节点后选择 commit/HEAD/本地分支/远端分支/tag/stash，再选择固定动作或 typed form。
+- Graph 内可发现并执行 commit/amend、stash 创建、branch/tag 创建、merge/rebase/cherry-pick/revert 和 stash 操作；本地与远端分支动作集合明确隔离。
 - 文件、hunk 与 changed-line stage/unstage/discard，commit/amend/sign-off/signing 和 stash 全流程。
 - merge/rebase/cherry-pick/revert 冲突状态、ours/theirs/mark-resolved 与合法 continue/skip/abort。
 - branch/tag/remotes 管理，以及 fetch/pull/push/upstream/prune 和 `--force-with-lease`。
 - 所有写操作复用 project lock、index lock、实时 snapshot/token 前置检查、确认和 generation 结果隔离。
+- Graph overlay、confirmation 和结果状态已覆盖 80x24 与 120x40 TestBackend 渲染。
 
 下一执行点是 M4 Repo 批量工作流；外部 editor/mergetool 和任意受控命令的 PTY takeover 属于 M5。
 

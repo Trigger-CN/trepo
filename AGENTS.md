@@ -23,11 +23,11 @@
 - Repo client 与单 Git 仓库发现。
 - 多项目并发状态扫描和 Workspace 汇总。
 - 包含本地分支、远端分支、tag、HEAD 与每条 stash 的全引用 commit graph。
+- Graph 两级对象菜单：从选中节点发现 commit/HEAD/local branch/remote branch/tag/stash，再进入固定对象动作或 typed form。
+- Graph 内可执行 commit/amend、stash 创建、branch/tag 创建、merge/rebase/cherry-pick/revert 和 stash 操作；本地与远端 branch 动作严格区分。
 - staged、worktree、untracked diff，以及文件、hunk、changed-line stage/unstage/discard。
 - commit/amend、sign-off、signing 与 hook 失败消息恢复。
 - stash、conflict/operation state、branch/tag、merge/rebase/cherry-pick/revert 和 remote 工作流。
-- fetch/pull/push/upstream/prune，精确 remote-write 预览，以及仅 `--force-with-lease` 的强制推送。
-- 项目写锁、index lock、snapshot/token、generation、陈旧状态拒绝和破坏性/远端确认。
 
 M0-M3 已完成。下一执行点是 M4 Repo 批量工作流；需要外部 editor、mergetool 或任意交互命令的终端接管属于 M5。
 
@@ -95,7 +95,7 @@ cargo run -- doctor .
 ### 5.3 异步状态
 
 - 长任务不得阻塞输入和绘制循环。
-- scan、graph、changes、preview、commit、repository load 和 repository action 结果必须携带并校验 generation。
+- scan、graph、changes、preview、commit、repository load、repository action 和 Graph commit 结果必须携带并校验 generation。
 - 过期结果不得覆盖新页面、新 project、新 path、新 snapshot 或新 generation。
 - selection 应绑定稳定 identity；列表刷新后必须 clamp，不能依赖旧行号代表同一对象。
 
