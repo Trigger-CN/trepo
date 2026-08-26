@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 use tokio::sync::mpsc;
@@ -9,10 +10,12 @@ use crate::app::repository::{
 use crate::domain::{
     ChangeEntry, ChangePreview, Commit, CommitOutcome, CommitSpec, HunkSource, OperationKind,
     OperationOutcome, OperationSpec, OperationTarget, Project, ProjectId, ProjectSnapshot,
-    RepositoryAction, RepositoryActionOutcome, RepositoryActionSpec, RepositorySnapshot, RiskLevel,
-    Workspace, WorkspaceSummary,
+    RepoBatchAction, RepoBatchSpec, RepoProjectResult, RepoProjectState, RepositoryAction,
+    RepositoryActionOutcome, RepositoryActionSpec, RepositorySnapshot, RiskLevel, Workspace,
+    WorkspaceKind, WorkspaceSummary,
 };
 use crate::services::operations::OperationRunner;
+use crate::services::repo_batch::{self, RepoBatchEvent, RepoBatchEventKind, RepoBatchHandle};
 use crate::services::scanner::{self, ScanResult};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -501,6 +504,37 @@ pub struct ChangesState {
     pub commit_generation: u64,
 }
 
+#[derive(Debug, Clone)]
+pub struct RepoBatchForm {
+    pub action: RepoBatchAction,
+    pub value: String,
+}
+
+#[derive(Debug)]
+pub struct RepoBatchTask {
+    pub spec: RepoBatchSpec,
+    pub targets: Vec<Project>,
+    pub results: Vec<RepoProjectResult>,
+    pub workspace_result: Option<(RepoProjectState, String)>,
+    pub args: Vec<(Option<ProjectId>, Vec<String>)>,
+    pub logs: Vec<String>,
+    pub running: bool,
+    pub cancelling: bool,
+    pub cancelled: bool,
+    pub generation: u64,
+}
+
+#[derive(Debug, Default)]
+pub struct RepoBatchState {
+    pub action_menu: bool,
+    pub action_selected: usize,
+    pub form: Option<RepoBatchForm>,
+    pub pending: Option<(RepoBatchSpec, Vec<Project>)>,
+    pub task: Option<RepoBatchTask>,
+    pub scroll: usize,
+    pub message: Option<(bool, String)>,
+}
+
 #[derive(Debug)]
 pub struct App {
     pub workspace: Workspace,
@@ -515,6 +549,8 @@ pub struct App {
     pub graph: Option<GraphState>,
     pub changes: Option<ChangesState>,
     pub repository: Option<RepositoryState>,
+    pub selected_projects: HashSet<ProjectId>,
+    pub repo_batch: RepoBatchState,
     pub should_quit: bool,
     scan_tx: mpsc::UnboundedSender<ScanResult>,
     pub scan_rx: mpsc::UnboundedReceiver<ScanResult>,
@@ -535,6 +571,10 @@ pub struct App {
     pub repository_rx: mpsc::UnboundedReceiver<RepositoryLoadResult>,
     repository_action_tx: mpsc::UnboundedSender<RepositoryActionResult>,
     pub repository_action_rx: mpsc::UnboundedReceiver<RepositoryActionResult>,
+    repo_batch_tx: mpsc::UnboundedSender<RepoBatchEvent>,
+    pub repo_batch_rx: mpsc::UnboundedReceiver<RepoBatchEvent>,
+    repo_batch_handle: Option<RepoBatchHandle>,
+    repo_batch_generation: u64,
     operation_runner: OperationRunner,
     concurrency: usize,
 }
@@ -549,6 +589,7 @@ impl App {
         let (graph_commit_tx, graph_commit_rx) = mpsc::unbounded_channel();
         let (repository_tx, repository_rx) = mpsc::unbounded_channel();
         let (repository_action_tx, repository_action_rx) = mpsc::unbounded_channel();
+        let (repo_batch_tx, repo_batch_rx) = mpsc::unbounded_channel();
         let projects = workspace
             .projects
             .iter()
@@ -568,6 +609,8 @@ impl App {
             graph: None,
             changes: None,
             repository: None,
+            selected_projects: HashSet::new(),
+            repo_batch: RepoBatchState::default(),
             should_quit: false,
             scan_tx,
             scan_rx,
@@ -587,6 +630,10 @@ impl App {
             repository_rx,
             repository_action_tx,
             repository_action_rx,
+            repo_batch_tx,
+            repo_batch_rx,
+            repo_batch_handle: None,
+            repo_batch_generation: 0,
             operation_runner: OperationRunner,
             concurrency: concurrency.max(1),
             repository_intent: None,
@@ -671,6 +718,334 @@ impl App {
 
     pub fn select_last(&mut self) {
         self.selected = self.filtered_indices().len().saturating_sub(1);
+    }
+
+    pub fn toggle_project_selection(&mut self) {
+        let Some(id) = self
+            .selected_project()
+            .map(|value| value.project.id.clone())
+        else {
+            return;
+        };
+        if !self.selected_projects.insert(id.clone()) {
+            self.selected_projects.remove(&id);
+        }
+    }
+
+    pub fn toggle_filtered_selection(&mut self) {
+        let ids: Vec<ProjectId> = self
+            .filtered_indices()
+            .into_iter()
+            .filter_map(|index| self.projects.get(index))
+            .map(|value| value.project.id.clone())
+            .collect();
+        let all_selected = ids.iter().all(|id| self.selected_projects.contains(id));
+        for id in ids {
+            if all_selected {
+                self.selected_projects.remove(&id);
+            } else {
+                self.selected_projects.insert(id);
+            }
+        }
+    }
+
+    pub fn selected_project_count(&self) -> usize {
+        self.selected_projects.len()
+    }
+
+    pub fn open_repo_batch_menu(&mut self) {
+        if self.workspace.kind != WorkspaceKind::Repo {
+            self.repo_batch.message = Some((true, "Repo actions require a Repo workspace".into()));
+            return;
+        }
+        if self
+            .repo_batch
+            .task
+            .as_ref()
+            .is_some_and(|task| task.running)
+        {
+            self.repo_batch.message = Some((true, "A Repo task is already running".into()));
+            return;
+        }
+        self.repo_batch.action_menu = true;
+        self.repo_batch.action_selected = 0;
+        self.repo_batch.form = None;
+        self.repo_batch.pending = None;
+        self.repo_batch.message = None;
+    }
+
+    pub fn move_repo_batch_selection(&mut self, delta: isize) {
+        self.repo_batch.scroll = 0;
+        let len = RepoBatchAction::ALL.len();
+        let current = self.repo_batch.action_selected.min(len.saturating_sub(1)) as isize;
+        self.repo_batch.action_selected =
+            (current + delta).clamp(0, len.saturating_sub(1) as isize) as usize;
+    }
+
+    pub fn scroll_repo_batch(&mut self, delta: isize) {
+        self.repo_batch.scroll = self.repo_batch.scroll.saturating_add_signed(delta);
+    }
+
+    pub fn select_repo_batch_action(&mut self) {
+        let action = RepoBatchAction::ALL[self
+            .repo_batch
+            .action_selected
+            .min(RepoBatchAction::ALL.len() - 1)];
+        self.repo_batch.action_menu = false;
+        if action.input_label().is_some() {
+            self.repo_batch.form = Some(RepoBatchForm {
+                action,
+                value: if action == RepoBatchAction::ManifestExport {
+                    "manifest-pinned.xml".to_owned()
+                } else {
+                    String::new()
+                },
+            });
+        } else {
+            self.prepare_repo_batch(action, String::new());
+        }
+    }
+
+    pub fn edit_repo_batch_form(&mut self, input: CommitInput) {
+        let Some(form) = self.repo_batch.form.as_mut() else {
+            return;
+        };
+        match input {
+            CommitInput::Character(value) => form.value.push(value),
+            CommitInput::Backspace => {
+                form.value.pop();
+            }
+            _ => {}
+        }
+    }
+
+    pub fn submit_repo_batch_form(&mut self) {
+        let Some(form) = self.repo_batch.form.take() else {
+            return;
+        };
+        self.prepare_repo_batch(form.action, form.value);
+    }
+
+    fn prepare_repo_batch(&mut self, action: RepoBatchAction, value: String) {
+        let value = value.trim();
+        let spec = RepoBatchSpec {
+            action,
+            branch: matches!(
+                action,
+                RepoBatchAction::Start | RepoBatchAction::Checkout | RepoBatchAction::Abandon
+            )
+            .then(|| value.to_owned()),
+            change: (action == RepoBatchAction::Download).then(|| value.to_owned()),
+            output: (action == RepoBatchAction::ManifestExport).then(|| PathBuf::from(value)),
+        };
+        let targets: Vec<Project> = if action.is_workspace_action() {
+            Vec::new()
+        } else {
+            self.workspace
+                .projects
+                .iter()
+                .filter(|project| self.selected_projects.contains(&project.id))
+                .cloned()
+                .collect()
+        };
+        if !action.is_workspace_action() && targets.is_empty() {
+            self.repo_batch.message = Some((true, "Select at least one project with Space".into()));
+            return;
+        }
+        let valid = if action.is_workspace_action() {
+            crate::adapters::repo::batch_args(&spec, None).map(|_| ())
+        } else {
+            targets.iter().try_for_each(|project| {
+                crate::adapters::repo::batch_args(&spec, Some(&project.relative_path)).map(|_| ())
+            })
+        };
+        match valid {
+            Ok(()) => {
+                self.repo_batch.scroll = 0;
+                self.repo_batch.pending = Some((spec, targets));
+                self.repo_batch.message = None;
+            }
+            Err(error) => self.repo_batch.message = Some((true, error.to_string())),
+        }
+    }
+
+    pub fn confirm_repo_batch(&mut self, confirmed: bool) {
+        let Some((spec, targets)) = self.repo_batch.pending.take() else {
+            return;
+        };
+        if confirmed {
+            self.start_repo_batch(spec, targets);
+        }
+    }
+
+    fn start_repo_batch(&mut self, spec: RepoBatchSpec, targets: Vec<Project>) {
+        self.repo_batch_generation = self.repo_batch_generation.wrapping_add(1);
+        let generation = self.repo_batch_generation;
+        let results = targets
+            .iter()
+            .cloned()
+            .map(|project| RepoProjectResult {
+                project,
+                state: RepoProjectState::Pending,
+                message: "Waiting for workspace lock".to_owned(),
+            })
+            .collect();
+        let workspace_result = spec.action.is_workspace_action().then(|| {
+            (
+                RepoProjectState::Pending,
+                "Waiting for workspace lock".to_owned(),
+            )
+        });
+        self.repo_batch.scroll = 0;
+        self.repo_batch.task = Some(RepoBatchTask {
+            spec: spec.clone(),
+            targets: targets.clone(),
+            results,
+            workspace_result,
+            args: Vec::new(),
+            logs: Vec::new(),
+            running: true,
+            cancelling: false,
+            cancelled: false,
+            generation,
+        });
+        self.repo_batch.message = None;
+        self.repo_batch_handle = Some(repo_batch::spawn(
+            self.workspace.root.clone(),
+            spec,
+            targets,
+            generation,
+            self.repo_batch_tx.clone(),
+        ));
+    }
+
+    pub fn apply_repo_batch(&mut self, event: RepoBatchEvent) {
+        let Some(task) = self.repo_batch.task.as_mut() else {
+            return;
+        };
+        if event.generation != task.generation {
+            return;
+        }
+        match event.kind {
+            RepoBatchEventKind::Started { project, args } => {
+                let id = project.as_ref().map(|value| value.id.clone());
+                task.args.push((id.clone(), args));
+                if let Some(id) = id {
+                    if let Some(result) =
+                        task.results.iter_mut().find(|value| value.project.id == id)
+                    {
+                        result.state = RepoProjectState::Running;
+                        result.message = "Running".to_owned();
+                    }
+                } else {
+                    task.workspace_result = Some((RepoProjectState::Running, "Running".to_owned()));
+                }
+            }
+            RepoBatchEventKind::Log { project_id, line } => {
+                let prefix = project_id
+                    .and_then(|id| {
+                        task.targets
+                            .iter()
+                            .find(|value| value.id == id)
+                            .map(|value| value.relative_path.display().to_string())
+                    })
+                    .unwrap_or_else(|| "workspace".to_owned());
+                task.logs.push(format!("[{prefix}] {line}"));
+                if task.logs.len() > 500 {
+                    task.logs.drain(..task.logs.len() - 500);
+                }
+            }
+            RepoBatchEventKind::Finished {
+                project,
+                state,
+                message,
+            } => {
+                if let Some(project) = project {
+                    if let Some(result) = task
+                        .results
+                        .iter_mut()
+                        .find(|value| value.project.id == project.id)
+                    {
+                        result.state = state;
+                        result.message = message;
+                    }
+                } else {
+                    task.workspace_result = Some((state, message));
+                }
+            }
+            RepoBatchEventKind::Complete { cancelled } => {
+                task.running = false;
+                task.cancelling = false;
+                task.cancelled = cancelled;
+                self.repo_batch_handle = None;
+                self.refresh();
+            }
+        }
+    }
+
+    pub fn cancel_repo_batch(&mut self) {
+        let Some(task) = self.repo_batch.task.as_mut() else {
+            return;
+        };
+        if !task.running || task.cancelling {
+            return;
+        }
+        task.cancelling = true;
+        task.logs.push(
+            "[repo-tui] Cancellation requested; completed changes will not be rolled back".into(),
+        );
+        if let Some(handle) = &self.repo_batch_handle {
+            handle.cancel();
+        }
+    }
+
+    pub fn retry_failed_repo_batch(&mut self) {
+        let Some(task) = self.repo_batch.task.as_ref() else {
+            return;
+        };
+        if task.running {
+            return;
+        }
+        let targets: Vec<Project> = task
+            .results
+            .iter()
+            .filter(|result| result.state == RepoProjectState::Failed)
+            .map(|result| result.project.clone())
+            .collect();
+        if targets.is_empty() {
+            self.repo_batch.message = Some((true, "There are no failed projects to retry".into()));
+            return;
+        }
+        self.start_repo_batch(task.spec.clone(), targets);
+    }
+
+    pub fn close_repo_batch_overlay(&mut self) {
+        if self.repo_batch.message.take().is_some() {
+            return;
+        }
+        if self.repo_batch.form.take().is_some()
+            || self.repo_batch.pending.take().is_some()
+            || self.repo_batch.action_menu
+        {
+            self.repo_batch.action_menu = false;
+            return;
+        }
+        if self
+            .repo_batch
+            .task
+            .as_ref()
+            .is_some_and(|task| !task.running)
+        {
+            self.repo_batch.task = None;
+        }
+    }
+
+    pub fn repo_batch_overlay_active(&self) -> bool {
+        self.repo_batch.action_menu
+            || self.repo_batch.form.is_some()
+            || self.repo_batch.pending.is_some()
+            || self.repo_batch.task.is_some()
+            || self.repo_batch.message.is_some()
     }
 
     pub fn open_graph(&mut self) {
@@ -2409,5 +2784,67 @@ mod tests {
             .contains(&GraphActionChoice::RenameBranch));
         assert!(!graph_actions(GraphObjectKind::RemoteBranch)
             .contains(&GraphActionChoice::DeleteBranch));
+    }
+
+    #[test]
+    fn repo_selection_is_stable_and_batch_events_are_generation_scoped() {
+        let alpha = project("alpha");
+        let beta = project("beta");
+        let workspace = Workspace {
+            root: PathBuf::from("/tmp"),
+            kind: WorkspaceKind::Repo,
+            projects: vec![alpha.clone(), beta.clone()],
+        };
+        let mut app = App::new(workspace, 1);
+        app.toggle_project_selection();
+        app.search = "beta".into();
+        assert!(app.selected_projects.contains(&alpha.id));
+        assert!(!app.selected_projects.contains(&beta.id));
+
+        app.repo_batch.task = Some(RepoBatchTask {
+            spec: RepoBatchSpec {
+                action: RepoBatchAction::Sync,
+                branch: None,
+                change: None,
+                output: None,
+            },
+            targets: vec![alpha.clone()],
+            results: vec![RepoProjectResult {
+                project: alpha.clone(),
+                state: RepoProjectState::Pending,
+                message: String::new(),
+            }],
+            workspace_result: None,
+            args: Vec::new(),
+            logs: Vec::new(),
+            running: true,
+            cancelling: false,
+            cancelled: false,
+            generation: 7,
+        });
+        app.apply_repo_batch(RepoBatchEvent {
+            generation: 6,
+            kind: RepoBatchEventKind::Finished {
+                project: Some(alpha.clone()),
+                state: RepoProjectState::Failed,
+                message: "stale".into(),
+            },
+        });
+        assert_eq!(
+            app.repo_batch.task.as_ref().unwrap().results[0].state,
+            RepoProjectState::Pending
+        );
+        app.apply_repo_batch(RepoBatchEvent {
+            generation: 7,
+            kind: RepoBatchEventKind::Finished {
+                project: Some(alpha),
+                state: RepoProjectState::Failed,
+                message: "current".into(),
+            },
+        });
+        assert_eq!(
+            app.repo_batch.task.as_ref().unwrap().results[0].state,
+            RepoProjectState::Failed
+        );
     }
 }

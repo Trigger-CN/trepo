@@ -220,9 +220,45 @@ fn drain_background_messages(app: &mut App) {
     while let Ok(result) = app.repository_action_rx.try_recv() {
         app.apply_repository_action(result);
     }
+    while let Ok(event) = app.repo_batch_rx.try_recv() {
+        app.apply_repo_batch(event);
+    }
 }
 
 fn handle_key(app: &mut App, key: KeyEvent) {
+    if app.screen == Screen::Workspace && app.repo_batch_overlay_active() {
+        let menu = app.repo_batch.action_menu;
+        let form = app.repo_batch.form.is_some();
+        let pending = app.repo_batch.pending.is_some();
+        let running = app
+            .repo_batch
+            .task
+            .as_ref()
+            .is_some_and(|task| task.running);
+        match key.code {
+            KeyCode::Esc if !running => app.close_repo_batch_overlay(),
+            KeyCode::Char('y') | KeyCode::Char('Y') if pending => app.confirm_repo_batch(true),
+            KeyCode::Char('n') | KeyCode::Char('N') if pending => app.confirm_repo_batch(false),
+            KeyCode::Enter if form => app.submit_repo_batch_form(),
+            KeyCode::Enter if menu => app.select_repo_batch_action(),
+            KeyCode::Backspace if form => {
+                app.edit_repo_batch_form(repo_tui::app::state::CommitInput::Backspace)
+            }
+            KeyCode::Down | KeyCode::Char('j') if menu => app.move_repo_batch_selection(1),
+            KeyCode::Up | KeyCode::Char('k') if menu => app.move_repo_batch_selection(-1),
+            KeyCode::Down | KeyCode::Char('j') if !form => app.scroll_repo_batch(1),
+            KeyCode::Up | KeyCode::Char('k') if !form => app.scroll_repo_batch(-1),
+            KeyCode::PageDown if !form => app.scroll_repo_batch(10),
+            KeyCode::PageUp if !form => app.scroll_repo_batch(-10),
+            KeyCode::Char('c') if running => app.cancel_repo_batch(),
+            KeyCode::Char('f') if !running => app.retry_failed_repo_batch(),
+            KeyCode::Char(character) if form => {
+                app.edit_repo_batch_form(repo_tui::app::state::CommitInput::Character(character))
+            }
+            _ => {}
+        }
+        return;
+    }
     let graph_overlay = app
         .graph
         .as_ref()
@@ -371,6 +407,9 @@ fn handle_key(app: &mut App, key: KeyEvent) {
             KeyCode::Esc => app.back(),
             KeyCode::Char('?') => app.help = true,
             KeyCode::Char('/') => app.search_mode = true,
+            KeyCode::Char('a') => app.open_repo_batch_menu(),
+            KeyCode::Char(' ') => app.toggle_project_selection(),
+            KeyCode::Char('A') => app.toggle_filtered_selection(),
             KeyCode::Char('r') => app.refresh(),
             KeyCode::Char('c') => app.open_changes(),
             KeyCode::Char('o') => app.open_repository(),

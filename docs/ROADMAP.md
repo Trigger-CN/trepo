@@ -48,19 +48,17 @@ M1 是所有后续里程碑的共同数据与交互基础。M4 可以在 M2 后�
 
 ## 4. 当前交付范围
 
-当前实现已完成 `M0 + M1 + M2 + M3`：
+当前实现已完成 `M0 + M1 + M2 + M3 + M4`：
 
 - 从任意子目录识别 Repo 工作区或单 Git 仓库，并并发扫描状态。
 - Workspace、完整 all-refs Graph、Changes 和 Repository 管理页面均已可用。
-- Graph 支持两级上下文操作：选中节点后选择 commit/HEAD/本地分支/远端分支/tag/stash，再选择固定动作或 typed form。
-- Graph 内可发现并执行 commit/amend、stash 创建、branch/tag 创建、merge/rebase/cherry-pick/revert 和 stash 操作；本地与远端分支动作集合明确隔离。
-- 文件、hunk 与 changed-line stage/unstage/discard，commit/amend/sign-off/signing 和 stash 全流程。
-- merge/rebase/cherry-pick/revert 冲突状态、ours/theirs/mark-resolved 与合法 continue/skip/abort。
-- branch/tag/remotes 管理，以及 fetch/pull/push/upstream/prune 和 `--force-with-lease`。
-- 所有写操作复用 project lock、index lock、实时 snapshot/token 前置检查、确认和 generation 结果隔离。
-- Graph overlay、confirmation 和结果状态已覆盖 80x24 与 120x40 TestBackend 渲染。
+- Graph 支持 commit/HEAD/local branch/remote branch/tag/stash 两级上下文操作及 typed form。
+- 文件/hunk/changed-line、commit/stash/conflict、refs/integration 和 remotes 写操作受锁、token 和 generation 保护。
+- Workspace 支持稳定 ProjectId 多选、命名过滤，以及完整目标和 argv 确认。
+- Repo `sync/start/checkout/abandon/prune/rebase/upload/download` 和 pinned manifest export 具有 workspace lock、逐项目结果、流式日志、取消后复扫与失败重试。
+- Graph 与 Repo overlay、confirmation 和结果状态均覆盖 80x24 与 120x40 TestBackend 渲染。
 
-下一执行点是 M4 Repo 批量工作流；外部 editor/mergetool 和任意受控命令的 PTY takeover 属于 M5。
+下一执行点是 M5 命令面板与终端接管；交互认证、外部 editor/mergetool 和任意受控命令不在 M4 后台任务中启动。
 
 ## 5. M0：工程基础
 
@@ -276,24 +274,27 @@ cargo run -- doctor .
 
 ## 9. M4：Repo 批量工作流
 
-- 状态：`Planned`
+- 状态：`Done`
 - 优先级：`P0`
 - 目标版本：`0.4.0`
 - 依赖：M1、M2 安全执行层
 
-范围：
+已交付：
 
-- 项目多选和命名过滤视图。
-- `repo sync/start/checkout/abandon/prune/rebase`。
-- `repo upload/download` 和 manifest 导出。
-- workspace exclusive lock、逐项目进度和结果。
-- 取消、部分失败、只重试失败项。
+- ProjectId 稳定多选、命名/path 过滤和过滤集合全选。
+- `repo sync/start/checkout/abandon/prune/rebase/upload/download` 固定 argv 工作流。
+- workspace 级 pinned manifest 导出，并验证输出目录不通过 symlink 逃逸。
+- workspace exclusive lock 与现有 project Git 写锁协调，锁内重验路径、目录和 index lock。
+- 逐项目 pending/running/success/failed/cancelled 状态与有界、凭据脱敏的 stdout/stderr 逐行日志。
+- SIGINT 后 grace period 终止进程组；取消明确不回滚并触发真实状态复扫。
+- 部分失败继续执行，完成后只重试 failed 项；任务和扫描结果均使用 generation 隔离。
 
-验收：
+验收证据：
 
-- 每次批量写操作显示目标项目和参数。
-- 取消后不宣称回滚，实际状态通过复扫确认。
-- Repo 输出无法结构化时仍保存日志并给出最终逐项目状态。
+- 每次执行前展示冻结的目标项目、参数和逐项完整 `repo` argv。
+- fake Repo 真实子进程覆盖日志脱敏、manifest symlink 拒绝、部分失败和取消进程组；58 项测试通过。
+- App state 覆盖稳定多选与 stale batch event，Workspace overlay 覆盖 80x24/120x40。
+- 后台 upload 固定使用确认页展示的 `--current-branch --yes`；交互认证和高级参数属于 M5 PTY takeover。
 
 ## 10. M5：命令面板与终端接管
 
@@ -381,9 +382,10 @@ cargo run -- doctor .
 | M2 stash/conflict | Done | stash 全流程、ours/theirs/resolved、continue/skip/abort 通过 |
 | M3 refs/integration | Done | branch/tag、merge/rebase/cherry-pick/revert 真实矩阵通过 |
 | M3 remotes | Done | bare remote fetch/pull/push/upstream/prune 与 remote 管理通过 |
-| M4-M7 | Planned | 下一步从 M4 Repo 批量工作流开始 |
+| M4 Repo batch | Done | stable multi-select、workspace lock、fake Repo partial failure/cancel、80x24/120x40 通过 |
+| M5-M7 | Planned | 下一步从 M5 命令面板与终端接管开始 |
 
-M0-M3 最终验证（Rust 1.98、Git 2.43.0、Repo launcher 2.54）：
+M0-M4 最终验证（Rust 1.98、Git 2.43.0、Repo launcher 2.54）：
 
 ```bash
 cargo fmt --all -- --check
@@ -396,12 +398,12 @@ cargo build
 已验证边界：
 
 - Graph 加载所有本地分支、远端分支、tag、HEAD 和每条 stash 的完整可达历史；大型仓库流式虚拟化仍是后续优化。
-- Changes、commit、stash、冲突、refs/integration 和 remotes 均使用统一锁、snapshot/token、确认和 generation 机制。
-- 当前无任务中心、Repo sync/upload、命令面板或 PTY takeover；外部 editor/mergetool 明确依赖 M5。
-- Repo 端到端测试使用本地 fake `repo list/version` 和真实 Git project，不依赖公网；大型 Repo client 性能基准属于 M7。
+- Git 与 Repo 写操作协调 workspace/project 锁、实时前置检查、确认和 generation。
+- Repo 批处理保留凭据脱敏后的逐行日志和逐项目结果，取消不承诺回滚并通过复扫恢复事实状态。
+- 当前无任意命令面板或 PTY takeover；交互认证、外部 editor/mergetool 明确依赖 M5。
 
 ## 15. 下一执行点
 
-1. 实现 M4 项目多选、workspace exclusive lock 和 Repo 批量任务模型。
-2. 实现 `repo sync/start/checkout/abandon/prune/rebase` 的逐项目进度、取消和失败重试。
+1. 实现 M5 页面/project/ref/领域动作 fuzzy palette 与安全 argv 命令输入。
+2. 实现 Capture 和 PTY takeover，覆盖交互认证、editor、difftool 与 mergetool 后的终端恢复。
 3. 为大型 all-refs graph 设计保持全局拓扑和 ref 可见性的流式虚拟化。

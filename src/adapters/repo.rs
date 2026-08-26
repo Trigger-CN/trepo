@@ -4,6 +4,8 @@ use std::process::Stdio;
 use anyhow::{bail, Context, Result};
 use tokio::process::Command;
 
+use crate::domain::{RepoBatchAction, RepoBatchSpec};
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RepoProject {
     pub path: String,
@@ -28,6 +30,69 @@ pub async fn list_projects(root: &Path) -> Result<Vec<RepoProject>> {
     parse_list(&output.stdout)
 }
 
+pub fn batch_args(spec: &RepoBatchSpec, project_path: Option<&Path>) -> Result<Vec<String>> {
+    let mut args = vec![spec.action.command().to_owned()];
+    if spec.action.is_workspace_action() {
+        let output = spec
+            .output
+            .as_deref()
+            .context("manifest output path is required")?;
+        if output.as_os_str().is_empty()
+            || output.is_absolute()
+            || output.components().any(|part| part.as_os_str() == "..")
+        {
+            bail!("manifest output must be a non-empty path inside the workspace");
+        }
+        args.extend([
+            "-r".to_owned(),
+            "-o".to_owned(),
+            output.to_string_lossy().into_owned(),
+        ]);
+        return Ok(args);
+    }
+
+    let project_path = project_path.context("project path is required")?;
+    if project_path.as_os_str().is_empty()
+        || project_path.is_absolute()
+        || project_path
+            .components()
+            .any(|part| part.as_os_str() == "..")
+    {
+        bail!("project path must stay relative to the workspace");
+    }
+    if spec.action == RepoBatchAction::Upload {
+        args.extend(["--current-branch".to_owned(), "--yes".to_owned()]);
+    }
+    args.push("--".to_owned());
+    match spec.action {
+        RepoBatchAction::Start | RepoBatchAction::Checkout | RepoBatchAction::Abandon => {
+            let branch = spec
+                .branch
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+                .context("branch is required")?;
+            args.push(branch.to_owned());
+            args.push(project_path.to_string_lossy().into_owned());
+        }
+        RepoBatchAction::Download => {
+            let change = spec
+                .change
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+                .context("change is required")?;
+            args.push(project_path.to_string_lossy().into_owned());
+            args.push(change.to_owned());
+        }
+        RepoBatchAction::Sync
+        | RepoBatchAction::Prune
+        | RepoBatchAction::Rebase
+        | RepoBatchAction::Upload => {
+            args.push(project_path.to_string_lossy().into_owned());
+        }
+        RepoBatchAction::ManifestExport => unreachable!("handled above"),
+    }
+    Ok(args)
+}
 pub fn parse_list(bytes: &[u8]) -> Result<Vec<RepoProject>> {
     let text = std::str::from_utf8(bytes).context("repo list output is not UTF-8")?;
     let mut projects = Vec::new();
@@ -103,5 +168,43 @@ mod tests {
     fn selects_launcher_version_from_non_client_output() {
         let output = "<repo not installed>\nrepo launcher version 2.54\n(from /bin/repo)\n";
         assert_eq!(version_line(output), "repo launcher version 2.54");
+    }
+
+    fn spec(action: RepoBatchAction) -> RepoBatchSpec {
+        RepoBatchSpec {
+            action,
+            branch: None,
+            change: None,
+            output: None,
+        }
+    }
+
+    #[test]
+    fn builds_project_scoped_batch_arguments() {
+        let mut value = spec(RepoBatchAction::Start);
+        value.branch = Some("topic/x".into());
+        assert_eq!(
+            batch_args(&value, Some(Path::new("platform/demo"))).unwrap(),
+            ["start", "--", "topic/x", "platform/demo"]
+        );
+
+        let mut value = spec(RepoBatchAction::Download);
+        value.change = Some("12345/2".into());
+        assert_eq!(
+            batch_args(&value, Some(Path::new("platform/demo"))).unwrap(),
+            ["download", "--", "platform/demo", "12345/2"]
+        );
+    }
+
+    #[test]
+    fn builds_workspace_manifest_arguments_and_rejects_escape() {
+        let mut value = spec(RepoBatchAction::ManifestExport);
+        value.output = Some("manifests/pinned.xml".into());
+        assert_eq!(
+            batch_args(&value, None).unwrap(),
+            ["manifest", "-r", "-o", "manifests/pinned.xml"]
+        );
+        value.output = Some("../outside.xml".into());
+        assert!(batch_args(&value, None).is_err());
     }
 }
