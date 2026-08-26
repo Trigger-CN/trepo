@@ -117,9 +117,10 @@ cargo run -- doctor .
 ### 5.5 Repo 批量写操作
 
 - Repo 批量操作必须持有 workspace exclusive lock，并与同工作区的 project Git 写锁按 workspace -> project 顺序协调。
-- 执行前展示目标和完整 argv；逐项目重新确认路径归属、目录和 index lock，manifest 输出必须保持在 workspace 内。
-- stdout/stderr 作为不可信原始日志保留在有界缓存；单项失败不得伪装成功或阻断后续项目。
-- 取消先中断进程组再超时终止，不宣称回滚；完成或取消后复扫真实状态，失败重试只使用上一任务的 failed 项。
+- 执行前展示作用域、目标和完整 argv；逐项目操作重新确认路径归属、目录和 index lock，manifest 输出必须保持在 workspace 内。
+- stdout/stderr 作为不可信原始日志保留在有界缓存；逐项目动作的单项失败不得阻断后续项目。
+- Sync 空选择必须明确确认整个 Repo workspace 并使用单次 `repo sync -c -j8`；有选择时使用单次 `repo sync -c -j8 -- <projects...>`。只依据命令退出状态更新参与作用域，禁止解析人类日志猜测单项成功。
+- 取消先中断进程组再超时终止，不宣称回滚；完成或取消后复扫真实状态，失败重试保持上一任务的 workspace 或冻结项目作用域。
 
 ### 5.6 终端与 UI
 

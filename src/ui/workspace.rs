@@ -271,10 +271,12 @@ fn render_repo_batch_overlay(frame: &mut Frame, app: &App) {
             ),
             Line::raw(format!(
                 "Scope: {}",
-                if spec.action.is_workspace_action() {
-                    "workspace".to_owned()
+                if spec.action.is_workspace_action()
+                    || (spec.action == crate::domain::RepoBatchAction::Sync && targets.is_empty())
+                {
+                    "Entire Repo workspace".to_owned()
                 } else {
-                    format!("{} project(s)", targets.len())
+                    format!("{} selected project(s)", targets.len())
                 }
             )),
             Line::raw(format!("Parameters: {}", batch_parameter(spec))),
@@ -288,6 +290,14 @@ fn render_repo_batch_overlay(frame: &mut Frame, app: &App) {
         );
         if spec.action.is_workspace_action() {
             if let Ok(args) = crate::adapters::repo::batch_args(spec, None) {
+                detail.push(Line::raw(format!("  repo {}", args.join(" "))));
+            }
+        } else if spec.action == crate::domain::RepoBatchAction::Sync {
+            let paths = targets
+                .iter()
+                .map(|project| project.relative_path.as_path())
+                .collect::<Vec<_>>();
+            if let Ok(args) = crate::adapters::repo::sync_args(&paths) {
                 detail.push(Line::raw(format!("  repo {}", args.join(" "))));
             }
         } else {

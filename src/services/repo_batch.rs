@@ -23,6 +23,10 @@ pub enum RepoBatchEventKind {
         project: Option<Project>,
         args: Vec<String>,
     },
+    StartedBatch {
+        projects: Vec<Project>,
+        args: Vec<String>,
+    },
     Log {
         project_id: Option<ProjectId>,
         line: String,
@@ -102,6 +106,26 @@ async fn run_batch(
             &sender,
             generation,
             RepoBatchEventKind::Complete { cancelled: false },
+        );
+        return;
+    }
+    if spec.action == crate::domain::RepoBatchAction::Sync {
+        run_sync_batch(
+            &program,
+            &root,
+            &spec,
+            projects,
+            generation,
+            Arc::clone(&cancelled),
+            &sender,
+        )
+        .await;
+        send(
+            &sender,
+            generation,
+            RepoBatchEventKind::Complete {
+                cancelled: cancelled.load(Ordering::Acquire),
+            },
         );
         return;
     }
@@ -206,6 +230,139 @@ async fn run_batch(
             cancelled: cancelled.load(Ordering::Acquire),
         },
     );
+}
+
+async fn run_sync_batch(
+    program: &OsStr,
+    root: &Path,
+    spec: &RepoBatchSpec,
+    projects: Vec<Project>,
+    generation: u64,
+    cancelled: Arc<AtomicBool>,
+    sender: &mpsc::UnboundedSender<RepoBatchEvent>,
+) {
+    let workspace_scope = projects.is_empty();
+    let mut targets = Vec::new();
+    for project in projects {
+        match validate_project(root, &project, spec.action).await {
+            Ok(()) => targets.push(project),
+            Err(error) => send(
+                sender,
+                generation,
+                RepoBatchEventKind::Finished {
+                    project: Some(project),
+                    state: RepoProjectState::Failed,
+                    message: error.to_string(),
+                },
+            ),
+        }
+    }
+    if targets.is_empty() && !workspace_scope {
+        return;
+    }
+    if cancelled.load(Ordering::Acquire) {
+        finish_sync_scope(
+            sender,
+            generation,
+            targets,
+            workspace_scope,
+            RepoProjectState::Cancelled,
+            "Not started because cancellation was requested",
+        );
+        return;
+    }
+    let paths = targets
+        .iter()
+        .map(|project| project.relative_path.as_path())
+        .collect::<Vec<_>>();
+    let args = match repo::sync_args(&paths) {
+        Ok(args) => args,
+        Err(error) => {
+            finish_sync_scope(
+                sender,
+                generation,
+                targets,
+                workspace_scope,
+                RepoProjectState::Failed,
+                &error.to_string(),
+            );
+            return;
+        }
+    };
+    send(
+        sender,
+        generation,
+        RepoBatchEventKind::StartedBatch {
+            projects: targets.clone(),
+            args: args.clone(),
+        },
+    );
+    let outcome = run_command(
+        program,
+        root,
+        &args,
+        None,
+        generation,
+        Arc::clone(&cancelled),
+        sender,
+    )
+    .await;
+    let (state, message) = match outcome {
+        Ok(ProcessOutcome::Exited(status)) if status.success() => (
+            RepoProjectState::Succeeded,
+            "Aggregated sync command completed".to_owned(),
+        ),
+        Ok(ProcessOutcome::Exited(status)) => (
+            RepoProjectState::Failed,
+            format!("Aggregated sync command exited with {status}"),
+        ),
+        Ok(ProcessOutcome::Cancelled) => (
+            RepoProjectState::Cancelled,
+            "Cancelled; changes already made were not rolled back".to_owned(),
+        ),
+        Err(error) => (RepoProjectState::Failed, error.to_string()),
+    };
+    finish_sync_scope(
+        sender,
+        generation,
+        targets,
+        workspace_scope,
+        state,
+        &message,
+    );
+}
+
+fn finish_sync_scope(
+    sender: &mpsc::UnboundedSender<RepoBatchEvent>,
+    generation: u64,
+    projects: Vec<Project>,
+    workspace_scope: bool,
+    state: RepoProjectState,
+    message: &str,
+) {
+    if workspace_scope {
+        send(
+            sender,
+            generation,
+            RepoBatchEventKind::Finished {
+                project: None,
+                state,
+                message: message.to_owned(),
+            },
+        );
+        return;
+    }
+    for project in projects {
+        send(
+            sender,
+            generation,
+            RepoBatchEventKind::Finished {
+                project: Some(project),
+                state,
+                message: message.to_owned(),
+            },
+        );
+    }
 }
 
 #[derive(Debug)]
@@ -504,14 +661,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn streams_logs_and_reports_partial_failure_per_project() {
+    async fn aggregated_sync_runs_once_and_preserves_command_failure() {
         let temp = tempdir().unwrap();
         fs::create_dir(temp.path().join(".repo")).unwrap();
         let alpha = git_project(temp.path(), "alpha");
         let beta = git_project(temp.path(), "beta");
         let program = fake_repo(
             temp.path(),
-            "echo stdout:$*\necho stderr:$* >&2\ncase \"$*\" in *beta*) exit 7;; esac",
+            "echo stdout:$*\necho stderr:$* >&2\nprintf x >> .repo/invocations\nexit 7",
         );
         let (tx, mut rx) = mpsc::unbounded_channel();
         run_batch(
@@ -527,9 +684,11 @@ mod tests {
 
         let mut logs = Vec::new();
         let mut states = HashMap::new();
+        let mut started_args = None;
         while let Ok(event) = rx.try_recv() {
             assert_eq!(event.generation, 9);
             match event.kind {
+                RepoBatchEventKind::StartedBatch { args, .. } => started_args = Some(args),
                 RepoBatchEventKind::Log { line, .. } => logs.push(line),
                 RepoBatchEventKind::Finished {
                     project: Some(project),
@@ -541,16 +700,77 @@ mod tests {
                 _ => {}
             }
         }
+        assert_eq!(
+            started_args.unwrap(),
+            ["sync", "-c", "-j8", "--", "alpha", "beta"]
+        );
+        assert_eq!(
+            fs::read_to_string(temp.path().join(".repo/invocations")).unwrap(),
+            "x"
+        );
         assert!(logs
             .iter()
-            .any(|line| line.starts_with("stdout:sync -- alpha")));
+            .any(|line| line == "stdout:sync -c -j8 -- alpha beta"));
         assert!(logs
             .iter()
-            .any(|line| line.starts_with("stderr:sync -- beta")));
-        assert_eq!(states[&alpha.id], RepoProjectState::Succeeded);
+            .any(|line| line == "stderr:sync -c -j8 -- alpha beta"));
+        assert_eq!(states[&alpha.id], RepoProjectState::Failed);
         assert_eq!(states[&beta.id], RepoProjectState::Failed);
     }
 
+    #[tokio::test]
+    async fn workspace_sync_runs_once_without_project_separator() {
+        let temp = tempdir().unwrap();
+        fs::create_dir(temp.path().join(".repo")).unwrap();
+        let program = fake_repo(
+            temp.path(),
+            "printf '%s' \"$*\" > .repo/args\nprintf x >> .repo/invocations",
+        );
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        run_batch(
+            program.into_os_string(),
+            temp.path().to_path_buf(),
+            sync_spec(),
+            Vec::new(),
+            10,
+            Arc::new(AtomicBool::new(false)),
+            tx,
+        )
+        .await;
+
+        let mut started = None;
+        let mut finished = None;
+        let mut complete = false;
+        while let Ok(event) = rx.try_recv() {
+            match event.kind {
+                RepoBatchEventKind::StartedBatch { projects, args } => {
+                    assert!(projects.is_empty());
+                    started = Some(args);
+                }
+                RepoBatchEventKind::Finished { project, state, .. } => {
+                    assert!(project.is_none());
+                    finished = Some(state);
+                }
+                RepoBatchEventKind::Complete { cancelled } => {
+                    assert!(!cancelled);
+                    complete = true;
+                }
+                _ => {}
+            }
+        }
+
+        assert_eq!(started.unwrap(), ["sync", "-c", "-j8"]);
+        assert_eq!(finished, Some(RepoProjectState::Succeeded));
+        assert!(complete);
+        assert_eq!(
+            fs::read_to_string(temp.path().join(".repo/args")).unwrap(),
+            "sync -c -j8"
+        );
+        assert_eq!(
+            fs::read_to_string(temp.path().join(".repo/invocations")).unwrap(),
+            "x"
+        );
+    }
     #[tokio::test]
     async fn cancellation_interrupts_process_group_and_marks_remaining_targets() {
         let temp = tempdir().unwrap();

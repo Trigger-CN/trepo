@@ -848,12 +848,18 @@ impl App {
                 .cloned()
                 .collect()
         };
-        if !action.is_workspace_action() && targets.is_empty() {
+        if !action.is_workspace_action() && action != RepoBatchAction::Sync && targets.is_empty() {
             self.repo_batch.message = Some((true, "Select at least one project with Space".into()));
             return;
         }
         let valid = if action.is_workspace_action() {
             crate::adapters::repo::batch_args(&spec, None).map(|_| ())
+        } else if action == RepoBatchAction::Sync {
+            let paths = targets
+                .iter()
+                .map(|project| project.relative_path.as_path())
+                .collect::<Vec<_>>();
+            crate::adapters::repo::sync_args(&paths).map(|_| ())
         } else {
             targets.iter().try_for_each(|project| {
                 crate::adapters::repo::batch_args(&spec, Some(&project.relative_path)).map(|_| ())
@@ -890,7 +896,9 @@ impl App {
                 message: "Waiting for workspace lock".to_owned(),
             })
             .collect();
-        let workspace_result = spec.action.is_workspace_action().then(|| {
+        let workspace_scope = spec.action.is_workspace_action()
+            || (spec.action == RepoBatchAction::Sync && targets.is_empty());
+        let workspace_result = workspace_scope.then(|| {
             (
                 RepoProjectState::Pending,
                 "Waiting for workspace lock".to_owned(),
@@ -939,6 +947,22 @@ impl App {
                     }
                 } else {
                     task.workspace_result = Some((RepoProjectState::Running, "Running".to_owned()));
+                }
+            }
+            RepoBatchEventKind::StartedBatch { projects, args } => {
+                task.args.push((None, args));
+                if projects.is_empty() {
+                    task.workspace_result = Some((RepoProjectState::Running, "Running".to_owned()));
+                }
+                for project in projects {
+                    if let Some(result) = task
+                        .results
+                        .iter_mut()
+                        .find(|value| value.project.id == project.id)
+                    {
+                        result.state = RepoProjectState::Running;
+                        result.message = "Running in aggregated sync".to_owned();
+                    }
                 }
             }
             RepoBatchEventKind::Log { project_id, line } => {
@@ -1012,7 +1036,13 @@ impl App {
             .filter(|result| result.state == RepoProjectState::Failed)
             .map(|result| result.project.clone())
             .collect();
-        if targets.is_empty() {
+        let retry_workspace = task.spec.action == RepoBatchAction::Sync
+            && task.targets.is_empty()
+            && task
+                .workspace_result
+                .as_ref()
+                .is_some_and(|(state, _)| *state == RepoProjectState::Failed);
+        if targets.is_empty() && !retry_workspace {
             self.repo_batch.message = Some((true, "There are no failed projects to retry".into()));
             return;
         }
@@ -2808,12 +2838,19 @@ mod tests {
                 change: None,
                 output: None,
             },
-            targets: vec![alpha.clone()],
-            results: vec![RepoProjectResult {
-                project: alpha.clone(),
-                state: RepoProjectState::Pending,
-                message: String::new(),
-            }],
+            targets: vec![alpha.clone(), beta.clone()],
+            results: vec![
+                RepoProjectResult {
+                    project: alpha.clone(),
+                    state: RepoProjectState::Pending,
+                    message: String::new(),
+                },
+                RepoProjectResult {
+                    project: beta.clone(),
+                    state: RepoProjectState::Pending,
+                    message: String::new(),
+                },
+            ],
             workspace_result: None,
             args: Vec::new(),
             logs: Vec::new(),
@@ -2836,6 +2873,26 @@ mod tests {
         );
         app.apply_repo_batch(RepoBatchEvent {
             generation: 7,
+            kind: RepoBatchEventKind::StartedBatch {
+                projects: vec![alpha.clone(), beta.clone()],
+                args: vec![
+                    "sync".into(),
+                    "-c".into(),
+                    "-j8".into(),
+                    "--".into(),
+                    "alpha".into(),
+                    "beta".into(),
+                ],
+            },
+        });
+        let task = app.repo_batch.task.as_ref().unwrap();
+        assert!(task
+            .results
+            .iter()
+            .all(|result| result.state == RepoProjectState::Running));
+        assert_eq!(task.args.len(), 1);
+        app.apply_repo_batch(RepoBatchEvent {
+            generation: 7,
             kind: RepoBatchEventKind::Finished {
                 project: Some(alpha),
                 state: RepoProjectState::Failed,
@@ -2845,6 +2902,94 @@ mod tests {
         assert_eq!(
             app.repo_batch.task.as_ref().unwrap().results[0].state,
             RepoProjectState::Failed
+        );
+    }
+
+    #[test]
+    fn empty_selection_sync_prepares_workspace_confirmation() {
+        let workspace = Workspace {
+            root: PathBuf::from("/tmp"),
+            kind: WorkspaceKind::Repo,
+            projects: vec![project("alpha"), project("beta")],
+        };
+        let mut app = App::new(workspace, 1);
+
+        app.prepare_repo_batch(RepoBatchAction::Sync, String::new());
+
+        let (spec, targets) = app.repo_batch.pending.as_ref().unwrap();
+        assert_eq!(spec.action, RepoBatchAction::Sync);
+        assert!(targets.is_empty());
+        assert!(app.repo_batch.message.is_none());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn workspace_sync_events_and_failed_retry_keep_empty_scope() {
+        let workspace = Workspace {
+            root: PathBuf::from("/tmp"),
+            kind: WorkspaceKind::Repo,
+            projects: vec![project("alpha")],
+        };
+        let mut app = App::new(workspace, 1);
+        let spec = RepoBatchSpec {
+            action: RepoBatchAction::Sync,
+            branch: None,
+            change: None,
+            output: None,
+        };
+        app.repo_batch.task = Some(RepoBatchTask {
+            spec: spec.clone(),
+            targets: Vec::new(),
+            results: Vec::new(),
+            workspace_result: Some((
+                RepoProjectState::Pending,
+                "Waiting for workspace lock".into(),
+            )),
+            args: Vec::new(),
+            logs: Vec::new(),
+            running: true,
+            cancelling: false,
+            cancelled: false,
+            generation: 3,
+        });
+
+        app.apply_repo_batch(RepoBatchEvent {
+            generation: 3,
+            kind: RepoBatchEventKind::StartedBatch {
+                projects: Vec::new(),
+                args: vec!["sync".into(), "-c".into(), "-j8".into()],
+            },
+        });
+        assert_eq!(
+            app.repo_batch
+                .task
+                .as_ref()
+                .unwrap()
+                .workspace_result
+                .as_ref()
+                .unwrap()
+                .0,
+            RepoProjectState::Running
+        );
+        app.apply_repo_batch(RepoBatchEvent {
+            generation: 3,
+            kind: RepoBatchEventKind::Finished {
+                project: None,
+                state: RepoProjectState::Failed,
+                message: "network failure".into(),
+            },
+        });
+        app.repo_batch.task.as_mut().unwrap().running = false;
+
+        app.retry_failed_repo_batch();
+        app.repo_batch_handle.as_ref().unwrap().cancel();
+
+        let task = app.repo_batch.task.as_ref().unwrap();
+        assert_eq!(task.spec, spec);
+        assert!(task.targets.is_empty());
+        assert!(task.results.is_empty());
+        assert_eq!(
+            task.workspace_result.as_ref().unwrap().0,
+            RepoProjectState::Pending
         );
     }
 }

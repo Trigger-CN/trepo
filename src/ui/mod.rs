@@ -112,6 +112,42 @@ mod tests {
         terminal.draw(|frame| render(frame, app)).unwrap();
     }
 
+    fn draw_text(app: &App, width: u16, height: u16) -> String {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render(frame, app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let mut text = String::new();
+        for y in 0..height {
+            for x in 0..width {
+                text.push_str(buffer[(x, y)].symbol());
+            }
+            text.push('\n');
+        }
+        text
+    }
+
+    #[test]
+    fn workspace_sync_confirmation_shows_scope_and_exact_command() {
+        let mut app = app();
+        app.repo_batch.pending = Some((
+            RepoBatchSpec {
+                action: RepoBatchAction::Sync,
+                branch: None,
+                change: None,
+                output: None,
+            },
+            Vec::new(),
+        ));
+
+        for (width, height) in [(80, 24), (120, 40)] {
+            let text = draw_text(&app, width, height);
+            assert!(text.contains("Scope: Entire Repo workspace"));
+            assert!(text.contains("repo sync -c -j8"));
+            assert!(!text.contains("repo sync -c -j8 --"));
+        }
+    }
+
     #[test]
     fn renders_workspace_at_supported_sizes() {
         let app = app();
