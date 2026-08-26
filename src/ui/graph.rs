@@ -276,7 +276,7 @@ fn render_commits(frame: &mut Frame, graph: &crate::app::state::GraphState, area
         .max()
         .unwrap_or(2)
         .max(7)
-        .min(area.width.saturating_sub(48).max(7) as usize) as u16;
+        .min(area.width.saturating_sub(59).max(7) as usize) as u16;
     let rows = graph
         .commits
         .iter()
@@ -319,6 +319,10 @@ fn render_commits(frame: &mut Frame, graph: &crate::app::state::GraphState, area
                     Style::default().fg(Color::Gray),
                 )),
                 Cell::from(Line::styled(
+                    calendar_date(commit.timestamp),
+                    Style::default().fg(Color::Gray),
+                )),
+                Cell::from(Line::styled(
                     relative_age(commit.timestamp),
                     Style::default().fg(Color::DarkGray),
                 )),
@@ -334,11 +338,15 @@ fn render_commits(frame: &mut Frame, graph: &crate::app::state::GraphState, area
             Constraint::Min(18),
             Constraint::Length(30),
             Constraint::Length(10),
+            Constraint::Length(10),
             Constraint::Length(5),
         ],
     )
     .header(
-        Row::new(["", "Graph", "Commit", "Subject", "Refs", "Author", "Age"]).style(
+        Row::new([
+            "", "Graph", "Commit", "Subject", "Refs", "Author", "Date", "Age",
+        ])
+        .style(
             Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
@@ -352,6 +360,26 @@ fn render_commits(frame: &mut Frame, graph: &crate::app::state::GraphState, area
             .border_style(Style::default().fg(Color::DarkGray)),
     );
     frame.render_widget(table, area);
+}
+
+fn calendar_date(timestamp: i64) -> String {
+    let days = timestamp.div_euclid(86_400);
+    let shifted = days + 719_468;
+    let era = if shifted >= 0 {
+        shifted
+    } else {
+        shifted - 146_096
+    } / 146_097;
+    let day_of_era = shifted - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_prime = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_prime + 2) / 5 + 1;
+    let month = month_prime + if month_prime < 10 { 3 } else { -9 };
+    let year = year + if month <= 2 { 1 } else { 0 };
+    format!("{year:04}-{month:02}-{day:02}")
 }
 
 fn relative_age(timestamp: i64) -> String {
@@ -389,7 +417,8 @@ fn render_detail(frame: &mut Frame, graph: &crate::app::state::GraphState, area:
                 Line::raw(""),
                 detail_line("Commit", commit.oid.clone(), Color::LightBlue),
                 detail_line("Author", commit.author.clone(), Color::Gray),
-                detail_line("Timestamp", commit.timestamp.to_string(), Color::DarkGray),
+                detail_line("Date", calendar_date(commit.timestamp), Color::Gray),
+                detail_line("Age", relative_age(commit.timestamp), Color::DarkGray),
                 detail_line(
                     "Parents",
                     if commit.parents.is_empty() {
@@ -692,6 +721,14 @@ mod tests {
             subject: oid.into(),
             body: oid.into(),
         }
+    }
+
+    #[test]
+    fn formats_commit_timestamps_as_utc_calendar_dates() {
+        assert_eq!(calendar_date(0), "1970-01-01");
+        assert_eq!(calendar_date(1_700_000_000), "2023-11-14");
+        assert_eq!(calendar_date(-86_400), "1969-12-31");
+        assert_eq!(calendar_date(951_782_400), "2000-02-29");
     }
 
     #[test]

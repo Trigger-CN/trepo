@@ -184,7 +184,7 @@ cargo run -- doctor .
 
 - 使用显式 NUL 字段协议读取 `git log --topo-order --all` 的完整可达历史。
 - 独立解析本地分支、远端分支、annotated/lightweight tag、HEAD 和每条 stash reflog entry。
-- 展示不限四路的多色 topology lane、OID、refs、subject、author 和时间。
+- 展示不限四路的多色 topology lane、OID、refs、subject、author、UTC `YYYY-MM-DD` 日期和相对 Age。
 - 分支从共同祖先分出、merge parent 展开以及重新汇入共同祖先时，显示方向明确的连接线。
 - HEAD/local/remote/tag/stash 使用独立颜色 badge，右侧检查器保持相同语义配色。
 - 空仓库、unborn HEAD 和 log 错误可恢复。
