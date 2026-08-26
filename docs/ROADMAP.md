@@ -187,6 +187,8 @@ cargo run -- doctor .
 - 展示不限四路的多色 topology lane、OID、refs、subject、author、UTC `YYYY-MM-DD` 日期和相对 Age。
 - 分支从共同祖先分出、merge parent 展开以及重新汇入共同祖先时，显示方向明确的连接线。
 - HEAD/local/remote/tag/stash 使用独立颜色 badge，右侧检查器保持相同语义配色。
+- Graph 支持 Branch、Query、Author、Since、Until 组合过滤；分支按匹配 tip 的 parent 可达历史过滤，日期按 UTC 日历日闭区间。
+- Graph 过滤在已加载的完整 all-refs 数据上执行并保持 topology DAG；选择、详情和对象菜单继续绑定稳定 commit OID。
 - 空仓库、unborn HEAD 和 log 错误可恢复。
 
 验收：
@@ -195,6 +197,8 @@ cargo run -- doctor .
 - topology fixture 覆盖无 merge commit 的分支分叉、双亲 merge、octopus merge 和多 lane 连接。
 - 进入/返回不会丢失 Workspace selection 和搜索。
 - graph 加载不阻塞 event loop。
+- 过滤语义覆盖分支可达闭包、文本/作者/日期 AND、无效日期、稳定选择和零匹配安全状态。
+- 80x24 与 120x40 TestBackend 覆盖过滤表单、活动摘要、可见/总数和零匹配详情。
 
 ### M1.6 测试与文档
 
@@ -399,6 +403,7 @@ cargo build
 已验证边界：
 
 - Graph 加载所有本地分支、远端分支、tag、HEAD 和每条 stash 的完整可达历史；大型仓库流式虚拟化仍是后续优化。
+- Graph 的 Branch/Query/Author/Since/Until 过滤在内存中组合执行，保留完整 all-refs topology，并按稳定 OID 维护选择和对象操作。
 - Git 与 Repo 写操作协调 workspace/project 锁、实时前置检查、确认和 generation。
 - Repo 批处理保留凭据脱敏后的逐行日志和逐项目结果，取消不承诺回滚并通过复扫恢复事实状态。
 - 当前无任意命令面板或 PTY takeover；交互认证、外部 editor/mergetool 明确依赖 M5。

@@ -32,7 +32,7 @@ Starting from a subdirectory is supported. If no `.repo` directory is found, rep
 | `A` | Select/unselect all projects in the current Workspace filter |
 | `a` | Open Repo batch actions in Workspace; open fixed actions in Repository |
 | `c` | Open Changes; cancel a running Repo task from its task view |
-| `f` | Retry only failed projects after a Repo task |
+| `f` | Graph: open structured Branch/Query/Author/Since/Until filters; Repo task: retry only failed projects |
 | `Tab` | Cycle file / hunk / line mode in Changes; switch tabs or form fields |
 | `s` / `u` | Stage / unstage the selected file, hunk, or line |
 | `d` | Workspace: toggle changed-project filter; Changes: preview and confirm discarding the selected file, worktree hunk, or line |
@@ -40,8 +40,9 @@ Starting from a subdirectory is supported. If no `.repo` directory is found, rep
 | `Ctrl-A` / `Ctrl-U` / `Ctrl-G` | Toggle amend / sign-off / signing in Changes commit dialog |
 | `o` | Open Repository management from Workspace, Graph, or Changes |
 | `PageUp` / `PageDown` | Scroll the selected diff |
-| `/` | Search/filter projects; multi-selection remains bound to stable project identity |
+| `/` | Workspace: search projects; Graph: open filters focused on commit Query |
 | `r` | Refresh current page |
+| `x` | Graph: clear all commit filters |
 | `Esc` | Close overlay, back, clear search, or exit |
 | `q` | Exit from Workspace |
 | `?` | Toggle contextual help |
@@ -56,6 +57,7 @@ Implemented:
 - searchable responsive Workspace page with an optional changed-project-only filter and wide-screen Inspector file list
 - complete all-refs commit graph covering local branches, remote branches, tags, HEAD, and every stash entry, with UTC calendar date and relative age
 - multi-color topology lanes with visible split/merge connectors and distinct HEAD/local/remote/tag/stash badges
+- in-memory Graph filtering by local/remote branch history, commit OID/subject/body/ref text, author, and inclusive UTC date range; conditions combine with AND while selection remains bound to commit OID
 - Graph two-level object menu: select a commit node, choose its commit/HEAD/local branch/remote branch/tag/stash object, then choose a fixed contextual action
 - Graph contextual commit/amend, stash creation, branch/tag creation, merge, rebase, cherry-pick, revert, and stash actions
 - Graph forms and confirmations reuse the protected RepositoryAction/OperationRunner workflow; local and remote branches expose different valid actions

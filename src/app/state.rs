@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use tokio::sync::mpsc;
@@ -352,6 +352,87 @@ pub fn graph_object_label(object: &GraphObject) -> String {
 fn short_oid(oid: &str) -> String {
     oid.chars().take(8).collect()
 }
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GraphFilter {
+    pub branch: String,
+    pub query: String,
+    pub author: String,
+    pub since: String,
+    pub until: String,
+}
+
+impl GraphFilter {
+    pub fn is_active(&self) -> bool {
+        !self.branch.is_empty()
+            || !self.query.is_empty()
+            || !self.author.is_empty()
+            || !self.since.is_empty()
+            || !self.until.is_empty()
+    }
+
+    pub fn summary(&self) -> String {
+        [
+            ("branch", self.branch.as_str()),
+            ("query", self.query.as_str()),
+            ("author", self.author.as_str()),
+            ("since", self.since.as_str()),
+            ("until", self.until.as_str()),
+        ]
+        .into_iter()
+        .filter(|(_, value)| !value.is_empty())
+        .map(|(label, value)| format!("{label}:{value}"))
+        .collect::<Vec<_>>()
+        .join("  ")
+    }
+
+    fn validate(&self) -> anyhow::Result<()> {
+        let since = parse_graph_date(&self.since, "Since")?;
+        let until = parse_graph_date(&self.until, "Until")?;
+        if since.zip(until).is_some_and(|(since, until)| since > until) {
+            anyhow::bail!("Since must not be later than Until");
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+pub struct GraphFilterForm {
+    pub draft: GraphFilter,
+    pub selected: usize,
+}
+
+impl GraphFilterForm {
+    pub fn fields(&self) -> [(&'static str, &str); 5] {
+        [
+            ("Branch", &self.draft.branch),
+            ("Query", &self.draft.query),
+            ("Author", &self.draft.author),
+            ("Since", &self.draft.since),
+            ("Until", &self.draft.until),
+        ]
+    }
+
+    fn selected_value_mut(&mut self) -> &mut String {
+        match self.selected {
+            0 => &mut self.draft.branch,
+            1 => &mut self.draft.query,
+            2 => &mut self.draft.author,
+            3 => &mut self.draft.since,
+            _ => &mut self.draft.until,
+        }
+    }
+
+    fn edit(&mut self, input: CommitInput) {
+        match input {
+            CommitInput::Character(value) => self.selected_value_mut().push(value),
+            CommitInput::Backspace => {
+                self.selected_value_mut().pop();
+            }
+            _ => {}
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct GraphState {
     pub project: Project,
@@ -368,12 +449,142 @@ pub struct GraphState {
     pub form: Option<GraphForm>,
     pub message: Option<(bool, String)>,
     pub selected_oid: Option<String>,
+    pub filter: GraphFilter,
+    pub filter_form: Option<GraphFilterForm>,
+    pub filter_error: Option<String>,
     pub commit_message: String,
     pub commit_amend: bool,
     pub commit_running: bool,
     pub commit_generation: u64,
 }
 
+impl GraphState {
+    pub fn filtered_indices(&self) -> Vec<usize> {
+        let branch = self.filter.branch.to_lowercase();
+        let reachable = if branch.is_empty() {
+            None
+        } else {
+            let positions = self
+                .commits
+                .iter()
+                .enumerate()
+                .map(|(index, commit)| (commit.oid.as_str(), index))
+                .collect::<HashMap<_, _>>();
+            let mut stack = self
+                .commits
+                .iter()
+                .enumerate()
+                .filter(|(_, commit)| {
+                    commit.refs.iter().any(|reference| {
+                        matches!(
+                            reference.kind,
+                            crate::domain::CommitRefKind::LocalBranch
+                                | crate::domain::CommitRefKind::RemoteBranch
+                        ) && reference.name.to_lowercase().contains(&branch)
+                    })
+                })
+                .map(|(index, _)| index)
+                .collect::<Vec<_>>();
+            let mut reachable = HashSet::new();
+            while let Some(index) = stack.pop() {
+                if !reachable.insert(index) {
+                    continue;
+                }
+                stack.extend(
+                    self.commits[index]
+                        .parents
+                        .iter()
+                        .filter_map(|parent| positions.get(parent.as_str()).copied()),
+                );
+            }
+            Some(reachable)
+        };
+        let query = self.filter.query.to_lowercase();
+        let author = self.filter.author.to_lowercase();
+        let since = parse_graph_date(&self.filter.since, "Since").ok().flatten();
+        let until = parse_graph_date(&self.filter.until, "Until")
+            .ok()
+            .flatten()
+            .map(|value| value.saturating_add(86_399));
+        self.commits
+            .iter()
+            .enumerate()
+            .filter(|(index, commit)| {
+                reachable
+                    .as_ref()
+                    .map_or(true, |reachable| reachable.contains(index))
+                    && (query.is_empty()
+                        || commit.oid.to_lowercase().contains(&query)
+                        || commit.subject.to_lowercase().contains(&query)
+                        || commit.body.to_lowercase().contains(&query)
+                        || commit
+                            .refs
+                            .iter()
+                            .any(|reference| reference.name.to_lowercase().contains(&query)))
+                    && (author.is_empty() || commit.author.to_lowercase().contains(&author))
+                    && since.map_or(true, |since| commit.timestamp >= since)
+                    && until.map_or(true, |until| commit.timestamp <= until)
+            })
+            .map(|(index, _)| index)
+            .collect()
+    }
+
+    fn restore_filtered_selection(&mut self, selected_oid: Option<&str>) {
+        let indices = self.filtered_indices();
+        self.selected = selected_oid
+            .and_then(|oid| {
+                indices
+                    .iter()
+                    .copied()
+                    .find(|index| self.commits[*index].oid == oid)
+            })
+            .or_else(|| indices.first().copied())
+            .unwrap_or(0);
+    }
+}
+
+fn parse_graph_date(value: &str, label: &str) -> anyhow::Result<Option<i64>> {
+    if value.is_empty() {
+        return Ok(None);
+    }
+    let bytes = value.as_bytes();
+    if bytes.len() != 10 || bytes[4] != b'-' || bytes[7] != b'-' {
+        anyhow::bail!("{label} must use YYYY-MM-DD");
+    }
+    let parse_digits = |range: std::ops::Range<usize>, field: &str| {
+        let mut number = 0i64;
+        for byte in &bytes[range] {
+            if !byte.is_ascii_digit() {
+                anyhow::bail!("{label} has an invalid {field}");
+            }
+            number = number * 10 + i64::from(byte - b'0');
+        }
+        Ok(number)
+    };
+    let year = parse_digits(0..4, "year")?;
+    let month = parse_digits(5..7, "month")?;
+    let day = parse_digits(8..10, "day")?;
+    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let days_in_month = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if leap => 29,
+        2 => 28,
+        _ => anyhow::bail!("{label} has an invalid month"),
+    };
+    if day == 0 || day > days_in_month {
+        anyhow::bail!("{label} has an invalid day");
+    }
+    let adjusted_year = year - i64::from(month <= 2);
+    let era = adjusted_year.div_euclid(400);
+    let year_of_era = adjusted_year - era * 400;
+    let month_prime = month + if month > 2 { -3 } else { 9 };
+    let day_of_year = (153 * month_prime + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    Ok(Some(
+        (era * 146_097 + day_of_era - 719_468).saturating_mul(86_400),
+    ))
+}
 #[derive(Debug)]
 pub struct ChangesResult {
     pub project_id: ProjectId,
@@ -1131,6 +1342,10 @@ impl App {
                 .get(graph.selected)
                 .map(|commit| commit.oid.clone())
         });
+        let filter = self
+            .graph
+            .as_ref()
+            .map_or_else(GraphFilter::default, |graph| graph.filter.clone());
         self.graph = Some(GraphState {
             project: project.clone(),
             commits: Vec::new(),
@@ -1146,6 +1361,9 @@ impl App {
             form: None,
             message: None,
             selected_oid,
+            filter,
+            filter_form: None,
+            filter_error: None,
             commit_message: String::new(),
             commit_amend: false,
             commit_running: false,
@@ -1173,13 +1391,8 @@ impl App {
         match result.result {
             Ok(commits) => {
                 graph.commits = commits;
-                if let Some(oid) = graph.selected_oid.take() {
-                    graph.selected = graph
-                        .commits
-                        .iter()
-                        .position(|commit| commit.oid == oid)
-                        .unwrap_or(0);
-                }
+                let selected_oid = graph.selected_oid.take();
+                graph.restore_filtered_selection(selected_oid.as_deref());
             }
             Err(error) => graph.error = Some(error.to_string()),
         }
@@ -1190,30 +1403,108 @@ impl App {
         let Some(graph) = self.graph.as_mut() else {
             return;
         };
-        if graph.commits.is_empty() {
+        let indices = graph.filtered_indices();
+        if indices.is_empty() {
             graph.selected = 0;
             return;
         }
-        graph.selected =
-            (graph.selected as isize + delta).clamp(0, graph.commits.len() as isize - 1) as usize;
+        let current = indices
+            .iter()
+            .position(|index| *index == graph.selected)
+            .unwrap_or(0) as isize;
+        let visible = (current + delta).clamp(0, indices.len() as isize - 1) as usize;
+        graph.selected = indices[visible];
     }
 
     pub fn graph_first(&mut self) {
         if let Some(graph) = self.graph.as_mut() {
-            graph.selected = 0;
+            graph.selected = graph.filtered_indices().first().copied().unwrap_or(0);
         }
     }
 
     pub fn graph_last(&mut self) {
         if let Some(graph) = self.graph.as_mut() {
-            graph.selected = graph.commits.len().saturating_sub(1);
+            graph.selected = graph.filtered_indices().last().copied().unwrap_or(0);
         }
     }
 
+    pub fn open_graph_filter(&mut self, query_only: bool) {
+        if let Some(graph) = self.graph.as_mut() {
+            graph.filter_form = Some(GraphFilterForm {
+                draft: graph.filter.clone(),
+                selected: usize::from(query_only),
+            });
+            graph.filter_error = None;
+        }
+    }
+
+    pub fn move_graph_filter_field(&mut self, delta: isize) {
+        if let Some(form) = self
+            .graph
+            .as_mut()
+            .and_then(|graph| graph.filter_form.as_mut())
+        {
+            form.selected = (form.selected as isize + delta).clamp(0, 4) as usize;
+        }
+    }
+
+    pub fn edit_graph_filter(&mut self, input: CommitInput) {
+        if let Some(form) = self
+            .graph
+            .as_mut()
+            .and_then(|graph| graph.filter_form.as_mut())
+        {
+            form.edit(input);
+        }
+    }
+
+    pub fn submit_graph_filter(&mut self) {
+        let Some(graph) = self.graph.as_mut() else {
+            return;
+        };
+        let Some(filter) = graph.filter_form.as_ref().map(|form| form.draft.clone()) else {
+            return;
+        };
+        if let Err(error) = filter.validate() {
+            graph.filter_error = Some(error.to_string());
+            return;
+        }
+        let selected_oid = graph
+            .commits
+            .get(graph.selected)
+            .map(|commit| commit.oid.clone());
+        graph.filter = filter;
+        graph.filter_form = None;
+        graph.filter_error = None;
+        graph.restore_filtered_selection(selected_oid.as_deref());
+    }
+
+    pub fn cancel_graph_filter(&mut self) {
+        if let Some(graph) = self.graph.as_mut() {
+            graph.filter_form = None;
+            graph.filter_error = None;
+        }
+    }
+
+    pub fn clear_graph_filter(&mut self) {
+        if let Some(graph) = self.graph.as_mut() {
+            let selected_oid = graph
+                .commits
+                .get(graph.selected)
+                .map(|commit| commit.oid.clone());
+            graph.filter = GraphFilter::default();
+            graph.filter_form = None;
+            graph.filter_error = None;
+            graph.restore_filtered_selection(selected_oid.as_deref());
+        }
+    }
     pub fn graph_objects(&self) -> Vec<GraphObject> {
         let Some(graph) = self.graph.as_ref() else {
             return Vec::new();
         };
+        if !graph.filtered_indices().contains(&graph.selected) {
+            return Vec::new();
+        }
         let Some(commit) = graph.commits.get(graph.selected) else {
             return Vec::new();
         };
@@ -1245,7 +1536,7 @@ impl App {
         let Some(graph) = self.graph.as_mut() else {
             return;
         };
-        if graph.loading || graph.commits.is_empty() {
+        if graph.loading || !graph.filtered_indices().contains(&graph.selected) {
             return;
         }
         graph.object_menu = true;
@@ -2859,6 +3150,9 @@ mod tests {
             form: None,
             message: None,
             selected_oid: None,
+            filter: GraphFilter::default(),
+            filter_form: None,
+            filter_error: None,
             commit_message: String::new(),
             commit_amend: false,
             commit_running: false,
@@ -2881,6 +3175,129 @@ mod tests {
             .contains(&GraphActionChoice::RenameBranch));
         assert!(!graph_actions(GraphObjectKind::RemoteBranch)
             .contains(&GraphActionChoice::DeleteBranch));
+    }
+
+    #[test]
+    fn graph_filters_branch_history_text_author_and_date_with_stable_selection() {
+        let value = project("alpha");
+        let workspace = Workspace {
+            root: PathBuf::from("/tmp"),
+            kind: WorkspaceKind::Git,
+            projects: vec![value.clone()],
+        };
+        let commit = |oid: &str,
+                      parents: &[&str],
+                      refs: Vec<CommitRef>,
+                      author: &str,
+                      timestamp: i64,
+                      subject: &str| Commit {
+            oid: oid.into(),
+            parents: parents.iter().map(|parent| (*parent).to_owned()).collect(),
+            refs,
+            author: author.into(),
+            timestamp,
+            subject: subject.into(),
+            body: format!("body {subject}"),
+        };
+        let mut app = App::new(workspace, 1);
+        app.graph = Some(GraphState {
+            project: value,
+            commits: vec![
+                commit(
+                    "feature",
+                    &["base"],
+                    vec![CommitRef {
+                        name: "feature/x".into(),
+                        kind: CommitRefKind::LocalBranch,
+                    }],
+                    "Ada",
+                    parse_graph_date("2026-08-20", "date").unwrap().unwrap(),
+                    "camera fix",
+                ),
+                commit(
+                    "main",
+                    &["base"],
+                    vec![CommitRef {
+                        name: "main".into(),
+                        kind: CommitRefKind::LocalBranch,
+                    }],
+                    "Bob",
+                    parse_graph_date("2026-08-21", "date").unwrap().unwrap(),
+                    "main work",
+                ),
+                commit(
+                    "base",
+                    &[],
+                    Vec::new(),
+                    "Ada",
+                    parse_graph_date("2026-08-10", "date").unwrap().unwrap(),
+                    "base commit",
+                ),
+            ],
+            selected: 0,
+            loading: false,
+            error: None,
+            generation: 1,
+            object_menu: false,
+            object_selected: 0,
+            action_menu: false,
+            action_selected: 0,
+            selected_object: None,
+            form: None,
+            message: None,
+            selected_oid: None,
+            filter: GraphFilter {
+                branch: "feature".into(),
+                ..GraphFilter::default()
+            },
+            filter_form: None,
+            filter_error: None,
+            commit_message: String::new(),
+            commit_amend: false,
+            commit_running: false,
+            commit_generation: 0,
+        });
+        assert_eq!(app.graph.as_ref().unwrap().filtered_indices(), vec![0, 2]);
+        app.graph.as_mut().unwrap().selected = 2;
+        app.open_graph_filter(false);
+        {
+            let form = app.graph.as_mut().unwrap().filter_form.as_mut().unwrap();
+            form.draft.query = "base".into();
+            form.draft.author = "ada".into();
+            form.draft.since = "2026-08-01".into();
+            form.draft.until = "2026-08-15".into();
+        }
+        app.submit_graph_filter();
+        let graph = app.graph.as_ref().unwrap();
+        assert_eq!(graph.filtered_indices(), vec![2]);
+        assert_eq!(graph.commits[graph.selected].oid, "base");
+        app.open_graph_filter(false);
+        app.graph
+            .as_mut()
+            .unwrap()
+            .filter_form
+            .as_mut()
+            .unwrap()
+            .draft
+            .since = "2026-09-01".into();
+        app.submit_graph_filter();
+        assert_eq!(
+            app.graph.as_ref().unwrap().filter_error.as_deref(),
+            Some("Since must not be later than Until")
+        );
+        app.cancel_graph_filter();
+        app.clear_graph_filter();
+        assert_eq!(
+            app.graph.as_ref().unwrap().filtered_indices(),
+            vec![0, 1, 2]
+        );
+    }
+
+    #[test]
+    fn graph_date_filter_rejects_invalid_calendar_dates() {
+        assert!(parse_graph_date("2026-02-29", "Since").is_err());
+        assert!(parse_graph_date("2024-02-29", "Since").is_ok());
+        assert!(parse_graph_date("2026/08/20", "Since").is_err());
     }
 
     #[test]
