@@ -13,6 +13,114 @@ pub struct Workspace {
     pub projects: Vec<Project>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RepoBatchAction {
+    Sync,
+    Start,
+    Checkout,
+    Abandon,
+    Prune,
+    Rebase,
+    Upload,
+    Download,
+    ManifestExport,
+}
+
+impl RepoBatchAction {
+    pub const ALL: [Self; 9] = [
+        Self::Sync,
+        Self::Start,
+        Self::Checkout,
+        Self::Abandon,
+        Self::Prune,
+        Self::Rebase,
+        Self::Upload,
+        Self::Download,
+        Self::ManifestExport,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Sync => "repo sync",
+            Self::Start => "repo start",
+            Self::Checkout => "repo checkout",
+            Self::Abandon => "repo abandon",
+            Self::Prune => "repo prune",
+            Self::Rebase => "repo rebase",
+            Self::Upload => "repo upload",
+            Self::Download => "repo download",
+            Self::ManifestExport => "Export manifest",
+        }
+    }
+
+    pub fn command(self) -> &'static str {
+        match self {
+            Self::ManifestExport => "manifest",
+            Self::Sync => "sync",
+            Self::Start => "start",
+            Self::Checkout => "checkout",
+            Self::Abandon => "abandon",
+            Self::Prune => "prune",
+            Self::Rebase => "rebase",
+            Self::Upload => "upload",
+            Self::Download => "download",
+        }
+    }
+    pub fn input_label(self) -> Option<&'static str> {
+        match self {
+            Self::Start | Self::Checkout | Self::Abandon => Some("Branch"),
+            Self::Download => Some("Change"),
+            Self::ManifestExport => Some("Output path"),
+            _ => None,
+        }
+    }
+
+    pub fn is_workspace_action(self) -> bool {
+        matches!(self, Self::ManifestExport)
+    }
+
+    pub fn is_destructive(self) -> bool {
+        matches!(self, Self::Abandon | Self::Prune)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepoBatchSpec {
+    pub action: RepoBatchAction,
+    pub branch: Option<String>,
+    pub change: Option<String>,
+    pub output: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RepoProjectState {
+    Pending,
+    Running,
+    Succeeded,
+    Failed,
+    Cancelled,
+    Skipped,
+}
+
+impl RepoProjectState {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Running => "running",
+            Self::Succeeded => "success",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+            Self::Skipped => "skipped",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct RepoProjectResult {
+    pub project: Project,
+    pub state: RepoProjectState,
+    pub message: String,
+}
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ProjectId(pub PathBuf);
 

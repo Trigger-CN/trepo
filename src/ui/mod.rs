@@ -32,21 +32,20 @@ fn render_help(frame: &mut Frame) {
             Style::default().add_modifier(Modifier::BOLD),
         ),
         Line::raw(""),
-        Line::raw("j/k or arrows  Move selection"),
+        Line::raw("j/k or arrows  Move selection / scroll active Repo task"),
         Line::raw("g/G            First / last"),
-        Line::raw("Enter          Open repository graph"),
-        Line::raw("c              Open Changes"),
-        Line::raw("Tab            Toggle file / hunk mode in Changes"),
+        Line::raw("Enter          Open graph / select active overlay item"),
+        Line::raw("Space / A      Select project / all filtered projects"),
+        Line::raw("a              Open Workspace Repo or Repository actions"),
+        Line::raw("c / f          Cancel Repo task / retry failed projects"),
+        Line::raw("Tab            Toggle Changes mode or active form field"),
         Line::raw("s/u/d          Stage / unstage / discard selection"),
         Line::raw("m              Commit staged changes; Ctrl-A/U/G toggle options"),
-        Line::raw("/              Search projects"),
-        Line::raw("r              Refresh current page"),
-        Line::raw("Esc            Back / clear / quit"),
-        Line::raw("q              Quit from workspace"),
-        Line::raw("?              Toggle this help"),
+        Line::raw("/ / r          Search projects / refresh current page"),
+        Line::raw("Esc / q / ?    Back / quit Workspace / toggle help"),
         Line::raw(""),
         Line::styled(
-            "Write operations revalidate the selected file and hunk before execution.",
+            "Write operations show scope and revalidate state under the applicable locks.",
             Color::Yellow,
         ),
     ]);
@@ -78,13 +77,15 @@ mod tests {
     use super::*;
     use crate::app::repository::{form_for, RepositoryChoice, RepositoryTab};
     use crate::app::state::{
-        App, ChangesMode, ChangesState, GraphState, PendingOperation, RepositoryState, Screen,
+        App, ChangesMode, ChangesState, GraphState, PendingOperation, RepoBatchForm, RepoBatchTask,
+        RepositoryState, Screen,
     };
     use crate::domain::{
         BranchEntry, ChangeCode, ChangeEntry, ChangeHunk, ChangeLine, ChangePreview, Commit,
         CommitRef, CommitRefKind, GitOperationKind, HunkSource, OperationKind, OperationTarget,
-        Project, ProjectId, RemoteBranchEntry, RemoteEntry, RepositoryAction, RepositorySnapshot,
-        StashEntry, TagEntry, Workspace, WorkspaceKind,
+        Project, ProjectId, RemoteBranchEntry, RemoteEntry, RepoBatchAction, RepoBatchSpec,
+        RepoProjectResult, RepoProjectState, RepositoryAction, RepositorySnapshot, StashEntry,
+        TagEntry, Workspace, WorkspaceKind,
     };
 
     fn app() -> App {
@@ -114,6 +115,56 @@ mod tests {
     #[test]
     fn renders_workspace_at_supported_sizes() {
         let app = app();
+        draw(&app, 80, 24);
+        draw(&app, 120, 40);
+    }
+
+    #[test]
+    fn renders_repo_batch_overlays_at_supported_sizes() {
+        let mut app = app();
+        app.selected_projects
+            .insert(app.workspace.projects[0].id.clone());
+        app.open_repo_batch_menu();
+        draw(&app, 80, 24);
+        draw(&app, 120, 40);
+
+        app.repo_batch.action_menu = false;
+        app.repo_batch.form = Some(RepoBatchForm {
+            action: RepoBatchAction::Start,
+            value: "topic/x".into(),
+        });
+        draw(&app, 80, 24);
+        draw(&app, 120, 40);
+
+        let project = app.workspace.projects[0].clone();
+        let spec = RepoBatchSpec {
+            action: RepoBatchAction::Sync,
+            branch: None,
+            change: None,
+            output: None,
+        };
+        app.repo_batch.form = None;
+        app.repo_batch.pending = Some((spec.clone(), vec![project.clone()]));
+        draw(&app, 80, 24);
+        draw(&app, 120, 40);
+
+        app.repo_batch.pending = None;
+        app.repo_batch.task = Some(RepoBatchTask {
+            spec,
+            targets: vec![project.clone()],
+            results: vec![RepoProjectResult {
+                project,
+                state: RepoProjectState::Failed,
+                message: "network failure".into(),
+            }],
+            workspace_result: None,
+            args: vec![],
+            logs: vec!["[demo] raw repo output".into()],
+            running: false,
+            cancelling: false,
+            cancelled: false,
+            generation: 1,
+        });
         draw(&app, 80, 24);
         draw(&app, 120, 40);
     }

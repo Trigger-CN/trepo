@@ -333,16 +333,18 @@ Manifest 页面支持：
 
 不同 Repo 版本的子命令和参数并不完全一致。启动时记录 `repo version` 和 `repo help` 能力，UI 仅启用确认支持的选项；未知能力仍可通过命令面板执行。不能为了统一界面悄悄改写用户的 Repo 参数。
 
+当前 M4 专用 UI 已实现上述表格中的 `sync/start/checkout/abandon/prune/rebase/upload/download/manifest` 基础固定参数工作流。Workspace 通过稳定 ProjectId 多选冻结目标，确认页逐项展示完整 argv。后台 upload 明确使用 `--current-branch --yes`；交互认证、reviewer/topic/dry-run 等高级 upload 参数仍由 M5 PTY takeover 承担。
+
 ### 7.3 Sync 与 Upload 体验
 
-`repo sync` 是长时间、并发、可部分失败的操作。任务页面需要展示：
+`repo sync` 等长任务在 Workspace 任务覆盖层展示：
 
-- 当前阶段、总项目数、完成/失败/跳过/运行中数量。
-- 可解析时显示每个项目的状态；无法稳定解析的 Repo 版本至少保留原始流式日志和最终项目复扫结果。
-- 取消时先发送温和中断，超时后再允许强制终止；明确提示子进程可能已完成部分修改。
-- 结束后优先刷新受影响项目，并把冲突、detached、dirty 或失败项目形成临时过滤视图。
+- 总项目数及每个项目的 pending/running/success/failed/cancelled 状态。
+- stdout/stderr 原始逐行结构在凭据脱敏后进入 500 行有界内存缓存；不依赖人类输出推断成功。
+- 取消时向独立进程组发送 SIGINT，等待 grace period 后 SIGKILL，并明确提示可能已完成部分修改。
+- 完成或取消后全量复扫真实 Git 状态；失败项目可作为冻结目标单独重试。
 
-Upload 执行前展示 project、local branch、目标 branch、commit range 和工作区状态。提供 dry-run 时优先使用；不解析或存储密码/token。若 Repo/Gerrit 需要交互式认证，切换到终端接管。
+Upload 执行前展示 project 和准确 argv。M4 capture 模式只执行 `--current-branch --yes`，不解析或存储密码/token；Repo/Gerrit 需要交互认证时等待 M5 终端接管。
 
 ## 8. 命令面板与终端接管
 
@@ -572,13 +574,13 @@ struct WorktreeSummary {
 - 扫描采用有界 worker pool；默认并发度取 CPU、磁盘和配置的保守值。
 - 首屏优先：先发现项目并绘制 skeleton，再扫描可见行、dirty/error 候选和其余项目。
 - 不同项目的只读任务可并行。
-- 同一项目的写任务串行，并阻止与它冲突的扫描；任务结束后触发一次合并刷新。
-- `repo sync`、manifest 变更等全工作区写操作获取 workspace exclusive lock。
-- 用户仍可能从外部终端修改仓库，因此锁只约束本进程；每个写操作必须做实时前置检查。
-- 取消通过 `CancellationToken` 传播。子进程先收中断，等待 grace period 后再允许 kill process group。
-- 任务日志使用有界 ring buffer 并可选落盘，避免无限 stdout 耗尽内存。
+- 同一项目的写任务串行；位于 Repo client 内的 Git 写操作先获取 workspace lock，再获取 project lock。
+- Repo 批处理和 manifest 导出获取 workspace exclusive lock，避免与本进程内任何 project 写任务并发。
+- 用户仍可能从外部终端修改仓库，因此锁只约束本进程；每个 Repo 项目开始前重验路径归属、目录和 index lock。
+- 取消由共享原子 token 传播；子进程位于独立进程组，先收 SIGINT，等待 grace period 后再 SIGKILL。
+- 任务日志使用 500 行有界 ring buffer；可选落盘仍属于后续任务中心增强。
 
-锁的粒度是领域资源，而不是 UI 页面。任务中心显示等待锁、运行、取消中、完成和失败状态。
+锁的粒度是领域资源而不是 UI 页面。当前 Workspace 覆盖层显示等待锁、运行、取消中、完成和失败状态。
 
 ### 10.8 缓存与刷新
 

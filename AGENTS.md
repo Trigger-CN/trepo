@@ -28,8 +28,9 @@
 - staged、worktree、untracked diff，以及文件、hunk、changed-line stage/unstage/discard。
 - commit/amend、sign-off、signing 与 hook 失败消息恢复。
 - stash、conflict/operation state、branch/tag、merge/rebase/cherry-pick/revert 和 remote 工作流。
+- Workspace 稳定项目多选，以及受 workspace exclusive lock 保护的 Repo 批量动作、流式日志、取消、复扫和失败重试。
 
-M0-M3 已完成。下一执行点是 M4 Repo 批量工作流；需要外部 editor、mergetool 或任意交互命令的终端接管属于 M5。
+M0-M4 已完成。下一执行点是 M5 命令面板与终端接管；需要外部 editor、mergetool、交互认证或任意交互命令的流程仍不在后台 capture 任务中执行。
 
 ## 3. 实际代码结构
 
@@ -42,13 +43,15 @@ M0-M3 已完成。下一执行点是 M4 Repo 批量工作流；需要外部 edit
 - `src/adapters/git.rs`
   - Git argv、机器协议、diff/line patch、repository snapshot token 和固定动作映射。
 - `src/adapters/repo.rs`
-  - Repo 版本、project 列表和能力相关适配。
+  - Repo 版本、project 列表和固定批量动作 argv。
 - `src/services/discovery.rs`
   - Repo root 与单 Git 仓库发现。
 - `src/services/scanner.rs`
   - 有界并发状态扫描。
+- `src/services/repo_batch.rs`
+  - workspace exclusive lock、Repo 子进程日志、逐项目结果、取消和进程组终止。
 - `src/services/operations.rs`
-  - 项目写锁、实时前置检查和受保护写操作。
+  - workspace/project 写锁、实时前置检查和受保护 Git 写操作。
 - `src/app/state.rs`、`src/app/repository.rs`
   - 页面状态、typed forms、selection、generation、确认和异步结果归并。
 - `src/ui/*.rs`
@@ -95,8 +98,8 @@ cargo run -- doctor .
 ### 5.3 异步状态
 
 - 长任务不得阻塞输入和绘制循环。
-- scan、graph、changes、preview、commit、repository load、repository action 和 Graph commit 结果必须携带并校验 generation。
-- 过期结果不得覆盖新页面、新 project、新 path、新 snapshot 或新 generation。
+- scan、graph、changes、preview、commit、repository action、Graph commit 和 Repo batch 结果必须携带并校验 generation。
+- 过期结果不得覆盖新页面、新 project、新 path、新 snapshot、新 selection 或新任务 generation。
 - selection 应绑定稳定 identity；列表刷新后必须 clamp，不能依赖旧行号代表同一对象。
 
 ### 5.4 Git 写操作
@@ -111,7 +114,14 @@ cargo run -- doctor .
 - discard、删除、abort、remote write 等行为必须有明确作用域预览和显式确认；push 不提供裸 `--force`。
 - 操作失败应尽量保留用户选择、输入和原始错误；成功后按影响范围刷新真实状态。
 
-### 5.5 终端与 UI
+### 5.5 Repo 批量写操作
+
+- Repo 批量操作必须持有 workspace exclusive lock，并与同工作区的 project Git 写锁按 workspace -> project 顺序协调。
+- 执行前展示目标和完整 argv；逐项目重新确认路径归属、目录和 index lock，manifest 输出必须保持在 workspace 内。
+- stdout/stderr 作为不可信原始日志保留在有界缓存；单项失败不得伪装成功或阻断后续项目。
+- 取消先中断进程组再超时终止，不宣称回滚；完成或取消后复扫真实状态，失败重试只使用上一任务的 failed 项。
+
+### 5.6 终端与 UI
 
 - raw mode、alternate screen 和光标必须由 RAII 保证恢复。
 - 正常退出、错误、外部程序返回和信号路径都不能留下损坏终端。

@@ -1,11 +1,11 @@
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table, Wrap};
+use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, Wrap};
 use ratatui::Frame;
 
 use crate::app::state::App;
-use crate::domain::{HeadState, ScanState, WorkspaceKind};
+use crate::domain::{HeadState, RepoProjectState, ScanState, WorkspaceKind};
 
 pub fn render(frame: &mut Frame, app: &App) {
     let area = frame.area();
@@ -40,6 +40,7 @@ pub fn render(frame: &mut Frame, app: &App) {
         render_table(frame, app, vertical[1]);
     }
     render_footer(frame, app, vertical[2]);
+    render_repo_batch_overlay(frame, app);
 }
 
 fn render_header(frame: &mut Frame, app: &App, area: Rect) {
@@ -61,11 +62,16 @@ fn render_header(frame: &mut Frame, app: &App, area: Rect) {
     let status = if app.search_mode {
         format!("Search: {}_", app.search)
     } else if !app.search.is_empty() {
-        format!("Filter: {}", app.search)
+        format!(
+            "Filter: {}  Selected: {}",
+            app.search,
+            app.selected_project_count()
+        )
     } else {
         format!(
-            "{} projects  {} dirty  {} conflict  {} ahead  {} behind  {} errors",
+            "{} projects  {} selected  {} dirty  {} conflict  {} ahead  {} behind  {} errors",
             summary.total,
+            app.selected_project_count(),
             summary.dirty,
             summary.conflicted,
             summary.ahead,
@@ -104,7 +110,15 @@ fn render_table(frame: &mut Frame, app: &App, area: Rect) {
             };
             Some(
                 Row::new(vec![
-                    Cell::from(if selected { ">" } else { " " }),
+                    Cell::from(format!(
+                        "{}{}",
+                        if selected { ">" } else { " " },
+                        if app.selected_projects.contains(&snapshot.project.id) {
+                            "x"
+                        } else {
+                            " "
+                        }
+                    )),
                     Cell::from(status),
                     Cell::from(
                         snapshot
@@ -121,7 +135,7 @@ fn render_table(frame: &mut Frame, app: &App, area: Rect) {
         });
 
     let widths = [
-        Constraint::Length(2),
+        Constraint::Length(3),
         Constraint::Length(12),
         Constraint::Min(20),
         Constraint::Length(18),
@@ -190,7 +204,13 @@ fn render_inspector(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
-    let task = if app.scanning > 0 {
+    let task = if let Some(task) = &app.repo_batch.task {
+        if task.running {
+            format!("{} running", task.spec.action.label())
+        } else {
+            format!("{} finished", task.spec.action.label())
+        }
+    } else if app.scanning > 0 {
         format!("Scanning {}", app.scanning)
     } else {
         "Ready".to_owned()
@@ -205,10 +225,222 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
                     Color::Green
                 }),
             ),
-            Span::raw("   Enter Open   / Search   r Refresh   ? Help   q Quit"),
+            Span::raw("   Space Select   a Repo actions   / Search   Enter Open   ? Help"),
         ])),
         area,
     );
+}
+
+fn render_repo_batch_overlay(frame: &mut Frame, app: &App) {
+    if app.repo_batch.action_menu {
+        let area = centered_rect(54, 62, frame.area());
+        let lines = crate::domain::RepoBatchAction::ALL
+            .iter()
+            .enumerate()
+            .map(|(index, action)| {
+                let style = if index == app.repo_batch.action_selected {
+                    Style::default().fg(Color::Black).bg(Color::Cyan)
+                } else if action.is_destructive() {
+                    Style::default().fg(Color::LightRed)
+                } else {
+                    Style::default()
+                };
+                Line::styled(format!(" {}", action.label()), style)
+            })
+            .collect::<Vec<_>>();
+        render_overlay(frame, area, " Repo batch actions ", lines);
+    } else if let Some(form) = &app.repo_batch.form {
+        let area = centered_rect(60, 34, frame.area());
+        let label = form.action.input_label().unwrap_or("Value");
+        render_overlay(
+            frame,
+            area,
+            form.action.label(),
+            vec![
+                Line::raw(format!("{label}: {}_", form.value)),
+                Line::raw(""),
+                Line::styled("Enter Review   Esc Cancel", Color::DarkGray),
+            ],
+        );
+    } else if let Some((spec, targets)) = &app.repo_batch.pending {
+        let area = centered_rect(72, 70, frame.area());
+        let mut lines = vec![
+            Line::styled(
+                spec.action.label(),
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            Line::raw(format!(
+                "Scope: {}",
+                if spec.action.is_workspace_action() {
+                    "workspace".to_owned()
+                } else {
+                    format!("{} project(s)", targets.len())
+                }
+            )),
+            Line::raw(format!("Parameters: {}", batch_parameter(spec))),
+            Line::raw("Commands:"),
+        ];
+        let mut detail = Vec::new();
+        detail.extend(
+            targets
+                .iter()
+                .map(|project| Line::raw(format!("  {}", project.relative_path.display()))),
+        );
+        if spec.action.is_workspace_action() {
+            if let Ok(args) = crate::adapters::repo::batch_args(spec, None) {
+                detail.push(Line::raw(format!("  repo {}", args.join(" "))));
+            }
+        } else {
+            detail.extend(targets.iter().filter_map(|project| {
+                crate::adapters::repo::batch_args(spec, Some(&project.relative_path))
+                    .ok()
+                    .map(|args| Line::raw(format!("  repo {}", args.join(" "))))
+            }));
+        }
+        let budget = area.height.saturating_sub(9) as usize;
+        let max_scroll = detail.len().saturating_sub(budget);
+        let scroll = app.repo_batch.scroll.min(max_scroll);
+        lines.extend(detail.into_iter().skip(scroll).take(budget));
+        lines.push(Line::raw(""));
+        lines.push(Line::styled(
+            "Run now? y Yes   n No",
+            if spec.action.is_destructive() {
+                Color::LightRed
+            } else {
+                Color::Yellow
+            },
+        ));
+        render_overlay(frame, area, " Confirm Repo operation ", lines);
+    } else if let Some(task) = &app.repo_batch.task {
+        let area = centered_rect(86, 82, frame.area());
+        let counts = task.results.iter().fold([0usize; 5], |mut counts, result| {
+            let index = match result.state {
+                RepoProjectState::Pending => 0,
+                RepoProjectState::Running => 1,
+                RepoProjectState::Succeeded => 2,
+                RepoProjectState::Failed => 3,
+                RepoProjectState::Cancelled | RepoProjectState::Skipped => 4,
+            };
+            counts[index] += 1;
+            counts
+        });
+        let mut lines = vec![
+            Line::styled(
+                format!(
+                    "{}  {}",
+                    task.spec.action.label(),
+                    if task.running {
+                        if task.cancelling {
+                            "cancelling"
+                        } else {
+                            "running"
+                        }
+                    } else if task.cancelled {
+                        "cancelled"
+                    } else {
+                        "complete"
+                    }
+                ),
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            Line::raw(format!(
+                "pending {}  running {}  success {}  failed {}  cancelled {}",
+                counts[0], counts[1], counts[2], counts[3], counts[4]
+            )),
+            Line::raw(format!("Parameters: {}", batch_parameter(&task.spec))),
+            Line::raw(format!("Commands started: {}", task.args.len())),
+        ];
+        let mut detail = Vec::new();
+        if let Some((state, message)) = &task.workspace_result {
+            detail.push(result_line("workspace", *state, message));
+        }
+        detail.extend(task.results.iter().map(|result| {
+            result_line(
+                &result.project.relative_path.display().to_string(),
+                result.state,
+                &result.message,
+            )
+        }));
+        detail.push(Line::raw(""));
+        detail.push(Line::styled("Log", Style::default().fg(Color::Cyan)));
+        detail.extend(task.logs.iter().map(|line| Line::raw(line.clone())));
+        let budget = area.height.saturating_sub(8) as usize;
+        let max_scroll = detail.len().saturating_sub(budget);
+        let scroll = app.repo_batch.scroll.min(max_scroll);
+        lines.extend(detail.into_iter().skip(scroll).take(budget));
+        lines.push(Line::styled(
+            if task.running {
+                "j/k Scroll   c Cancel (no rollback)"
+            } else {
+                "j/k Scroll   f Retry failed   Esc Close"
+            },
+            Color::DarkGray,
+        ));
+        render_overlay(frame, area, " Repo task ", lines);
+    } else if let Some((error, message)) = &app.repo_batch.message {
+        let area = centered_rect(60, 24, frame.area());
+        render_overlay(
+            frame,
+            area,
+            " Repo action ",
+            vec![Line::styled(
+                message.clone(),
+                if *error {
+                    Color::LightRed
+                } else {
+                    Color::Green
+                },
+            )],
+        );
+    }
+}
+
+fn batch_parameter(spec: &crate::domain::RepoBatchSpec) -> String {
+    spec.branch
+        .as_deref()
+        .or(spec.change.as_deref())
+        .map(str::to_owned)
+        .or_else(|| {
+            spec.output
+                .as_ref()
+                .map(|value| value.display().to_string())
+        })
+        .unwrap_or_else(|| "(none)".to_owned())
+}
+
+fn result_line(label: &str, state: RepoProjectState, message: &str) -> Line<'static> {
+    let color = match state {
+        RepoProjectState::Succeeded => Color::Green,
+        RepoProjectState::Failed => Color::LightRed,
+        RepoProjectState::Running => Color::Yellow,
+        RepoProjectState::Cancelled | RepoProjectState::Skipped => Color::DarkGray,
+        RepoProjectState::Pending => Color::Gray,
+    };
+    Line::from(vec![
+        Span::styled(format!("{:<9}", state.label()), color),
+        Span::raw(format!(" {label}: {message}")),
+    ])
+}
+
+fn render_overlay(frame: &mut Frame, area: Rect, title: &str, lines: Vec<Line<'static>>) {
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(Block::default().title(title).borders(Borders::ALL))
+            .wrap(Wrap { trim: false }),
+        area,
+    );
+}
+
+fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
+    let width = area.width.saturating_mul(percent_x) / 100;
+    let height = area.height.saturating_mul(percent_y) / 100;
+    Rect::new(
+        area.x + area.width.saturating_sub(width) / 2,
+        area.y + area.height.saturating_sub(height) / 2,
+        width.max(1),
+        height.max(1),
+    )
 }
 
 fn row_style(snapshot: &crate::domain::ProjectSnapshot, selected: bool) -> Style {

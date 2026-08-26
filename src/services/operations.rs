@@ -11,11 +11,17 @@ use crate::domain::{
     OperationSpec, OperationTarget, Project, RepositoryActionOutcome, RepositoryActionSpec,
 };
 
+use crate::services::repo_batch::workspace_lock_for_project;
 #[derive(Debug, Default, Clone)]
 pub struct OperationRunner;
 
 impl OperationRunner {
     pub async fn execute(&self, spec: OperationSpec) -> Result<OperationOutcome> {
+        let workspace_lock = workspace_lock_for_project(&spec.project.path);
+        let _workspace_guard = match &workspace_lock {
+            Some(lock) => Some(lock.lock().await),
+            None => None,
+        };
         let lock = project_lock(spec.project.path.clone());
         let _guard = lock.lock().await;
         let root = &spec.project.path;
@@ -108,6 +114,11 @@ impl OperationRunner {
         project: Project,
         spec: CommitSpec,
     ) -> Result<CommitOutcome> {
+        let workspace_lock = workspace_lock_for_project(&project.path);
+        let _workspace_guard = match &workspace_lock {
+            Some(lock) => Some(lock.lock().await),
+            None => None,
+        };
         let lock = project_lock(project.path.clone());
         let _guard = lock.lock().await;
         let root = &project.path;
@@ -133,6 +144,11 @@ impl OperationRunner {
         &self,
         spec: RepositoryActionSpec,
     ) -> Result<RepositoryActionOutcome> {
+        let workspace_lock = workspace_lock_for_project(&spec.project.path);
+        let _workspace_guard = match &workspace_lock {
+            Some(lock) => Some(lock.lock().await),
+            None => None,
+        };
         let lock = project_lock(spec.project.path.clone());
         let _guard = lock.lock().await;
         let root = &spec.project.path;
