@@ -43,7 +43,15 @@ pub fn render(frame: &mut Frame, app: &App) {
                     .bg(Color::Cyan)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::raw(format!("  {}  /  Graph", graph.project.name)),
+            Span::raw(format!(
+                "  {}  /  Graph{}",
+                graph.project.name,
+                if graph.filter.is_active() {
+                    format!("  [{}]", graph.filter.summary())
+                } else {
+                    String::new()
+                }
+            )),
         ]))
         .block(Block::default().borders(Borders::BOTTOM)),
         vertical[0],
@@ -77,7 +85,7 @@ pub fn render(frame: &mut Frame, app: &App) {
             Style::default().fg(if *error { Color::Red } else { Color::Green }),
         )
     } else {
-        Span::raw("Enter Objects  j/k Move  g/G Ends  r Reload  c Changes  Esc Back")
+        Span::raw("Enter Objects  j/k Move  f Filter  / Search  x Clear  r Reload  Esc Back")
     };
     frame.render_widget(Paragraph::new(Line::from(footer)), vertical[2]);
     if graph.object_menu {
@@ -89,6 +97,9 @@ pub fn render(frame: &mut Frame, app: &App) {
     if graph.form.is_some() {
         render_graph_form(frame, graph);
     }
+    if graph.filter_form.is_some() {
+        render_filter_form(frame, graph);
+    }
     if app
         .repository
         .as_ref()
@@ -96,6 +107,52 @@ pub fn render(frame: &mut Frame, app: &App) {
     {
         render_confirmation(frame, app);
     }
+}
+
+fn render_filter_form(frame: &mut Frame, graph: &GraphState) {
+    let Some(form) = graph.filter_form.as_ref() else {
+        return;
+    };
+    let area = centered_rect(70, 56, frame.area());
+    frame.render_widget(Clear, area);
+    let mut lines = form
+        .fields()
+        .into_iter()
+        .enumerate()
+        .map(|(index, (label, value))| {
+            let suffix = if index == form.selected { "_" } else { "" };
+            Line::styled(
+                format!(
+                    "{} {label}: {value}{suffix}",
+                    if index == form.selected { ">" } else { " " }
+                ),
+                if index == form.selected {
+                    Style::default().fg(Color::Cyan)
+                } else {
+                    Style::default()
+                },
+            )
+        })
+        .collect::<Vec<_>>();
+    lines.push(Line::raw(""));
+    lines.push(Line::styled(
+        "Branch matches local/remote refs. Dates use YYYY-MM-DD UTC.",
+        Color::DarkGray,
+    ));
+    if let Some(error) = &graph.filter_error {
+        lines.push(Line::styled(error.clone(), Color::LightRed));
+    }
+    lines.push(Line::raw("Tab/Up/Down Field   Enter Apply   Esc Cancel"));
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(
+                Block::default()
+                    .title(" Graph filters ")
+                    .borders(Borders::ALL),
+            )
+            .wrap(Wrap { trim: false }),
+        area,
+    );
 }
 
 fn render_object_menu(frame: &mut Frame, app: &App, graph: &GraphState) {
@@ -267,8 +324,13 @@ fn render_commits(frame: &mut Frame, graph: &crate::app::state::GraphState, area
         return;
     }
 
+    let indices = graph.filtered_indices();
+    let selected_visible = indices
+        .iter()
+        .position(|index| *index == graph.selected)
+        .unwrap_or(0);
     let visible = area.height.saturating_sub(3) as usize;
-    let start = viewport_start(graph.selected, visible, graph.commits.len());
+    let start = viewport_start(selected_visible, visible, indices.len());
     let topology = topology_rows(&graph.commits);
     let graph_width = topology
         .iter()
@@ -277,13 +339,13 @@ fn render_commits(frame: &mut Frame, graph: &crate::app::state::GraphState, area
         .unwrap_or(2)
         .max(7)
         .min(area.width.saturating_sub(59).max(7) as usize) as u16;
-    let rows = graph
-        .commits
+    let rows = indices
         .iter()
-        .enumerate()
+        .copied()
         .skip(start)
         .take(visible)
-        .map(|(index, commit)| {
+        .filter_map(|index| {
+            let commit = graph.commits.get(index)?;
             let style = if index == graph.selected {
                 Style::default().bg(Color::DarkGray)
             } else {
@@ -300,34 +362,36 @@ fn render_commits(frame: &mut Frame, graph: &crate::app::state::GraphState, area
                     .fg(Color::White)
                     .add_modifier(Modifier::BOLD)
             };
-            Row::new(vec![
-                Cell::from(Line::styled(
-                    if index == graph.selected { ">" } else { " " },
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
-                )),
-                Cell::from(topology),
-                Cell::from(Line::styled(
-                    commit.oid.chars().take(8).collect::<String>(),
-                    Style::default().fg(Color::LightBlue),
-                )),
-                Cell::from(Line::styled(commit.subject.clone(), subject_style)),
-                Cell::from(refs_line(&commit.refs)),
-                Cell::from(Line::styled(
-                    commit.author.clone(),
-                    Style::default().fg(Color::Gray),
-                )),
-                Cell::from(Line::styled(
-                    calendar_date(commit.timestamp),
-                    Style::default().fg(Color::Gray),
-                )),
-                Cell::from(Line::styled(
-                    relative_age(commit.timestamp),
-                    Style::default().fg(Color::DarkGray),
-                )),
-            ])
-            .style(style)
+            Some(
+                Row::new(vec![
+                    Cell::from(Line::styled(
+                        if index == graph.selected { ">" } else { " " },
+                        Style::default()
+                            .fg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD),
+                    )),
+                    Cell::from(topology),
+                    Cell::from(Line::styled(
+                        commit.oid.chars().take(8).collect::<String>(),
+                        Style::default().fg(Color::LightBlue),
+                    )),
+                    Cell::from(Line::styled(commit.subject.clone(), subject_style)),
+                    Cell::from(refs_line(&commit.refs)),
+                    Cell::from(Line::styled(
+                        commit.author.clone(),
+                        Style::default().fg(Color::Gray),
+                    )),
+                    Cell::from(Line::styled(
+                        calendar_date(commit.timestamp),
+                        Style::default().fg(Color::Gray),
+                    )),
+                    Cell::from(Line::styled(
+                        relative_age(commit.timestamp),
+                        Style::default().fg(Color::DarkGray),
+                    )),
+                ])
+                .style(style),
+            )
         });
     let table = Table::new(
         rows,
@@ -355,7 +419,11 @@ fn render_commits(frame: &mut Frame, graph: &crate::app::state::GraphState, area
     .column_spacing(1)
     .block(
         Block::default()
-            .title(format!(" All refs commit graph ({}) ", graph.commits.len()))
+            .title(format!(
+                " All refs commit graph ({}/{}) ",
+                indices.len(),
+                graph.commits.len()
+            ))
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::DarkGray)),
     );
@@ -398,10 +466,17 @@ fn relative_age(timestamp: i64) -> String {
 }
 
 fn render_detail(frame: &mut Frame, graph: &crate::app::state::GraphState, area: Rect) {
-    let lines = graph.commits.get(graph.selected).map_or_else(
+    let selected = graph
+        .filtered_indices()
+        .contains(&graph.selected)
+        .then(|| graph.commits.get(graph.selected))
+        .flatten();
+    let lines = selected.map_or_else(
         || {
             vec![Line::raw(if graph.loading {
                 "Loading..."
+            } else if graph.filter.is_active() {
+                "No matching commits"
             } else {
                 "No commits"
             })]

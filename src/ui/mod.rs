@@ -38,11 +38,11 @@ fn render_help(frame: &mut Frame) {
         Line::raw("Space / A      Select project / all filtered projects"),
         Line::raw("d              Toggle changed-project filter in Workspace"),
         Line::raw("a              Open Workspace Repo or Repository actions"),
-        Line::raw("c / f          Cancel Repo task / retry failed projects"),
+        Line::raw("f, /, x        Graph filter / query / clear; retry failed Repo task"),
         Line::raw("Tab            Toggle Changes mode or active form field"),
         Line::raw("s/u/d          Stage / unstage / discard selection"),
         Line::raw("m              Commit staged changes; Ctrl-A/U/G toggle options"),
-        Line::raw("/ / r          Search projects / refresh current page"),
+        Line::raw("r              Refresh current page"),
         Line::raw("Esc / q / ?    Back / quit Workspace / toggle help"),
         Line::raw(""),
         Line::styled(
@@ -262,6 +262,9 @@ mod tests {
             form: None,
             message: None,
             selected_oid: None,
+            filter: crate::app::state::GraphFilter::default(),
+            filter_form: None,
+            filter_error: None,
             commit_message: String::new(),
             commit_amend: false,
             commit_running: false,
@@ -269,6 +272,84 @@ mod tests {
         });
         draw(&app, 80, 24);
         draw(&app, 120, 40);
+    }
+
+    #[test]
+    fn renders_graph_filters_and_empty_results_at_supported_sizes() {
+        use crate::app::state::{GraphFilter, GraphFilterForm};
+
+        let mut app = app();
+        let project = app.workspace.projects[0].clone();
+        app.screen = Screen::Graph;
+        app.graph = Some(GraphState {
+            project,
+            commits: vec![Commit {
+                oid: "aaaaaaaa".into(),
+                parents: vec![],
+                refs: vec![CommitRef {
+                    name: "main".into(),
+                    kind: CommitRefKind::LocalBranch,
+                }],
+                author: "Ada".into(),
+                timestamp: 1_700_000_000,
+                subject: "Initial commit".into(),
+                body: "Initial commit body".into(),
+            }],
+            selected: 0,
+            loading: false,
+            error: None,
+            generation: 1,
+            object_menu: false,
+            object_selected: 0,
+            action_menu: false,
+            action_selected: 0,
+            selected_object: None,
+            form: None,
+            message: None,
+            selected_oid: None,
+            filter: GraphFilter {
+                branch: "main".into(),
+                query: String::new(),
+                author: "Ada".into(),
+                since: "2023-01-01".into(),
+                until: String::new(),
+            },
+            filter_form: Some(GraphFilterForm {
+                draft: GraphFilter {
+                    branch: "main".into(),
+                    query: "initial".into(),
+                    author: "Ada".into(),
+                    since: "2023-01-01".into(),
+                    until: "2023-12-31".into(),
+                },
+                selected: 1,
+            }),
+            filter_error: Some("Until must use YYYY-MM-DD".into()),
+            commit_message: String::new(),
+            commit_amend: false,
+            commit_running: false,
+            commit_generation: 0,
+        });
+
+        for (width, height) in [(80, 24), (120, 40)] {
+            let text = draw_text(&app, width, height);
+            assert!(text.contains("Graph filters"));
+            assert!(text.contains("Branch: main"));
+            assert!(text.contains("Query: initial_"));
+            assert!(text.contains("Author: Ada"));
+            assert!(text.contains("Since: 2023-01-01"));
+            assert!(text.contains("Until: 2023-12-31"));
+            assert!(text.contains("Until must use YYYY-MM-DD"));
+        }
+
+        let graph = app.graph.as_mut().unwrap();
+        graph.filter_form = None;
+        graph.filter_error = None;
+        graph.filter.query = "no-such-commit".into();
+        let text = draw_text(&app, 120, 40);
+        assert!(text.contains("branch:main  query:no-such-commit  author:Ada"));
+        assert!(text.contains("All refs commit graph (0/1)"));
+        assert!(text.contains("No matching commits"));
     }
 
     #[test]
@@ -327,6 +408,9 @@ mod tests {
             form: None,
             message: None,
             selected_oid: None,
+            filter: crate::app::state::GraphFilter::default(),
+            filter_form: None,
+            filter_error: None,
             commit_message: String::new(),
             commit_amend: false,
             commit_running: false,

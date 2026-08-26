@@ -204,12 +204,16 @@ Graph 是进入仓库后的默认页，由提交列表和详情检查器组成�
 交互能力：
 
 - 默认展示所有本地分支、远端分支、标签、HEAD 和每条 stash entry 的完整可达历史。
-- 搜索 message、author、OID、path；后续可选择 first parent 或指定 ref 范围。
+- `f` 打开 Branch、Query、Author、Since、Until 结构化过滤表单，`/` 打开同一表单并聚焦 Query，`x` 清空全部 Graph 过滤条件。
+- Branch 大小写不敏感地匹配本地/远端分支名，并展示所有匹配分支 tip 的 parent 可达历史并集；它不会把 branch decoration 所在的单行误当成完整分支。
+- Query 大小写不敏感地匹配 commit OID、subject、body 和 ref name；Author 使用大小写不敏感子串匹配；Since/Until 使用 UTC `YYYY-MM-DD` 日历日闭区间。所有非空条件按 AND 组合。
+- 过滤只作用于已异步加载的完整 all-refs commits，不启动额外 Git 子进程，也不重建或裁剪用于 topology lane 的完整 DAG。可见行保存完整 commits 的绝对索引，导航、详情和对象菜单继续绑定真实 OID。
+- 应用、清空或重载时优先按 OID 保留选择；原 OID 不可见时回退首条可见提交。零匹配时表格为空、详情显示 `No matching commits`，对象菜单不可打开。无效日期或 Since 晚于 Until 时保留表单和草稿并显示错误，不应用过滤。
 - 查看完整 commit metadata、message、parents、notes、签名和变更统计。
 - 查看 commit、commit range 或单文件 diff。
 - 从提交创建 branch/tag、checkout、reset、revert、cherry-pick、rebase onto。
 - 复制 OID、subject 或生成可执行命令；从父/子提交间跳转。
-- 过滤本地分支、远端分支、标签、stash 和 manifest revision。
+- path、tag、stash 和 manifest revision 的独立过滤仍属于后续扩展；当前 Commit 模型尚未携带 changed-path 数据。
 
 ### 6.2 Commit graph 布局算法
 Graph 是仓库操作的首要发现入口。用户在提交树中选中节点并按 `Enter`，先看到该节点的对象菜单：提交本身、HEAD、本地分支、远端分支、标签以及挂在该节点上的 stash entry。再次按 `Enter` 进入所选对象的固定动作菜单。

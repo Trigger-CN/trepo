@@ -259,6 +259,26 @@ fn handle_key(app: &mut App, key: KeyEvent) {
         }
         return;
     }
+    let graph_filter = app
+        .graph
+        .as_ref()
+        .is_some_and(|graph| graph.filter_form.is_some());
+    if app.screen == Screen::Graph && graph_filter {
+        match key.code {
+            KeyCode::Esc => app.cancel_graph_filter(),
+            KeyCode::Enter => app.submit_graph_filter(),
+            KeyCode::Backspace => {
+                app.edit_graph_filter(repo_tui::app::state::CommitInput::Backspace)
+            }
+            KeyCode::Down | KeyCode::Tab => app.move_graph_filter_field(1),
+            KeyCode::Up | KeyCode::BackTab => app.move_graph_filter_field(-1),
+            KeyCode::Char(character) => {
+                app.edit_graph_filter(repo_tui::app::state::CommitInput::Character(character))
+            }
+            _ => {}
+        }
+        return;
+    }
     let graph_overlay = app
         .graph
         .as_ref()
@@ -424,6 +444,9 @@ fn handle_key(app: &mut App, key: KeyEvent) {
         Screen::Graph => match key.code {
             KeyCode::Esc => app.back(),
             KeyCode::Char('?') => app.help = true,
+            KeyCode::Char('f') => app.open_graph_filter(false),
+            KeyCode::Char('/') => app.open_graph_filter(true),
+            KeyCode::Char('x') => app.clear_graph_filter(),
             KeyCode::Char('r') => app.reload_graph(),
             KeyCode::Char('c') => app.open_changes(),
             KeyCode::Char('o') => app.open_repository(),
