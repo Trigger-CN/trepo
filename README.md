@@ -54,7 +54,7 @@ Implemented:
 - Concurrent porcelain v2 status scanning
 - staged, unstaged, untracked, conflict, HEAD, ahead/behind summary, and file-level porcelain status captured from the same scan
 - searchable responsive Workspace page with an optional changed-project-only filter and wide-screen Inspector file list
-- complete all-refs commit graph covering local branches, remote branches, tags, HEAD, and every stash entry
+- complete all-refs commit graph covering local branches, remote branches, tags, HEAD, and every stash entry, with UTC calendar date and relative age
 - multi-color topology lanes with visible split/merge connectors and distinct HEAD/local/remote/tag/stash badges
 - Graph two-level object menu: select a commit node, choose its commit/HEAD/local branch/remote branch/tag/stash object, then choose a fixed contextual action
 - Graph contextual commit/amend, stash creation, branch/tag creation, merge, rebase, cherry-pick, revert, and stash actions

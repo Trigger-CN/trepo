@@ -183,12 +183,12 @@ Graph 是进入仓库后的默认页，由提交列表和详情检查器组成�
 
 ```text
 ┌ platform/camera  Graph  Changes(5)  Branches  Tags  Remotes  Stashes ┐
-├ Graph ── Commit ─────────── Refs ───────────── Author ──────── Time ┤
-│ ●  91f2c7a Fix frame ownership      (HEAD -> feature/x)       2h   │
-│ │\                                                                    │
-│ │ ● 5aa82e1 Tune exposure           (origin/feature/x)        4h   │
-│ ● │ e30d991 Add stream metrics      (tag: v2.4-rc1)           1d   │
-│ ●─┘ 0c671b0 Merge camera HAL update                             2d   │
+├ Graph ── Commit ─────────── Refs ───────────── Author ───── Date ───── Age ┤
+│ ●  91f2c7a Fix frame ownership      (HEAD -> feature/x)       2026-08-26  2h │
+│ │\                                                                        │
+│ │ ● 5aa82e1 Tune exposure           (origin/feature/x)        2026-08-26  4h │
+│ ● │ e30d991 Add stream metrics      (tag: v2.4-rc1)           2026-08-25  1d │
+│ ●─┘ 0c671b0 Merge camera HAL update                            2026-08-24  2d │
 ├───────────────────────────────────┬─────────────────────────────────┤
 │ Commit message / metadata         │ Files / stats / selected diff    │
 └ j/k Move  Enter Detail  d Diff  b Branch  t Tag  c Cherry-pick ─────┘
@@ -198,7 +198,7 @@ Graph 是进入仓库后的默认页，由提交列表和详情检查器组成�
 
 - ASCII/Unicode 拓扑线、commit 符号和 merge 连接。
 - 短 OID、subject、refs decoration。
-- author/committer、绝对或相对时间。
+- author、UTC `YYYY-MM-DD` 日历日期和相对 Age；详情检查器也显示同一可读日期。
 - 签名状态、GPG/SSH signer、父提交数量等可选字段。
 
 交互能力：
