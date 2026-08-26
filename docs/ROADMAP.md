@@ -282,18 +282,19 @@ cargo run -- doctor .
 已交付：
 
 - ProjectId 稳定多选、命名/path 过滤和过滤集合全选。
-- `repo sync/start/checkout/abandon/prune/rebase/upload/download` 固定 argv 工作流。
+- `repo sync/start/checkout/abandon/prune/rebase/upload/download` 固定 argv 工作流；空选择 sync 确认后执行整个 workspace 的 `repo sync -c -j8`，有选择时聚合执行 `repo sync -c -j8 -- <projects...>`。
 - workspace 级 pinned manifest 导出，并验证输出目录不通过 symlink 逃逸。
 - workspace exclusive lock 与现有 project Git 写锁协调，锁内重验路径、目录和 index lock。
-- 逐项目 pending/running/success/failed/cancelled 状态与有界、凭据脱敏的 stdout/stderr 逐行日志。
+- workspace 或逐项目 pending/running/success/failed/cancelled 显示与有界、凭据脱敏的 stdout/stderr 逐行日志。
+- 聚合 sync 按整批退出状态更新参与作用域，不解析人类日志；结束后复扫真实状态。
 - SIGINT 后 grace period 终止进程组；取消明确不回滚并触发真实状态复扫。
-- 部分失败继续执行，完成后只重试 failed 项；任务和扫描结果均使用 generation 隔离。
+- 非 sync 动作保持逐项目部分失败隔离；sync 失败时按原 workspace 或冻结项目作用域重试，结果使用 generation 隔离。
 
 验收证据：
 
-- 每次执行前展示冻结的目标项目、参数和逐项完整 `repo` argv。
-- fake Repo 真实子进程覆盖日志脱敏、manifest symlink 拒绝、部分失败和取消进程组；58 项测试通过。
-- App state 覆盖稳定多选与 stale batch event，Workspace overlay 覆盖 80x24/120x40。
+- 每次执行前展示冻结的目标作用域、参数和完整 `repo` argv；整个 workspace Sync 也必须显式确认。
+- fake Repo 真实子进程证明 workspace 和多项目 sync 都只调用一次，argv 分别为 `sync -c -j8` 与 `sync -c -j8 -- <projects...>`。
+- App state 覆盖空选择确认、workspace/聚合 started event、失败重试、稳定多选与 stale batch event；Workspace overlay 覆盖 80x24/120x40。
 - 后台 upload 固定使用确认页展示的 `--current-branch --yes`；交互认证和高级参数属于 M5 PTY takeover。
 
 ## 10. M5：命令面板与终端接管

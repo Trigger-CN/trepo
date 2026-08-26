@@ -30,6 +30,18 @@ pub async fn list_projects(root: &Path) -> Result<Vec<RepoProject>> {
     parse_list(&output.stdout)
 }
 
+pub fn sync_args(project_paths: &[&Path]) -> Result<Vec<String>> {
+    let mut args = vec!["sync".to_owned(), "-c".to_owned(), "-j8".to_owned()];
+    if !project_paths.is_empty() {
+        args.push("--".to_owned());
+    }
+    for project_path in project_paths {
+        validate_project_path(project_path)?;
+        args.push(project_path.to_string_lossy().into_owned());
+    }
+    Ok(args)
+}
+
 pub fn batch_args(spec: &RepoBatchSpec, project_path: Option<&Path>) -> Result<Vec<String>> {
     let mut args = vec![spec.action.command().to_owned()];
     if spec.action.is_workspace_action() {
@@ -52,14 +64,7 @@ pub fn batch_args(spec: &RepoBatchSpec, project_path: Option<&Path>) -> Result<V
     }
 
     let project_path = project_path.context("project path is required")?;
-    if project_path.as_os_str().is_empty()
-        || project_path.is_absolute()
-        || project_path
-            .components()
-            .any(|part| part.as_os_str() == "..")
-    {
-        bail!("project path must stay relative to the workspace");
-    }
+    validate_project_path(project_path)?;
     if spec.action == RepoBatchAction::Upload {
         args.extend(["--current-branch".to_owned(), "--yes".to_owned()]);
     }
@@ -83,15 +88,27 @@ pub fn batch_args(spec: &RepoBatchSpec, project_path: Option<&Path>) -> Result<V
             args.push(project_path.to_string_lossy().into_owned());
             args.push(change.to_owned());
         }
-        RepoBatchAction::Sync
-        | RepoBatchAction::Prune
-        | RepoBatchAction::Rebase
-        | RepoBatchAction::Upload => {
+        RepoBatchAction::Sync => {
+            bail!("repo sync requires the aggregated project argument builder");
+        }
+        RepoBatchAction::Prune | RepoBatchAction::Rebase | RepoBatchAction::Upload => {
             args.push(project_path.to_string_lossy().into_owned());
         }
         RepoBatchAction::ManifestExport => unreachable!("handled above"),
     }
     Ok(args)
+}
+
+fn validate_project_path(project_path: &Path) -> Result<()> {
+    if project_path.as_os_str().is_empty()
+        || project_path.is_absolute()
+        || project_path
+            .components()
+            .any(|part| part.as_os_str() == "..")
+    {
+        bail!("project path must stay relative to the workspace");
+    }
+    Ok(())
 }
 pub fn parse_list(bytes: &[u8]) -> Result<Vec<RepoProject>> {
     let text = std::str::from_utf8(bytes).context("repo list output is not UTF-8")?;
@@ -177,6 +194,16 @@ mod tests {
             change: None,
             output: None,
         }
+    }
+
+    #[test]
+    fn builds_one_parallel_sync_command_for_all_projects() {
+        assert_eq!(
+            sync_args(&[Path::new("alpha"), Path::new("platform/beta")]).unwrap(),
+            ["sync", "-c", "-j8", "--", "alpha", "platform/beta"]
+        );
+        assert_eq!(sync_args(&[]).unwrap(), ["sync", "-c", "-j8"]);
+        assert!(sync_args(&[Path::new("../outside")]).is_err());
     }
 
     #[test]

@@ -321,7 +321,7 @@ Manifest 页面支持：
 | --- | --- |
 | init | URL、manifest branch/name、groups、depth、reference 等表单，执行前显示目标目录 |
 | list/status/info/diff/branches/overview | 结构化列表、过滤器和跳转 |
-| sync | 项目范围、jobs、current-branch、detach、force-sync、prune 等参数与逐项目进度 |
+| sync | 空选择时确认并执行整个 workspace 的 `repo sync -c -j8`；有选择时聚合为 `repo sync -c -j8 -- <projects...>` |
 | start/checkout/abandon/prune | 分支名、项目范围、前置状态检查和批量结果 |
 | upload | 待上传分支/commit、目标 review branch、topic、reviewer/cc、dry-run；认证交给 Repo |
 | download | change/patchset 输入、目标项目和执行结果 |
@@ -333,16 +333,17 @@ Manifest 页面支持：
 
 不同 Repo 版本的子命令和参数并不完全一致。启动时记录 `repo version` 和 `repo help` 能力，UI 仅启用确认支持的选项；未知能力仍可通过命令面板执行。不能为了统一界面悄悄改写用户的 Repo 参数。
 
-当前 M4 专用 UI 已实现上述表格中的 `sync/start/checkout/abandon/prune/rebase/upload/download/manifest` 基础固定参数工作流。Workspace 通过稳定 ProjectId 多选冻结目标，确认页逐项展示完整 argv。后台 upload 明确使用 `--current-branch --yes`；交互认证、reviewer/topic/dry-run 等高级 upload 参数仍由 M5 PTY takeover 承担。
+当前 M4 专用 UI 已实现上述表格中的 `sync/start/checkout/abandon/prune/rebase/upload/download/manifest` 基础固定参数工作流。Workspace 通过稳定 ProjectId 多选冻结目标，确认页展示明确作用域和完整 argv。Sync 在空选择时把整个 Repo workspace 作为作用域并执行 `repo sync -c -j8`；有选择时把全部选中项目聚合成一次 `repo sync -c -j8 -- <projects...>`。其他动作仍按项目独立执行。后台 upload 明确使用 `--current-branch --yes`；交互认证、reviewer/topic/dry-run 等高级 upload 参数仍由 M5 PTY takeover 承担。
 
 ### 7.3 Sync 与 Upload 体验
 
-`repo sync` 等长任务在 Workspace 任务覆盖层展示：
+`repo sync` 使用 Repo 自身的 `-j8` 并发，并始终只启动一个子进程。没有选择项目表示整个 Repo workspace；选择一个或多个项目表示冻结后的项目集合。两种作用域都必须经过确认，确认页分别展示准确命令 `repo sync -c -j8` 或 `repo sync -c -j8 -- <projects...>`。Workspace 任务覆盖层展示：
 
-- 总项目数及每个项目的 pending/running/success/failed/cancelled 状态。
-- stdout/stderr 原始逐行结构在凭据脱敏后进入 500 行有界内存缓存；不依赖人类输出推断成功。
+- 空选择 Sync 使用 workspace 级 pending/running/success/failed/cancelled 状态；选中项目 Sync 展示参与项目的对应状态。
+- Sync 只使用稳定的整批退出状态：成功、失败或取消统一作用于参与命令的作用域；不解析人类日志猜测单项结果。
+- stdout/stderr 原始逐行结构在凭据脱敏后进入 500 行有界内存缓存。
 - 取消时向独立进程组发送 SIGINT，等待 grace period 后 SIGKILL，并明确提示可能已完成部分修改。
-- 完成或取消后全量复扫真实 Git 状态；失败项目可作为冻结目标单独重试。
+- 完成或取消后全量复扫真实 Git 状态；失败的 workspace 或冻结项目集合可以按原作用域重试。
 
 Upload 执行前展示 project 和准确 argv。M4 capture 模式只执行 `--current-branch --yes`，不解析或存储密码/token；Repo/Gerrit 需要交互认证时等待 M5 终端接管。
 

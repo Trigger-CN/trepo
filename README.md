@@ -60,11 +60,11 @@ Implemented:
 - Graph contextual commit/amend, stash creation, branch/tag creation, merge, rebase, cherry-pick, revert, and stash actions
 - Graph forms and confirmations reuse the protected RepositoryAction/OperationRunner workflow; local and remote branches expose different valid actions
 - stable project multi-selection and name/path filtering in Workspace
-- fixed Repo batch actions for `sync/start/checkout/abandon/prune/rebase/upload/download` and pinned manifest export
-- complete target and argv review before execution; destructive actions are visually distinguished
+- fixed Repo batch actions for `sync/start/checkout/abandon/prune/rebase/upload/download` and pinned manifest export; Sync runs once as `repo sync -c -j8` when no project is selected, or `repo sync -c -j8 -- <projects...>` for the frozen selection
+- complete scope, target, and argv review before execution; whole-workspace Sync always requires explicit confirmation and destructive actions are visually distinguished
 - workspace-exclusive execution coordinated with project Git locks and lock-time path/index checks
-- per-project pending/running/success/failure/cancelled results with bounded, credential-redacted stdout/stderr logs
-- process-group cancellation without rollback claims, automatic real-state rescan, and retry-failed-only
+- workspace or per-project pending/running/success/failure/cancelled display with bounded, credential-redacted stdout/stderr logs; aggregated Sync uses only its command exit status for the participating scope
+- process-group cancellation without rollback claims, automatic real-state rescan, and retry-failed-scope
 - background upload uses the explicitly reviewed `--current-branch --yes` mode; interactive authentication and advanced upload parameters wait for M5 PTY takeover
 - Changes file list with staged, worktree, and untracked diff previews
 - guarded file-, hunk-, and changed-line stage, unstage, and discard with lock-time patch reconstruction
