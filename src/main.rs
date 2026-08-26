@@ -410,6 +410,7 @@ fn handle_key(app: &mut App, key: KeyEvent) {
             KeyCode::Char('a') => app.open_repo_batch_menu(),
             KeyCode::Char(' ') => app.toggle_project_selection(),
             KeyCode::Char('A') => app.toggle_filtered_selection(),
+            KeyCode::Char('d') => app.toggle_changed_only(),
             KeyCode::Char('r') => app.refresh(),
             KeyCode::Char('c') => app.open_changes(),
             KeyCode::Char('o') => app.open_repository(),

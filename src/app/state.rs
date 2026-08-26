@@ -543,6 +543,7 @@ pub struct App {
     pub selected: usize,
     pub search: String,
     pub search_mode: bool,
+    pub changed_only: bool,
     pub help: bool,
     pub generation: u64,
     pub scanning: usize,
@@ -603,6 +604,7 @@ impl App {
             selected: 0,
             search: String::new(),
             search_mode: false,
+            changed_only: false,
             help: false,
             generation: 0,
             scanning: 0,
@@ -660,6 +662,9 @@ impl App {
     }
 
     pub fn apply_scan(&mut self, result: ScanResult) {
+        let selected_id = self
+            .selected_project()
+            .map(|snapshot| snapshot.project.id.clone());
         let snapshot = result.snapshot;
         if snapshot.generation != self.generation {
             return;
@@ -672,7 +677,7 @@ impl App {
             *slot = snapshot;
             self.scanning = self.scanning.saturating_sub(1);
         }
-        self.clamp_selection();
+        self.restore_workspace_selection(selected_id.as_ref());
     }
 
     pub fn filtered_indices(&self) -> Vec<usize> {
@@ -681,18 +686,41 @@ impl App {
             .iter()
             .enumerate()
             .filter(|(_, snapshot)| {
-                query.is_empty()
-                    || snapshot.project.name.to_lowercase().contains(&query)
-                    || snapshot
-                        .project
-                        .relative_path
-                        .to_string_lossy()
-                        .to_lowercase()
-                        .contains(&query)
-                    || snapshot.head.label().to_lowercase().contains(&query)
+                (!self.changed_only || snapshot.worktree.is_dirty())
+                    && (query.is_empty()
+                        || snapshot.project.name.to_lowercase().contains(&query)
+                        || snapshot
+                            .project
+                            .relative_path
+                            .to_string_lossy()
+                            .to_lowercase()
+                            .contains(&query)
+                        || snapshot.head.label().to_lowercase().contains(&query))
             })
             .map(|(index, _)| index)
             .collect()
+    }
+
+    pub fn toggle_changed_only(&mut self) {
+        let selected_id = self
+            .selected_project()
+            .map(|snapshot| snapshot.project.id.clone());
+        self.changed_only = !self.changed_only;
+        self.restore_workspace_selection(selected_id.as_ref());
+    }
+
+    fn restore_workspace_selection(&mut self, selected_id: Option<&ProjectId>) {
+        let indices = self.filtered_indices();
+        self.selected = selected_id
+            .and_then(|id| {
+                indices.iter().position(|index| {
+                    self.projects
+                        .get(*index)
+                        .is_some_and(|snapshot| &snapshot.project.id == id)
+                })
+            })
+            .unwrap_or(0)
+            .min(indices.len().saturating_sub(1));
     }
 
     pub fn selected_project(&self) -> Option<&ProjectSnapshot> {
@@ -2555,6 +2583,45 @@ mod tests {
         app.move_selection(0);
         assert_eq!(app.selected, 0);
         assert_eq!(app.selected_project().unwrap().project.name, "alpha");
+    }
+
+    #[test]
+    fn changed_only_combines_with_search_and_preserves_project_identity() {
+        let workspace = Workspace {
+            root: PathBuf::from("/tmp"),
+            kind: WorkspaceKind::Repo,
+            projects: vec![
+                project("clean"),
+                project("staged"),
+                project("modified"),
+                project("untracked"),
+                project("conflicted"),
+            ],
+        };
+        let mut app = App::new(workspace, 2);
+        app.projects[1].worktree.staged = 1;
+        app.projects[2].worktree.unstaged = 1;
+        app.projects[3].worktree.untracked = 1;
+        app.projects[4].worktree.conflicted = 1;
+        app.selected = 2;
+        app.toggle_changed_only();
+        assert_eq!(app.filtered_indices(), vec![1, 2, 3, 4]);
+        assert_eq!(app.selected_project().unwrap().project.name, "modified");
+        app.search = "untracked".into();
+        app.move_selection(0);
+        assert_eq!(app.filtered_indices(), vec![3]);
+        assert_eq!(app.selected_project().unwrap().project.name, "untracked");
+        let untracked_id = app.projects[3].project.id.clone();
+        app.search.clear();
+        app.restore_workspace_selection(Some(&untracked_id));
+        app.toggle_changed_only();
+        assert_eq!(app.selected_project().unwrap().project.name, "untracked");
+        app.toggle_changed_only();
+        assert_eq!(app.selected_project().unwrap().project.name, "untracked");
+        app.search = "clean".into();
+        app.restore_workspace_selection(Some(&untracked_id));
+        assert!(app.selected_project().is_none());
+        assert_eq!(app.selected, 0);
     }
 
     #[test]

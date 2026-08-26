@@ -52,9 +52,9 @@ M1 是所有后续里程碑的共同数据与交互基础。M4 可以在 M2 后�
 
 - 从任意子目录识别 Repo 工作区或单 Git 仓库，并并发扫描状态。
 - Workspace、完整 all-refs Graph、Changes 和 Repository 管理页面均已可用。
+- Workspace 支持稳定 ProjectId 多选、命名搜索、`d` 一键仅显示工作区有改动项目，以及宽屏 Inspector 的同次扫描文件状态列表。
 - Graph 支持 commit/HEAD/local branch/remote branch/tag/stash 两级上下文操作及 typed form。
 - 文件/hunk/changed-line、commit/stash/conflict、refs/integration 和 remotes 写操作受锁、token 和 generation 保护。
-- Workspace 支持稳定 ProjectId 多选、命名过滤，以及完整目标和 argv 确认。
 - Repo `sync/start/checkout/abandon/prune/rebase/upload/download` 和 pinned manifest export 具有 workspace lock、逐项目结果、流式日志、取消后复扫与失败重试。
 - Graph 与 Repo overlay、confirmation 和结果状态均覆盖 80x24 与 120x40 TestBackend 渲染。
 
@@ -168,14 +168,14 @@ cargo run -- doctor .
 - 表格展示状态、project/path、HEAD、upstream 和错误。
 - Summary 展示总数、dirty、conflict、ahead、behind、error。
 - `j/k`、方向键、`g/G` 导航。
-- `/` 搜索 project/path/branch，`Esc` 清空搜索或退出。
+- `/` 搜索 project/path/branch，`Esc` 清空搜索或退出；`d` 在 Workspace 切换仅显示 staged、unstaged、untracked 或 conflicted 项目，并与搜索按 AND 组合。
 - `r` 刷新，`Enter` 打开选中仓库，`?` 显示帮助。
-- 宽屏显示检查器，窄屏保持主列表可用。
+- 宽屏显示检查器和同次 porcelain 扫描解析出的文件状态码/路径列表，窄屏保持主列表可用。
 
 验收：
 
-- selection 绑定 project identity，过滤后不会索引越界。
-- 80x24 与 120x40 TestBackend 渲染不 panic。
+- selection 绑定 project identity，搜索、changed-only 切换和扫描增量后不会索引越界或跳到错误项目。
+- 80x24 与 120x40 TestBackend 渲染不 panic；宽屏可见 changed-only 状态与文件状态码。
 - 扫描中、空列表和错误状态都有明确界面。
 
 ### M1.5 Commit graph 页面

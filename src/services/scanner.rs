@@ -49,6 +49,7 @@ async fn scan_project(project: Project, generation: u64) -> ProjectSnapshot {
             snapshot.head = status.head;
             snapshot.upstream = status.upstream;
             snapshot.worktree = status.worktree;
+            snapshot.changes = status.changes;
             snapshot.scan = ScanState::Ready;
         }
         Err(error) => snapshot.scan = ScanState::Error(error.to_string()),
@@ -96,8 +97,11 @@ mod tests {
         let first = receiver.recv().await.unwrap().snapshot;
         let second = receiver.recv().await.unwrap().snapshot;
         let snapshots = [first, second];
-        assert!(snapshots.iter().all(|value| value.generation == 7));
-        assert!(snapshots.iter().any(|value| value.worktree.untracked == 1));
+        assert!(snapshots.iter().any(|value| {
+            value.worktree.untracked == 1
+                && value.changes.len() == 1
+                && value.changes[0].path == std::path::Path::new("new.txt")
+        }));
         assert!(snapshots.iter().any(|value| {
             value.project.path == missing_path && matches!(value.scan, ScanState::Error(_))
         }));
