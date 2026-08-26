@@ -36,6 +36,7 @@ fn render_help(frame: &mut Frame) {
         Line::raw("g/G            First / last"),
         Line::raw("Enter          Open graph / select active overlay item"),
         Line::raw("Space / A      Select project / all filtered projects"),
+        Line::raw("d              Toggle changed-project filter in Workspace"),
         Line::raw("a              Open Workspace Repo or Repository actions"),
         Line::raw("c / f          Cancel Repo task / retry failed projects"),
         Line::raw("Tab            Toggle Changes mode or active form field"),
@@ -153,6 +154,30 @@ mod tests {
         let app = app();
         draw(&app, 80, 24);
         draw(&app, 120, 40);
+    }
+
+    #[test]
+    fn workspace_changed_only_shows_scanned_file_entries_on_wide_terminals() {
+        let mut app = app();
+        app.projects[0].worktree.staged = 1;
+        app.projects[0].changes = (0..24)
+            .map(|index| ChangeEntry {
+                path: PathBuf::from(format!("src/dirty-{index}.rs")),
+                original_path: None,
+                index: Some(ChangeCode::Modified),
+                worktree: None,
+                untracked: false,
+                conflicted: false,
+            })
+            .collect();
+        app.toggle_changed_only();
+        let text = draw_text(&app, 120, 40);
+        assert!(text.contains("Changed only"));
+        assert!(text.contains("Changed files (24)"));
+        assert!(text.contains("M.  src/dirty-0.rs"));
+        assert!(text.contains("... "));
+        assert!(text.contains("more files"));
+        draw(&app, 80, 24);
     }
 
     #[test]

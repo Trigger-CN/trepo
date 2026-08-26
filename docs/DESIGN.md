@@ -138,6 +138,9 @@ Git 与 Repo 的参数面很大，而且会随版本、插件和服务端扩展�
 
 颜色与符号同时传递信息，确保无颜色终端和色觉差异用户仍能判断状态。主题支持 16 色、256 色和 true color 降级。
 
+
+当前 Workspace 已实现一个轻量快捷过滤：在 Workspace 按 `d` 仅保留 `WorktreeSummary::is_dirty()` 的项目（staged、unstaged、untracked 或 conflicted）；它与 `/` 文本搜索按 AND 组合。切换过滤和扫描增量到达时，UI 先按稳定 `ProjectId` 恢复当前选择，只有该项目不可见时才退回首个可见项目。
+
 ### 5.3 搜索、过滤与排序
 
 搜索范围包括 project name、path、branch、HEAD OID/subject、manifest group 和错误文本。默认使用大小写不敏感的 fuzzy match，并支持切换 literal/regex。
@@ -153,6 +156,9 @@ Git 与 Repo 的参数面很大，而且会随版本、插件和服务端扩展�
 多个过滤器采用可见的 AND/OR 规则。过滤条件可保存为命名视图，例如“待上传”“有冲突”“vendor 修改”。
 
 默认排序优先级为：错误/冲突、dirty、diverged、ahead/behind、detached、clean，再按 path。还支持 path、project、branch、最近提交、变更数和任务结果排序。扫描结果到达时保持当前 selection 绑定到稳定 `ProjectId`，不能因行重排跳到其他仓库。
+
+
+宽屏 Inspector 复用同一次 `git status --porcelain=v2 --branch -z` 扫描中已解析的 `ChangeEntry`，显示 `M.`、`.M`、`??`、`UU` 等文本状态码和相对路径。它不会为每个项目额外执行 `git status`；文件列表按右栏高度和宽度截断，并在有剩余条目时明确显示数量。
 
 ### 5.4 聚合与批量动作
 

@@ -61,23 +61,32 @@ fn render_header(frame: &mut Frame, app: &App, area: Rect) {
     ]);
     let status = if app.search_mode {
         format!("Search: {}_", app.search)
-    } else if !app.search.is_empty() {
-        format!(
-            "Filter: {}  Selected: {}",
-            app.search,
-            app.selected_project_count()
-        )
     } else {
-        format!(
-            "{} projects  {} selected  {} dirty  {} conflict  {} ahead  {} behind  {} errors",
-            summary.total,
-            app.selected_project_count(),
-            summary.dirty,
-            summary.conflicted,
-            summary.ahead,
-            summary.behind,
-            summary.errors
-        )
+        let filter = if app.changed_only {
+            "  Changed only"
+        } else {
+            ""
+        };
+        if !app.search.is_empty() {
+            format!(
+                "Filter: {}{}  Selected: {}",
+                app.search,
+                filter,
+                app.selected_project_count()
+            )
+        } else {
+            format!(
+                "{} projects{}  {} selected  {} dirty  {} conflict  {} ahead  {} behind  {} errors",
+                summary.total,
+                filter,
+                app.selected_project_count(),
+                summary.dirty,
+                summary.conflicted,
+                summary.ahead,
+                summary.behind,
+                summary.errors
+            )
+        }
     };
     frame.render_widget(
         Paragraph::new(vec![title, Line::raw(status)])
@@ -153,9 +162,14 @@ fn render_table(frame: &mut Frame, app: &App, area: Rect) {
         .block(
             Block::default()
                 .title(format!(
-                    " Projects ({}/{}) ",
+                    " Projects ({}/{}){} ",
                     indices.len(),
-                    app.projects.len()
+                    app.projects.len(),
+                    if app.changed_only {
+                        " changed only"
+                    } else {
+                        ""
+                    }
                 ))
                 .borders(Borders::ALL),
         );
@@ -190,6 +204,33 @@ fn render_inspector(frame: &mut Frame, app: &App, area: Rect) {
             if let ScanState::Error(error) = &snapshot.scan {
                 lines.push(Line::raw(""));
                 lines.push(Line::styled(error.clone(), Color::Red));
+            } else if snapshot.changes.is_empty() {
+                lines.push(Line::raw(""));
+                lines.push(Line::raw("Changed files: none"));
+            } else {
+                lines.push(Line::raw(""));
+                lines.push(Line::styled(
+                    format!("Changed files ({})", snapshot.changes.len()),
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ));
+                let available_rows = area.height.saturating_sub(lines.len() as u16 + 2) as usize;
+                let file_budget = if snapshot.changes.len() > available_rows {
+                    available_rows.saturating_sub(1)
+                } else {
+                    available_rows
+                };
+                for change in snapshot.changes.iter().take(file_budget) {
+                    lines.push(change_line(change, area.width.saturating_sub(4) as usize));
+                }
+                let remaining = snapshot.changes.len().saturating_sub(file_budget);
+                if remaining > 0 {
+                    lines.push(Line::styled(
+                        format!("... {remaining} more files"),
+                        Color::DarkGray,
+                    ));
+                }
             }
             lines
         }
@@ -225,7 +266,7 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
                     Color::Green
                 }),
             ),
-            Span::raw("   Space Select   a Repo actions   / Search   Enter Open   ? Help"),
+            Span::raw("   Space Select   d Changed only   a Repo actions   / Search   Enter Open   ? Help"),
         ])),
         area,
     );
@@ -451,6 +492,33 @@ fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
         width.max(1),
         height.max(1),
     )
+}
+
+fn change_line(change: &crate::domain::ChangeEntry, width: usize) -> Line<'static> {
+    let status = change.status_label();
+    let path = change.path.to_string_lossy();
+    let text = format!("{status}  {path}");
+    let text = truncate_text(&text, width);
+    let color = if change.conflicted {
+        Color::LightRed
+    } else if change.untracked {
+        Color::Yellow
+    } else {
+        Color::Cyan
+    };
+    Line::styled(text, color)
+}
+
+fn truncate_text(text: &str, width: usize) -> String {
+    if text.chars().count() <= width {
+        return text.to_owned();
+    }
+    if width <= 3 {
+        return ".".repeat(width);
+    }
+    let mut truncated = text.chars().take(width - 3).collect::<String>();
+    truncated.push_str("...");
+    truncated
 }
 
 fn row_style(snapshot: &crate::domain::ProjectSnapshot, selected: bool) -> Style {

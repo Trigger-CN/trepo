@@ -20,6 +20,7 @@ pub struct StatusSnapshot {
     pub head: HeadState,
     pub upstream: Option<UpstreamState>,
     pub worktree: WorktreeSummary,
+    pub changes: Vec<ChangeEntry>,
 }
 
 pub async fn git_output<I, S>(cwd: &Path, args: I) -> Result<Vec<u8>>
@@ -1529,10 +1530,13 @@ pub fn parse_status(bytes: &[u8]) -> Result<StatusSnapshot> {
         behind,
     });
 
+    let changes = parse_changes(bytes)?;
+
     Ok(StatusSnapshot {
         head,
         upstream,
         worktree,
+        changes,
     })
 }
 
@@ -1868,6 +1872,17 @@ mod tests {
         assert_eq!(status.worktree.unstaged, 1);
         assert_eq!(status.worktree.untracked, 1);
         assert_eq!(status.worktree.conflicted, 1);
+        assert_eq!(status.changes.len(), 4);
+        assert!(status
+            .changes
+            .iter()
+            .any(|entry| entry.status_label() == "M." && entry.path == Path::new("staged.txt")));
+        assert!(status
+            .changes
+            .iter()
+            .any(|entry| entry.status_label() == ".M" && entry.path == Path::new("changed.txt")));
+        assert!(status.changes.iter().any(|entry| entry.untracked));
+        assert!(status.changes.iter().any(|entry| entry.conflicted));
         assert_eq!(status.upstream.unwrap().ahead, 2);
     }
 

@@ -193,6 +193,7 @@ pub struct ProjectSnapshot {
     pub head: HeadState,
     pub upstream: Option<UpstreamState>,
     pub worktree: WorktreeSummary,
+    pub changes: Vec<ChangeEntry>,
     pub scan: ScanState,
     pub generation: u64,
 }
@@ -204,6 +205,7 @@ impl ProjectSnapshot {
             head: HeadState::Unknown,
             upstream: None,
             worktree: WorktreeSummary::default(),
+            changes: Vec::new(),
             scan: ScanState::Pending,
             generation,
         }

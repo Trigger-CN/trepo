@@ -35,7 +35,7 @@ Starting from a subdirectory is supported. If no `.repo` directory is found, rep
 | `f` | Retry only failed projects after a Repo task |
 | `Tab` | Cycle file / hunk / line mode in Changes; switch tabs or form fields |
 | `s` / `u` | Stage / unstage the selected file, hunk, or line |
-| `d` | Preview and confirm discarding the selected file, worktree hunk, or line |
+| `d` | Workspace: toggle changed-project filter; Changes: preview and confirm discarding the selected file, worktree hunk, or line |
 | `m` | Open commit dialog from Changes |
 | `Ctrl-A` / `Ctrl-U` / `Ctrl-G` | Toggle amend / sign-off / signing in Changes commit dialog |
 | `o` | Open Repository management from Workspace, Graph, or Changes |
@@ -52,8 +52,8 @@ Implemented:
 
 - Repo and single-Git workspace discovery
 - Concurrent porcelain v2 status scanning
-- staged, unstaged, untracked, conflict, HEAD and ahead/behind summary
-- searchable responsive Workspace page
+- staged, unstaged, untracked, conflict, HEAD, ahead/behind summary, and file-level porcelain status captured from the same scan
+- searchable responsive Workspace page with an optional changed-project-only filter and wide-screen Inspector file list
 - complete all-refs commit graph covering local branches, remote branches, tags, HEAD, and every stash entry
 - multi-color topology lanes with visible split/merge connectors and distinct HEAD/local/remote/tag/stash badges
 - Graph two-level object menu: select a commit node, choose its commit/HEAD/local branch/remote branch/tag/stash object, then choose a fixed contextual action
