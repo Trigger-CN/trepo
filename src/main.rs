@@ -211,6 +211,9 @@ fn drain_background_messages(app: &mut App) {
     while let Ok(result) = app.commit_rx.try_recv() {
         app.apply_commit(result);
     }
+    while let Ok(result) = app.graph_commit_rx.try_recv() {
+        app.apply_graph_commit(result);
+    }
     while let Ok(result) = app.repository_rx.try_recv() {
         app.apply_repository_load(result);
     }
@@ -220,6 +223,36 @@ fn drain_background_messages(app: &mut App) {
 }
 
 fn handle_key(app: &mut App, key: KeyEvent) {
+    let graph_overlay = app
+        .graph
+        .as_ref()
+        .is_some_and(|graph| graph.object_menu || graph.action_menu || graph.form.is_some());
+    if app.screen == Screen::Graph && graph_overlay {
+        let graph_form = app.graph.as_ref().is_some_and(|graph| graph.form.is_some());
+        let graph_action = app.graph.as_ref().is_some_and(|graph| graph.action_menu);
+        let graph_object = app.graph.as_ref().is_some_and(|graph| graph.object_menu);
+        match key.code {
+            KeyCode::Esc => app.cancel_graph_overlay(),
+            KeyCode::Enter if graph_form => app.submit_graph_form(),
+            KeyCode::Enter if graph_action => app.select_graph_action(),
+            KeyCode::Enter if graph_object => app.select_graph_object(),
+            KeyCode::Backspace if graph_form => {
+                app.edit_graph_form(repo_tui::app::state::CommitInput::Backspace)
+            }
+            KeyCode::Char(' ') if graph_form => {
+                app.edit_graph_form(repo_tui::app::state::CommitInput::ToggleAmend)
+            }
+            KeyCode::Down | KeyCode::Tab => app.move_graph_overlay_selection(1),
+            KeyCode::Up | KeyCode::BackTab => app.move_graph_overlay_selection(-1),
+            KeyCode::Char('j') if !graph_form => app.move_graph_overlay_selection(1),
+            KeyCode::Char('k') if !graph_form => app.move_graph_overlay_selection(-1),
+            KeyCode::Char(character) if graph_form => {
+                app.edit_graph_form(repo_tui::app::state::CommitInput::Character(character))
+            }
+            _ => {}
+        }
+        return;
+    }
     if app
         .repository
         .as_ref()
@@ -354,6 +387,7 @@ fn handle_key(app: &mut App, key: KeyEvent) {
             KeyCode::Char('r') => app.reload_graph(),
             KeyCode::Char('c') => app.open_changes(),
             KeyCode::Char('o') => app.open_repository(),
+            KeyCode::Enter => app.open_graph_object_menu(),
             KeyCode::Down | KeyCode::Char('j') => app.move_graph_selection(1),
             KeyCode::Up | KeyCode::Char('k') => app.move_graph_selection(-1),
             KeyCode::Char('g') | KeyCode::Home => app.graph_first(),

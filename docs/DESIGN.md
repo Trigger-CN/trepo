@@ -206,6 +206,15 @@ Graph 是进入仓库后的默认页，由提交列表和详情检查器组成�
 - 过滤本地分支、远端分支、标签、stash 和 manifest revision。
 
 ### 6.2 Commit graph 布局算法
+Graph 是仓库操作的首要发现入口。用户在提交树中选中节点并按 `Enter`，先看到该节点的对象菜单：提交本身、HEAD、本地分支、远端分支、标签以及挂在该节点上的 stash entry。再次按 `Enter` 进入所选对象的固定动作菜单。
+
+- 提交和 HEAD：打开 Changes、提交/amend、创建 branch/tag、stash、merge、rebase、cherry-pick 和 revert。
+- 本地分支：switch、merge、rebase、rename 和 delete。
+- 远端分支：以创建本地分支、merge、rebase、cherry-pick 和 revert 为主，不暴露本地 rename/delete。
+- 标签：创建 branch、merge、rebase、cherry-pick、revert 和 delete。
+- stash：show、apply、pop 和 drop。
+
+需要参数的动作进入 typed form；破坏性动作和远端写入沿用现有确认及精确预览。Graph 只负责上下文识别、导航和参数收集，实际 Git argv、项目锁、`index.lock` 检查、snapshot token、generation 校验和 OperationRunner 执行保持唯一实现。动作完成后 Graph 刷新 all-refs 历史，并尽可能按原 OID 恢复选择；失败保留真实 Git 错误。
 
 Git 提供提交及 parent 关系，`repo-tui` 负责视觉 lane 分配：
 

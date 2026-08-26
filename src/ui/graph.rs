@@ -4,11 +4,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table, Wrap};
+use ratatui::widgets::{Block, Borders, Cell, Clear, List, ListItem, Paragraph, Row, Table, Wrap};
 use ratatui::Frame;
 
-use crate::app::state::App;
-use crate::domain::{Commit, CommitRef, CommitRefKind};
+use crate::app::repository::{action_preview, FormField};
+use crate::app::state::{graph_actions, graph_object_label, App, GraphState};
+use crate::domain::{Commit, CommitRef, CommitRefKind, RiskLevel};
 
 pub fn render(frame: &mut Frame, app: &App) {
     let area = frame.area();
@@ -60,13 +61,196 @@ pub fn render(frame: &mut Frame, app: &App) {
     }
 
     let footer = if graph.loading {
-        "Loading commits..."
+        Span::styled("Loading commits...", Style::default().fg(Color::Yellow))
+    } else if app
+        .repository
+        .as_ref()
+        .is_some_and(|state| state.action_running)
+    {
+        Span::styled(
+            "Running Git operation...",
+            Style::default().fg(Color::Yellow),
+        )
+    } else if let Some((error, message)) = &graph.message {
+        Span::styled(
+            message.clone(),
+            Style::default().fg(if *error { Color::Red } else { Color::Green }),
+        )
     } else {
-        "j/k Move  g/G Ends  r Reload  Esc Back  L local  R remote  T tag  S stash"
+        Span::raw("Enter Objects  j/k Move  g/G Ends  r Reload  c Changes  Esc Back")
     };
-    frame.render_widget(Paragraph::new(footer), vertical[2]);
+    frame.render_widget(Paragraph::new(Line::from(footer)), vertical[2]);
+    if graph.object_menu {
+        render_object_menu(frame, app, graph);
+    }
+    if graph.action_menu {
+        render_action_menu(frame, graph);
+    }
+    if graph.form.is_some() {
+        render_graph_form(frame, graph);
+    }
+    if app
+        .repository
+        .as_ref()
+        .is_some_and(|state| state.pending.is_some())
+    {
+        render_confirmation(frame, app);
+    }
 }
 
+fn render_object_menu(frame: &mut Frame, app: &App, graph: &GraphState) {
+    let area = centered_rect(62, 70, frame.area());
+    frame.render_widget(Clear, area);
+    let objects = app.graph_objects();
+    let items = objects.iter().enumerate().map(|(index, object)| {
+        ListItem::new(graph_object_label(object)).style(menu_style(index == graph.object_selected))
+    });
+    frame.render_widget(
+        List::new(items).block(
+            Block::default()
+                .title(" Objects on selected node ")
+                .borders(Borders::ALL),
+        ),
+        area,
+    );
+}
+
+fn render_action_menu(frame: &mut Frame, graph: &GraphState) {
+    let Some(object) = graph.selected_object.as_ref() else {
+        return;
+    };
+    let area = centered_rect(66, 76, frame.area());
+    frame.render_widget(Clear, area);
+    let items = graph_actions(object.kind)
+        .iter()
+        .enumerate()
+        .map(|(index, choice)| {
+            ListItem::new(choice.label()).style(menu_style(index == graph.action_selected))
+        });
+    frame.render_widget(
+        List::new(items).block(
+            Block::default()
+                .title(format!(" Actions for {} ", graph_object_label(object)))
+                .borders(Borders::ALL),
+        ),
+        area,
+    );
+}
+
+fn render_graph_form(frame: &mut Frame, graph: &GraphState) {
+    let Some(form) = graph.form.as_ref() else {
+        return;
+    };
+    let area = centered_rect(72, 68, frame.area());
+    frame.render_widget(Clear, area);
+    let mut lines = form
+        .fields
+        .iter()
+        .enumerate()
+        .map(|(index, field)| {
+            let prefix = if index == form.selected { ">" } else { " " };
+            let hint = if matches!(field, FormField::Toggle { .. }) {
+                " [Space]"
+            } else {
+                ""
+            };
+            Line::styled(
+                format!(
+                    "{prefix} {}: {}{hint}",
+                    field.label(),
+                    field.display_value()
+                ),
+                if index == form.selected {
+                    Style::default().fg(Color::Cyan)
+                } else {
+                    Style::default()
+                },
+            )
+        })
+        .collect::<Vec<_>>();
+    if let Some((error, message)) = &graph.message {
+        lines.push(Line::raw(""));
+        lines.push(Line::styled(
+            message.clone(),
+            Style::default().fg(if *error { Color::Red } else { Color::Green }),
+        ));
+    }
+    lines.push(Line::raw(""));
+    lines.push(Line::raw("Enter execute   Esc cancel"));
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(
+                Block::default()
+                    .title(format!(" {} ", form.choice.label()))
+                    .borders(Borders::ALL),
+            )
+            .wrap(Wrap { trim: false }),
+        area,
+    );
+}
+
+fn render_confirmation(frame: &mut Frame, app: &App) {
+    let Some(state) = app.repository.as_ref() else {
+        return;
+    };
+    let Some(action) = state.pending.as_ref() else {
+        return;
+    };
+    let area = centered_rect(70, 46, frame.area());
+    frame.render_widget(Clear, area);
+    let risk = match action.risk() {
+        RiskLevel::RemoteWrite => "This action writes to a remote repository.",
+        RiskLevel::Destructive => "This action can discard local or reference state.",
+        _ => "Confirm this repository operation.",
+    };
+    let mut lines = vec![
+        Line::styled(
+            risk,
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        ),
+        Line::raw(""),
+        Line::raw(format!("Action: {}", action.label())),
+    ];
+    if let Some(snapshot) = state.snapshot.as_ref() {
+        lines.extend(action_preview(action, snapshot).into_iter().map(Line::raw));
+    }
+    lines.extend([
+        Line::raw(""),
+        Line::raw("Press y to continue or n/Esc to cancel."),
+    ]);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(
+                Block::default()
+                    .title(" Confirm operation ")
+                    .borders(Borders::ALL),
+            )
+            .wrap(Wrap { trim: false }),
+        area,
+    );
+}
+
+fn menu_style(selected: bool) -> Style {
+    if selected {
+        Style::default()
+            .fg(Color::Black)
+            .bg(Color::Cyan)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+    }
+}
+
+fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
+    let width = area.width.saturating_mul(percent_x) / 100;
+    let height = area.height.saturating_mul(percent_y) / 100;
+    Rect::new(
+        area.x + area.width.saturating_sub(width) / 2,
+        area.y + area.height.saturating_sub(height) / 2,
+        width.max(1),
+        height.max(1),
+    )
+}
 fn render_commits(frame: &mut Frame, graph: &crate::app::state::GraphState, area: Rect) {
     if let Some(error) = &graph.error {
         frame.render_widget(

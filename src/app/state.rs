@@ -3,7 +3,9 @@ use std::path::PathBuf;
 use tokio::sync::mpsc;
 
 use crate::adapters::git;
-use crate::app::repository::{choices, form_for, RepositoryChoice, RepositoryForm, RepositoryTab};
+use crate::app::repository::{
+    choices, form_for, FormField, RepositoryChoice, RepositoryForm, RepositoryTab,
+};
 use crate::domain::{
     ChangeEntry, ChangePreview, Commit, CommitOutcome, CommitSpec, HunkSource, OperationKind,
     OperationOutcome, OperationSpec, OperationTarget, Project, ProjectId, ProjectSnapshot,
@@ -28,6 +30,325 @@ pub struct GraphResult {
     pub result: anyhow::Result<Vec<Commit>>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GraphObjectKind {
+    Commit,
+    Head,
+    LocalBranch,
+    RemoteBranch,
+    Tag,
+    Stash,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GraphObject {
+    pub kind: GraphObjectKind,
+    pub name: String,
+    pub oid: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GraphActionChoice {
+    Changes,
+    Commit,
+    Amend,
+    StashCreate,
+    CreateBranch,
+    CreateTag,
+    CherryPick,
+    Revert,
+    SwitchBranch,
+    Merge,
+    Rebase,
+    RenameBranch,
+    DeleteBranch,
+    DeleteTag,
+    StashShow,
+    StashApply,
+    StashPop,
+    StashDrop,
+}
+
+impl GraphActionChoice {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Changes => "Open Changes",
+            Self::Commit => "Commit staged changes",
+            Self::Amend => "Amend current commit",
+            Self::StashCreate => "Create stash",
+            Self::CreateBranch => "Create branch here",
+            Self::CreateTag => "Create tag here",
+            Self::CherryPick => "Cherry-pick this commit",
+            Self::Revert => "Revert this commit",
+            Self::SwitchBranch => "Switch to local branch",
+            Self::Merge => "Merge this ref into current branch",
+            Self::Rebase => "Rebase current branch onto this ref",
+            Self::RenameBranch => "Rename local branch",
+            Self::DeleteBranch => "Delete local branch",
+            Self::DeleteTag => "Delete tag",
+            Self::StashShow => "Show stash patch",
+            Self::StashApply => "Apply stash",
+            Self::StashPop => "Pop stash",
+            Self::StashDrop => "Drop stash",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct GraphForm {
+    pub choice: GraphActionChoice,
+    pub object: GraphObject,
+    pub fields: Vec<FormField>,
+    pub selected: usize,
+}
+
+impl GraphForm {
+    fn text(&self, index: usize) -> anyhow::Result<String> {
+        match self.fields.get(index) {
+            Some(FormField::Text { value, label }) if !value.trim().is_empty() => {
+                Ok(value.trim().to_owned())
+            }
+            Some(FormField::Text { label, .. }) => anyhow::bail!("{label} cannot be empty"),
+            _ => anyhow::bail!("invalid graph action form"),
+        }
+    }
+    fn toggle(&self, index: usize) -> anyhow::Result<bool> {
+        match self.fields.get(index) {
+            Some(FormField::Toggle { value, .. }) => Ok(*value),
+            _ => anyhow::bail!("invalid graph action form"),
+        }
+    }
+    pub fn edit(&mut self, input: CommitInput) {
+        match input {
+            CommitInput::Character(value) => {
+                if let Some(FormField::Text { value: text, .. }) =
+                    self.fields.get_mut(self.selected)
+                {
+                    text.push(value);
+                }
+            }
+            CommitInput::Backspace => {
+                if let Some(FormField::Text { value, .. }) = self.fields.get_mut(self.selected) {
+                    value.pop();
+                }
+            }
+            CommitInput::ToggleAmend | CommitInput::ToggleSignoff | CommitInput::ToggleSigning => {
+                if let Some(FormField::Toggle { value, .. }) = self.fields.get_mut(self.selected) {
+                    *value = !*value;
+                }
+            }
+        }
+    }
+    fn commit_spec(&self) -> anyhow::Result<CommitSpec> {
+        Ok(CommitSpec {
+            message: self.text(0)?,
+            amend: matches!(self.choice, GraphActionChoice::Amend),
+            signoff: self.toggle(1)?,
+            signing: self.toggle(2)?,
+        })
+    }
+    pub fn action(&self) -> anyhow::Result<RepositoryAction> {
+        use GraphActionChoice as C;
+        use RepositoryAction as A;
+        Ok(match self.choice {
+            C::StashCreate => A::StashPush {
+                message: self.text(0).unwrap_or_default(),
+                include_untracked: self.toggle(1)?,
+            },
+            C::CreateBranch => A::BranchCreate {
+                name: self.text(0)?,
+                start: Some(self.text(1)?),
+            },
+            C::CreateTag => A::TagCreate {
+                name: self.text(0)?,
+                target: self.text(1)?,
+            },
+            C::RenameBranch => A::BranchRename {
+                old: self.text(0)?,
+                new: self.text(1)?,
+            },
+            C::DeleteBranch => A::BranchDelete {
+                name: self.text(0)?,
+                force: self.toggle(1)?,
+            },
+            _ => anyhow::bail!("unsupported graph form action"),
+        })
+    }
+}
+
+pub fn graph_actions(kind: GraphObjectKind) -> &'static [GraphActionChoice] {
+    use GraphActionChoice as C;
+    match kind {
+        GraphObjectKind::Commit | GraphObjectKind::Head => &[
+            C::Changes,
+            C::Commit,
+            C::Amend,
+            C::StashCreate,
+            C::CreateBranch,
+            C::CreateTag,
+            C::CherryPick,
+            C::Revert,
+            C::Merge,
+            C::Rebase,
+        ],
+        GraphObjectKind::LocalBranch => &[
+            C::SwitchBranch,
+            C::Merge,
+            C::Rebase,
+            C::RenameBranch,
+            C::DeleteBranch,
+        ],
+        GraphObjectKind::RemoteBranch => &[
+            C::CreateBranch,
+            C::Merge,
+            C::Rebase,
+            C::CherryPick,
+            C::Revert,
+        ],
+        GraphObjectKind::Tag => &[
+            C::CreateBranch,
+            C::CherryPick,
+            C::Revert,
+            C::Merge,
+            C::Rebase,
+            C::DeleteTag,
+        ],
+        GraphObjectKind::Stash => &[C::StashShow, C::StashApply, C::StashPop, C::StashDrop],
+    }
+}
+
+fn graph_form(choice: GraphActionChoice, object: GraphObject) -> Option<GraphForm> {
+    use GraphActionChoice as C;
+    let fields = match choice {
+        C::Commit | C::Amend => vec![
+            FormField::Text {
+                label: "Commit message",
+                value: String::new(),
+            },
+            FormField::Toggle {
+                label: "Sign off",
+                value: false,
+            },
+            FormField::Toggle {
+                label: "Sign commit",
+                value: false,
+            },
+        ],
+        C::StashCreate => vec![
+            FormField::Text {
+                label: "Message (optional)",
+                value: String::new(),
+            },
+            FormField::Toggle {
+                label: "Include untracked",
+                value: false,
+            },
+        ],
+        C::CreateBranch => vec![
+            FormField::Text {
+                label: "Branch name",
+                value: String::new(),
+            },
+            FormField::Text {
+                label: "Start ref",
+                value: object.oid.clone(),
+            },
+        ],
+        C::CreateTag => vec![
+            FormField::Text {
+                label: "Tag name",
+                value: String::new(),
+            },
+            FormField::Text {
+                label: "Target",
+                value: object.oid.clone(),
+            },
+        ],
+        C::RenameBranch => vec![
+            FormField::Text {
+                label: "Old name",
+                value: object.name.clone(),
+            },
+            FormField::Text {
+                label: "New name",
+                value: String::new(),
+            },
+        ],
+        C::DeleteBranch => vec![
+            FormField::Text {
+                label: "Branch",
+                value: object.name.clone(),
+            },
+            FormField::Toggle {
+                label: "Force delete",
+                value: false,
+            },
+        ],
+        _ => return None,
+    };
+    Some(GraphForm {
+        choice,
+        object,
+        fields,
+        selected: 0,
+    })
+}
+
+fn graph_action(choice: GraphActionChoice, object: &GraphObject) -> Option<RepositoryAction> {
+    use GraphActionChoice as C;
+    use RepositoryAction as A;
+    let reference = match object.kind {
+        GraphObjectKind::LocalBranch | GraphObjectKind::RemoteBranch => object.name.clone(),
+        _ => object.oid.clone(),
+    };
+    Some(match choice {
+        C::CherryPick => A::CherryPick {
+            oid: object.oid.clone(),
+        },
+        C::Revert => A::Revert {
+            oid: object.oid.clone(),
+        },
+        C::SwitchBranch => A::BranchSwitch {
+            name: object.name.clone(),
+        },
+        C::Merge => A::Merge { reference },
+        C::Rebase => A::Rebase { reference },
+        C::DeleteTag => A::TagDelete {
+            name: object.name.clone(),
+        },
+        C::StashShow => A::StashShow {
+            selector: object.name.clone(),
+        },
+        C::StashApply => A::StashApply {
+            selector: object.name.clone(),
+        },
+        C::StashPop => A::StashPop {
+            selector: object.name.clone(),
+        },
+        C::StashDrop => A::StashDrop {
+            selector: object.name.clone(),
+        },
+        _ => return None,
+    })
+}
+
+pub fn graph_object_label(object: &GraphObject) -> String {
+    format!(
+        "{}: {}",
+        match object.kind {
+            GraphObjectKind::Commit => "Commit",
+            GraphObjectKind::Head => "HEAD",
+            GraphObjectKind::LocalBranch => "Local branch",
+            GraphObjectKind::RemoteBranch => "Remote branch",
+            GraphObjectKind::Tag => "Tag",
+            GraphObjectKind::Stash => "Stash",
+        },
+        object.name
+    )
+}
+fn short_oid(oid: &str) -> String {
+    oid.chars().take(8).collect()
+}
 #[derive(Debug)]
 pub struct GraphState {
     pub project: Project,
@@ -36,6 +357,18 @@ pub struct GraphState {
     pub loading: bool,
     pub error: Option<String>,
     pub generation: u64,
+    pub object_menu: bool,
+    pub object_selected: usize,
+    pub action_menu: bool,
+    pub action_selected: usize,
+    pub selected_object: Option<GraphObject>,
+    pub form: Option<GraphForm>,
+    pub message: Option<(bool, String)>,
+    pub selected_oid: Option<String>,
+    pub commit_message: String,
+    pub commit_amend: bool,
+    pub commit_running: bool,
+    pub commit_generation: u64,
 }
 
 #[derive(Debug)]
@@ -66,6 +399,14 @@ pub struct OperationResult {
 pub struct CommitResult {
     pub project_id: ProjectId,
     pub changes_generation: u64,
+    pub commit_generation: u64,
+    pub result: anyhow::Result<CommitOutcome>,
+}
+
+#[derive(Debug)]
+pub struct GraphCommitResult {
+    pub project_id: ProjectId,
+    pub generation: u64,
     pub commit_generation: u64,
     pub result: anyhow::Result<CommitOutcome>,
 }
@@ -187,6 +528,9 @@ pub struct App {
     pub operation_rx: mpsc::UnboundedReceiver<OperationResult>,
     pub commit_tx: mpsc::UnboundedSender<CommitResult>,
     pub commit_rx: mpsc::UnboundedReceiver<CommitResult>,
+    graph_commit_tx: mpsc::UnboundedSender<GraphCommitResult>,
+    pub graph_commit_rx: mpsc::UnboundedReceiver<GraphCommitResult>,
+    repository_intent: Option<RepositoryAction>,
     repository_tx: mpsc::UnboundedSender<RepositoryLoadResult>,
     pub repository_rx: mpsc::UnboundedReceiver<RepositoryLoadResult>,
     repository_action_tx: mpsc::UnboundedSender<RepositoryActionResult>,
@@ -202,6 +546,7 @@ impl App {
         let (operation_tx, operation_rx) = mpsc::unbounded_channel();
         let (preview_tx, preview_rx) = mpsc::unbounded_channel();
         let (commit_tx, commit_rx) = mpsc::unbounded_channel();
+        let (graph_commit_tx, graph_commit_rx) = mpsc::unbounded_channel();
         let (repository_tx, repository_rx) = mpsc::unbounded_channel();
         let (repository_action_tx, repository_action_rx) = mpsc::unbounded_channel();
         let projects = workspace
@@ -236,12 +581,15 @@ impl App {
             operation_rx,
             commit_tx,
             commit_rx,
+            graph_commit_tx,
+            graph_commit_rx,
             repository_tx,
             repository_rx,
             repository_action_tx,
             repository_action_rx,
             operation_runner: OperationRunner,
             concurrency: concurrency.max(1),
+            repository_intent: None,
         }
     }
 
@@ -344,6 +692,12 @@ impl App {
             .graph
             .as_ref()
             .map_or(1, |graph| graph.generation.wrapping_add(1));
+        let selected_oid = self.graph.as_ref().and_then(|graph| {
+            graph
+                .commits
+                .get(graph.selected)
+                .map(|commit| commit.oid.clone())
+        });
         self.graph = Some(GraphState {
             project: project.clone(),
             commits: Vec::new(),
@@ -351,6 +705,18 @@ impl App {
             loading: true,
             error: None,
             generation,
+            object_menu: false,
+            object_selected: 0,
+            action_menu: false,
+            action_selected: 0,
+            selected_object: None,
+            form: None,
+            message: None,
+            selected_oid,
+            commit_message: String::new(),
+            commit_amend: false,
+            commit_running: false,
+            commit_generation: 0,
         });
         let sender = self.graph_tx.clone();
         tokio::spawn(async move {
@@ -372,7 +738,16 @@ impl App {
         }
         graph.loading = false;
         match result.result {
-            Ok(commits) => graph.commits = commits,
+            Ok(commits) => {
+                graph.commits = commits;
+                if let Some(oid) = graph.selected_oid.take() {
+                    graph.selected = graph
+                        .commits
+                        .iter()
+                        .position(|commit| commit.oid == oid)
+                        .unwrap_or(0);
+                }
+            }
             Err(error) => graph.error = Some(error.to_string()),
         }
         graph.selected = graph.selected.min(graph.commits.len().saturating_sub(1));
@@ -399,6 +774,260 @@ impl App {
     pub fn graph_last(&mut self) {
         if let Some(graph) = self.graph.as_mut() {
             graph.selected = graph.commits.len().saturating_sub(1);
+        }
+    }
+
+    pub fn graph_objects(&self) -> Vec<GraphObject> {
+        let Some(graph) = self.graph.as_ref() else {
+            return Vec::new();
+        };
+        let Some(commit) = graph.commits.get(graph.selected) else {
+            return Vec::new();
+        };
+        let mut objects = vec![GraphObject {
+            kind: GraphObjectKind::Commit,
+            name: format!("commit {}", short_oid(&commit.oid)),
+            oid: commit.oid.clone(),
+        }];
+        for reference in &commit.refs {
+            let kind = match reference.kind {
+                crate::domain::CommitRefKind::Head => Some(GraphObjectKind::Head),
+                crate::domain::CommitRefKind::LocalBranch => Some(GraphObjectKind::LocalBranch),
+                crate::domain::CommitRefKind::RemoteBranch => Some(GraphObjectKind::RemoteBranch),
+                crate::domain::CommitRefKind::Tag => Some(GraphObjectKind::Tag),
+                crate::domain::CommitRefKind::Stash => Some(GraphObjectKind::Stash),
+            };
+            if let Some(kind) = kind {
+                objects.push(GraphObject {
+                    kind,
+                    name: reference.name.clone(),
+                    oid: commit.oid.clone(),
+                });
+            }
+        }
+        objects
+    }
+
+    pub fn open_graph_object_menu(&mut self) {
+        let Some(graph) = self.graph.as_mut() else {
+            return;
+        };
+        if graph.loading || graph.commits.is_empty() {
+            return;
+        }
+        graph.object_menu = true;
+        graph.object_selected = 0;
+        graph.action_menu = false;
+        graph.form = None;
+        graph.selected_object = None;
+        graph.message = None;
+    }
+
+    pub fn move_graph_overlay_selection(&mut self, delta: isize) {
+        let Some(graph) = self.graph.as_mut() else {
+            return;
+        };
+        if let Some(form) = graph.form.as_mut() {
+            if !form.fields.is_empty() {
+                form.selected = (form.selected as isize + delta)
+                    .clamp(0, form.fields.len() as isize - 1)
+                    as usize;
+            }
+        } else if graph.action_menu {
+            if let Some(object) = graph.selected_object.as_ref() {
+                let len = graph_actions(object.kind).len();
+                if len > 0 {
+                    graph.action_selected = (graph.action_selected as isize + delta)
+                        .clamp(0, len as isize - 1)
+                        as usize;
+                }
+            }
+        } else if graph.object_menu {
+            let len = graph
+                .commits
+                .get(graph.selected)
+                .map_or(0, |commit| 1 + commit.refs.len());
+            if len > 0 {
+                graph.object_selected =
+                    (graph.object_selected as isize + delta).clamp(0, len as isize - 1) as usize;
+            }
+        }
+    }
+
+    pub fn select_graph_object(&mut self) {
+        let objects = self.graph_objects();
+        let Some(graph) = self.graph.as_mut() else {
+            return;
+        };
+        let Some(object) = objects.get(graph.object_selected).cloned() else {
+            return;
+        };
+        graph.selected_object = Some(object);
+        graph.object_menu = false;
+        graph.action_menu = true;
+        graph.action_selected = 0;
+    }
+
+    pub fn select_graph_action(&mut self) {
+        let Some(graph) = self.graph.as_ref() else {
+            return;
+        };
+        let Some(object) = graph.selected_object.clone() else {
+            return;
+        };
+        let Some(choice) = graph_actions(object.kind)
+            .get(graph.action_selected)
+            .copied()
+        else {
+            return;
+        };
+        if matches!(
+            choice,
+            GraphActionChoice::Changes | GraphActionChoice::Commit | GraphActionChoice::Amend
+        ) {
+            if choice == GraphActionChoice::Changes {
+                if let Some(graph) = self.graph.as_mut() {
+                    graph.action_menu = false;
+                    graph.selected_object = None;
+                }
+                self.open_changes();
+                return;
+            }
+            if let Some(form) = graph_form(choice, object.clone()) {
+                if let Some(graph) = self.graph.as_mut() {
+                    graph.action_menu = false;
+                    graph.form = Some(form);
+                }
+                return;
+            }
+        }
+        if let Some(form) = graph_form(choice, object.clone()) {
+            if let Some(graph) = self.graph.as_mut() {
+                graph.action_menu = false;
+                graph.form = Some(form);
+            }
+            return;
+        }
+        if let Some(action) = graph_action(choice, &object) {
+            self.open_graph_repository_action(action);
+        }
+    }
+
+    pub fn edit_graph_form(&mut self, input: CommitInput) {
+        if let Some(form) = self.graph.as_mut().and_then(|graph| graph.form.as_mut()) {
+            form.edit(input);
+        }
+    }
+
+    pub fn submit_graph_form(&mut self) {
+        let Some(form) = self.graph.as_ref().and_then(|graph| graph.form.as_ref()) else {
+            return;
+        };
+        if matches!(
+            form.choice,
+            GraphActionChoice::Commit | GraphActionChoice::Amend
+        ) {
+            match form.commit_spec() {
+                Ok(spec) => self.begin_graph_commit(spec),
+                Err(error) => {
+                    if let Some(graph) = self.graph.as_mut() {
+                        graph.message = Some((true, error.to_string()));
+                    }
+                }
+            }
+            return;
+        }
+        match form.action() {
+            Ok(action) => self.open_graph_repository_action(action),
+            Err(error) => {
+                if let Some(graph) = self.graph.as_mut() {
+                    graph.message = Some((true, error.to_string()));
+                }
+            }
+        }
+    }
+
+    pub fn cancel_graph_overlay(&mut self) {
+        if let Some(graph) = self.graph.as_mut() {
+            if graph.form.take().is_some() {
+                return;
+            }
+            if graph.action_menu {
+                graph.action_menu = false;
+                graph.object_menu = true;
+                return;
+            }
+            graph.object_menu = false;
+            graph.selected_object = None;
+        }
+    }
+
+    fn open_graph_repository_action(&mut self, action: RepositoryAction) {
+        let Some(project) = self.graph.as_ref().map(|graph| graph.project.clone()) else {
+            return;
+        };
+        if let Some(graph) = self.graph.as_mut() {
+            graph.form = None;
+            graph.action_menu = false;
+            graph.object_menu = false;
+            graph.message = Some((false, "Loading current repository state...".to_owned()));
+        }
+        self.repository_intent = Some(action);
+        self.load_repository(project, Screen::Graph);
+    }
+
+    fn begin_graph_commit(&mut self, spec: CommitSpec) {
+        let Some(graph) = self.graph.as_mut() else {
+            return;
+        };
+        if graph.commit_running {
+            return;
+        }
+        graph.form = None;
+        graph.commit_running = true;
+        graph.message = None;
+        graph.commit_generation = graph.commit_generation.wrapping_add(1);
+        let commit_generation = graph.commit_generation;
+        let generation = graph.generation;
+        let project = graph.project.clone();
+        let project_id = project.id.clone();
+        let runner = self.operation_runner.clone();
+        let sender = self.graph_commit_tx.clone();
+        tokio::spawn(async move {
+            let result = runner.execute_commit(project, spec).await;
+            let _ = sender.send(GraphCommitResult {
+                project_id,
+                generation,
+                commit_generation,
+                result,
+            });
+        });
+    }
+
+    pub fn apply_graph_commit(&mut self, result: GraphCommitResult) {
+        let Some(graph) = self.graph.as_ref() else {
+            return;
+        };
+        if graph.project.id != result.project_id
+            || graph.generation != result.generation
+            || graph.commit_generation != result.commit_generation
+        {
+            return;
+        }
+        let project = graph.project.clone();
+        match result.result {
+            Ok(outcome) => {
+                self.load_graph(project);
+                if let Some(graph) = self.graph.as_mut() {
+                    graph.message = Some((false, outcome.message));
+                }
+            }
+            Err(error) => {
+                if let Some(graph) = self.graph.as_mut() {
+                    graph.commit_running = false;
+                    graph.message = Some((true, error.to_string()));
+                }
+            }
         }
     }
 
@@ -1081,9 +1710,21 @@ impl App {
         state.loading = false;
         match result.result {
             Ok(snapshot) => state.snapshot = Some(snapshot),
-            Err(error) => state.error = Some(error.to_string()),
+            Err(error) => {
+                let message = error.to_string();
+                state.error = Some(message.clone());
+                if self.repository_intent.take().is_some() {
+                    if let Some(graph) = self.graph.as_mut() {
+                        graph.message = Some((true, message));
+                    }
+                }
+                return;
+            }
         }
         clamp_repository_selection(state);
+        if let Some(action) = self.repository_intent.take() {
+            self.begin_repository_action(action);
+        }
     }
 
     pub fn next_repository_tab(&mut self, delta: isize) {
@@ -1296,22 +1937,38 @@ impl App {
         {
             return;
         }
+        let graph_origin = state.return_screen == Screen::Graph;
         match result.result {
             Ok(outcome) => {
                 let project = state.project.clone();
                 let return_screen = state.return_screen;
                 let detail = outcome.detail;
                 self.refresh();
-                self.load_repository(project, return_screen);
-                if let Some(state) = self.repository.as_mut() {
-                    state.message = Some((false, outcome.message));
-                    state.detail = detail;
+                if graph_origin {
+                    self.load_graph(project);
+                    if let Some(graph) = self.graph.as_mut() {
+                        graph.message = Some((false, outcome.message));
+                    }
+                    self.screen = Screen::Graph;
+                } else {
+                    self.load_repository(project, return_screen);
+                    if let Some(state) = self.repository.as_mut() {
+                        state.message = Some((false, outcome.message));
+                        state.detail = detail;
+                    }
                 }
             }
             Err(error) => {
+                let message = error.to_string();
                 if let Some(state) = self.repository.as_mut() {
                     state.action_running = false;
-                    state.message = Some((true, error.to_string()));
+                    state.message = Some((true, message.clone()));
+                }
+                if graph_origin {
+                    if let Some(graph) = self.graph.as_mut() {
+                        graph.message = Some((true, message));
+                    }
+                    self.screen = Screen::Graph;
                 }
             }
         }
@@ -1463,7 +2120,7 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
-    use crate::domain::{ChangeHunk, WorkspaceKind, WorktreeSummary};
+    use crate::domain::{ChangeHunk, CommitRef, CommitRefKind, WorkspaceKind, WorktreeSummary};
 
     fn project(name: &str) -> Project {
         let path = PathBuf::from(format!("/tmp/{name}"));
@@ -1675,5 +2332,82 @@ mod tests {
             .message
             .as_ref()
             .is_some_and(|(error, message)| *error && message == "patch failed"));
+    }
+
+    #[test]
+    fn graph_objects_and_actions_preserve_ref_identity() {
+        let value = project("alpha");
+        let workspace = Workspace {
+            root: PathBuf::from("/tmp"),
+            kind: WorkspaceKind::Git,
+            projects: vec![value.clone()],
+        };
+        let mut app = App::new(workspace, 1);
+        app.graph = Some(GraphState {
+            project: value,
+            commits: vec![Commit {
+                oid: "aaaaaaaa".into(),
+                parents: vec![],
+                refs: vec![
+                    CommitRef {
+                        name: "HEAD".into(),
+                        kind: CommitRefKind::Head,
+                    },
+                    CommitRef {
+                        name: "main".into(),
+                        kind: CommitRefKind::LocalBranch,
+                    },
+                    CommitRef {
+                        name: "origin/main".into(),
+                        kind: CommitRefKind::RemoteBranch,
+                    },
+                    CommitRef {
+                        name: "v1".into(),
+                        kind: CommitRefKind::Tag,
+                    },
+                    CommitRef {
+                        name: "stash@{0}".into(),
+                        kind: CommitRefKind::Stash,
+                    },
+                ],
+                author: "A".into(),
+                timestamp: 0,
+                subject: "subject".into(),
+                body: "body".into(),
+            }],
+            selected: 0,
+            loading: false,
+            error: None,
+            generation: 1,
+            object_menu: false,
+            object_selected: 0,
+            action_menu: false,
+            action_selected: 0,
+            selected_object: None,
+            form: None,
+            message: None,
+            selected_oid: None,
+            commit_message: String::new(),
+            commit_amend: false,
+            commit_running: false,
+            commit_generation: 0,
+        });
+        let objects = app.graph_objects();
+        assert_eq!(objects.len(), 6);
+        assert_eq!(objects[1].kind, GraphObjectKind::Head);
+        assert_eq!(objects[2].kind, GraphObjectKind::LocalBranch);
+        assert_eq!(objects[3].kind, GraphObjectKind::RemoteBranch);
+        assert_eq!(objects[4].kind, GraphObjectKind::Tag);
+        assert_eq!(objects[5].kind, GraphObjectKind::Stash);
+        assert!(
+            graph_actions(GraphObjectKind::LocalBranch).contains(&GraphActionChoice::RenameBranch)
+        );
+        assert!(
+            graph_actions(GraphObjectKind::LocalBranch).contains(&GraphActionChoice::DeleteBranch)
+        );
+        assert!(!graph_actions(GraphObjectKind::RemoteBranch)
+            .contains(&GraphActionChoice::RenameBranch));
+        assert!(!graph_actions(GraphObjectKind::RemoteBranch)
+            .contains(&GraphActionChoice::DeleteBranch));
     }
 }

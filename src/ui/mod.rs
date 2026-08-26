@@ -142,11 +142,109 @@ mod tests {
             loading: false,
             error: None,
             generation: 1,
+            object_menu: true,
+            object_selected: 0,
+            action_menu: false,
+            action_selected: 0,
+            selected_object: None,
+            form: None,
+            message: None,
+            selected_oid: None,
+            commit_message: String::new(),
+            commit_amend: false,
+            commit_running: false,
+            commit_generation: 0,
         });
         draw(&app, 80, 24);
         draw(&app, 120, 40);
     }
 
+    #[test]
+    fn renders_graph_object_action_and_form_overlays_at_supported_sizes() {
+        use crate::app::repository::FormField;
+        use crate::app::state::{GraphActionChoice, GraphForm, GraphObject, GraphObjectKind};
+        let mut app = app();
+        let project = app.workspace.projects[0].clone();
+        app.screen = Screen::Graph;
+        let object = GraphObject {
+            kind: GraphObjectKind::LocalBranch,
+            name: "feature/x".into(),
+            oid: "aaaaaaaa".into(),
+        };
+        app.graph = Some(GraphState {
+            project,
+            commits: vec![Commit {
+                oid: "aaaaaaaa".into(),
+                parents: vec![],
+                refs: vec![
+                    CommitRef {
+                        name: "HEAD".into(),
+                        kind: CommitRefKind::Head,
+                    },
+                    CommitRef {
+                        name: "feature/x".into(),
+                        kind: CommitRefKind::LocalBranch,
+                    },
+                    CommitRef {
+                        name: "origin/feature/x".into(),
+                        kind: CommitRefKind::RemoteBranch,
+                    },
+                    CommitRef {
+                        name: "v1".into(),
+                        kind: CommitRefKind::Tag,
+                    },
+                    CommitRef {
+                        name: "stash@{0}".into(),
+                        kind: CommitRefKind::Stash,
+                    },
+                ],
+                author: "Ada".into(),
+                timestamp: 1_700_000_000,
+                subject: "Initial commit".into(),
+                body: "Initial commit".into(),
+            }],
+            selected: 0,
+            loading: false,
+            error: None,
+            generation: 1,
+            object_menu: false,
+            object_selected: 1,
+            action_menu: true,
+            action_selected: 0,
+            selected_object: Some(object.clone()),
+            form: None,
+            message: None,
+            selected_oid: None,
+            commit_message: String::new(),
+            commit_amend: false,
+            commit_running: false,
+            commit_generation: 0,
+        });
+        draw(&app, 80, 24);
+        draw(&app, 120, 40);
+        app.graph.as_mut().unwrap().action_menu = false;
+        app.graph.as_mut().unwrap().form = Some(GraphForm {
+            choice: GraphActionChoice::Commit,
+            object,
+            fields: vec![
+                FormField::Text {
+                    label: "Commit message",
+                    value: "test".into(),
+                },
+                FormField::Toggle {
+                    label: "Sign off",
+                    value: false,
+                },
+                FormField::Toggle {
+                    label: "Sign commit",
+                    value: false,
+                },
+            ],
+            selected: 0,
+        });
+        draw(&app, 80, 24);
+        draw(&app, 120, 40);
+    }
     #[test]
     fn renders_changes_and_destructive_confirmation() {
         let mut app = app();
