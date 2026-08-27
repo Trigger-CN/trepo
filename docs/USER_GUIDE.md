@@ -144,7 +144,11 @@ flowchart TD
 
 ## 6. Commit Graph
 
-Graph 加载所有本地分支、远端分支、tag、HEAD 和 stash 的可达历史。
+Graph 使用纯拓扑顺序加载所有本地分支、远端分支、tag、HEAD 和 stash 的可达历史。平行开发线尽量连续显示，不再按提交日期互相穿插。
+
+主列表优先保留 Graph、Subject 和重要 refs。HEAD、本地分支和 stash 直接显示；同一提交有多个 remote/tag 时，各显示一个并用 `R:+N`/`T:+N`表示其余数量。宽屏右侧 Inspector 会按 HEAD、Local branches、Remote branches、Tags、Stashes 分组列出全部 refs，按 `Enter` 打开的对象菜单也不会丢失被摘要隐藏的对象。
+
+拓扑使用实心 `─│├┤┬┴┼┌┐└┘` 连接；`◆` 是多 parent merge，`◉` 表示 parent 不在当前已加载历史中。紧凑 Graph 最多直接绘制 10 条 lane，`~N` 表示右侧还有 N 条 lane 未投影，避免把截断后的线误认为真实拓扑。窄屏会先隐藏 Age 和 Author，再隐藏 Date，Subject 始终保留最低可读宽度。
 
 ### 浏览与过滤
 
@@ -155,9 +159,9 @@ Graph 加载所有本地分支、远端分支、tag、HEAD 和 stash 的可达�
 | `/` | 打开过滤表单并聚焦 Query |
 | `x` | 清空全部过滤条件 |
 | `r` | 重新加载 all-refs 历史 |
-| `Enter` | 打开当前提交节点上的对象菜单 |
+| `Enter` | 打开当前提交节点上的完整对象菜单 |
 
-过滤字段为 Branch、Query、Author、Since、Until。Branch 匹配本地/远端分支的完整可达历史；Query 匹配 OID、subject、body 和 ref；日期使用 UTC `YYYY-MM-DD`，所有非空条件按 AND 组合。
+过滤字段为 Branch、Query、Author、Since、Until。Branch 匹配本地/远端分支的完整可达历史；Query 匹配 OID、subject、body 和完整 ref 数据；日期使用 UTC `YYYY-MM-DD`，所有非空条件按 AND 组合。
 
 ### 对象操作流程
 
