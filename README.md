@@ -28,6 +28,10 @@ Starting from a subdirectory is supported. If no `.repo` directory is found, rep
 | `j` / `k`, arrows | Move selection; move the active menu selection |
 | `g` / `G` | First / last item |
 | `Enter` | Open selected repository graph; select active overlay item; insert a newline in the Changes commit editor |
+| `Left` / `Right` | Move by one Unicode character in the Changes commit editor |
+| `Up` / `Down` | Move between lines in the Changes commit editor while preserving the character column when possible |
+| `Home` / `End` | Move to the start / end of the current commit-message line |
+| `Backspace` / `Delete` | Delete the character before / at the commit-message cursor |
 | `Ctrl-Enter` / `Ctrl-S` | Submit the multiline Changes commit message |
 | `Space` | Select/unselect a Workspace project or a file in Changes; toggle an option in forms |
 | `A` | Select/unselect all projects in the current Workspace filter or all files in Changes |
@@ -37,7 +41,7 @@ Starting from a subdirectory is supported. If no `.repo` directory is found, rep
 | `Tab` | Cycle file / hunk / line mode in Changes; switch tabs or form fields |
 | `s` / `u` | Stage / unstage selected Changes files, or the active file, hunk, or line when no file selection exists |
 | `d` | Workspace: toggle changed-project filter; Changes: confirm discarding one active file, worktree hunk, or line |
-| `m` | Open the multiline commit dialog from Changes; terminal paste preserves line breaks |
+| `m` | Open the bordered multiline commit editor from Changes; typing and multiline paste insert at the cursor |
 | `Ctrl-A` / `Ctrl-U` / `Ctrl-G` | Toggle amend / sign-off / signing in Changes commit dialog |
 | `o` | Open Repository management from Workspace, Graph, or Changes |
 | `PageUp` / `PageDown` | Scroll the selected diff |

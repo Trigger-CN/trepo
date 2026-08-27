@@ -130,7 +130,15 @@ impl GraphForm {
                     text.push(value);
                 }
             }
-            CommitInput::Text(_) | CommitInput::Newline => {}
+            CommitInput::Text(_)
+            | CommitInput::Newline
+            | CommitInput::Delete
+            | CommitInput::MoveLeft
+            | CommitInput::MoveRight
+            | CommitInput::MoveUp
+            | CommitInput::MoveDown
+            | CommitInput::MoveHome
+            | CommitInput::MoveEnd => {}
             CommitInput::Backspace => {
                 if let Some(FormField::Text { value, .. }) = self.fields.get_mut(self.selected) {
                     value.pop();
@@ -666,6 +674,13 @@ pub enum CommitInput {
     Text(String),
     Newline,
     Backspace,
+    Delete,
+    MoveLeft,
+    MoveRight,
+    MoveUp,
+    MoveDown,
+    MoveHome,
+    MoveEnd,
     ToggleAmend,
     ToggleSignoff,
     ToggleSigning,
@@ -711,12 +726,78 @@ pub struct ChangesState {
     pub confirmation: Option<PendingOperation>,
     pub message: Option<(bool, String)>,
     pub commit_message: String,
+    pub commit_cursor: usize,
     pub commit_editing: bool,
     pub commit_amend: bool,
     pub commit_signoff: bool,
     pub commit_signing: bool,
     pub commit_running: bool,
     pub commit_generation: u64,
+}
+
+fn clamp_char_boundary(text: &str, cursor: usize) -> usize {
+    let mut cursor = cursor.min(text.len());
+    while !text.is_char_boundary(cursor) {
+        cursor -= 1;
+    }
+    cursor
+}
+
+fn previous_char_boundary(text: &str, cursor: usize) -> usize {
+    let cursor = clamp_char_boundary(text, cursor);
+    text[..cursor]
+        .char_indices()
+        .next_back()
+        .map_or(0, |(index, _)| index)
+}
+
+fn next_char_boundary(text: &str, cursor: usize) -> usize {
+    let cursor = clamp_char_boundary(text, cursor);
+    text[cursor..]
+        .chars()
+        .next()
+        .map_or(cursor, |character| cursor + character.len_utf8())
+}
+
+fn line_start(text: &str, cursor: usize) -> usize {
+    let cursor = clamp_char_boundary(text, cursor);
+    text[..cursor].rfind('\n').map_or(0, |index| index + 1)
+}
+
+fn line_end(text: &str, cursor: usize) -> usize {
+    let cursor = clamp_char_boundary(text, cursor);
+    text[cursor..]
+        .find('\n')
+        .map_or(text.len(), |index| cursor + index)
+}
+
+fn byte_at_character_column(text: &str, start: usize, end: usize, column: usize) -> usize {
+    text[start..end]
+        .char_indices()
+        .nth(column)
+        .map_or(end, |(offset, _)| start + offset)
+}
+
+fn move_cursor_vertical(text: &str, cursor: usize, direction: isize) -> usize {
+    let cursor = clamp_char_boundary(text, cursor);
+    let current_start = line_start(text, cursor);
+    let column = text[current_start..cursor].chars().count();
+    if direction < 0 {
+        if current_start == 0 {
+            return cursor;
+        }
+        let target_end = current_start - 1;
+        let target_start = line_start(text, target_end);
+        byte_at_character_column(text, target_start, target_end, column)
+    } else {
+        let current_end = line_end(text, cursor);
+        if current_end == text.len() {
+            return cursor;
+        }
+        let target_start = current_end + 1;
+        let target_end = line_end(text, target_start);
+        byte_at_character_column(text, target_start, target_end, column)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1811,6 +1892,7 @@ impl App {
             confirmation: None,
             message: None,
             commit_message: String::new(),
+            commit_cursor: 0,
             commit_editing: false,
             commit_amend: false,
             commit_signoff: false,
@@ -2288,6 +2370,7 @@ impl App {
         if changes.commit_running || changes.operation_running {
             return;
         }
+        changes.commit_cursor = changes.commit_message.len();
         changes.commit_editing = true;
         changes.message = None;
     }
@@ -2306,14 +2389,58 @@ impl App {
         if !changes.commit_editing || changes.commit_running {
             return;
         }
+        changes.commit_cursor = clamp_char_boundary(&changes.commit_message, changes.commit_cursor);
         match input {
-            CommitInput::Character(value) => changes.commit_message.push(value),
-            CommitInput::Text(value) => changes
-                .commit_message
-                .push_str(&value.replace("\r\n", "\n").replace('\r', "\n")),
-            CommitInput::Newline => changes.commit_message.push('\n'),
+            CommitInput::Character(value) => {
+                changes.commit_message.insert(changes.commit_cursor, value);
+                changes.commit_cursor += value.len_utf8();
+            }
+            CommitInput::Text(value) => {
+                let value = value.replace("\r\n", "\n").replace('\r', "\n");
+                changes
+                    .commit_message
+                    .insert_str(changes.commit_cursor, &value);
+                changes.commit_cursor += value.len();
+            }
+            CommitInput::Newline => {
+                changes.commit_message.insert(changes.commit_cursor, '\n');
+                changes.commit_cursor += 1;
+            }
             CommitInput::Backspace => {
-                changes.commit_message.pop();
+                let previous =
+                    previous_char_boundary(&changes.commit_message, changes.commit_cursor);
+                changes
+                    .commit_message
+                    .replace_range(previous..changes.commit_cursor, "");
+                changes.commit_cursor = previous;
+            }
+            CommitInput::Delete => {
+                let next = next_char_boundary(&changes.commit_message, changes.commit_cursor);
+                changes
+                    .commit_message
+                    .replace_range(changes.commit_cursor..next, "");
+            }
+            CommitInput::MoveLeft => {
+                changes.commit_cursor =
+                    previous_char_boundary(&changes.commit_message, changes.commit_cursor);
+            }
+            CommitInput::MoveRight => {
+                changes.commit_cursor =
+                    next_char_boundary(&changes.commit_message, changes.commit_cursor);
+            }
+            CommitInput::MoveUp => {
+                changes.commit_cursor =
+                    move_cursor_vertical(&changes.commit_message, changes.commit_cursor, -1);
+            }
+            CommitInput::MoveDown => {
+                changes.commit_cursor =
+                    move_cursor_vertical(&changes.commit_message, changes.commit_cursor, 1);
+            }
+            CommitInput::MoveHome => {
+                changes.commit_cursor = line_start(&changes.commit_message, changes.commit_cursor);
+            }
+            CommitInput::MoveEnd => {
+                changes.commit_cursor = line_end(&changes.commit_message, changes.commit_cursor);
             }
             CommitInput::ToggleAmend => changes.commit_amend = !changes.commit_amend,
             CommitInput::ToggleSignoff => changes.commit_signoff = !changes.commit_signoff,
@@ -2688,7 +2815,15 @@ impl App {
         };
         match input {
             CommitInput::Character(value) => form.edit_char(value),
-            CommitInput::Text(_) | CommitInput::Newline => {}
+            CommitInput::Text(_)
+            | CommitInput::Newline
+            | CommitInput::Delete
+            | CommitInput::MoveLeft
+            | CommitInput::MoveRight
+            | CommitInput::MoveUp
+            | CommitInput::MoveDown
+            | CommitInput::MoveHome
+            | CommitInput::MoveEnd => {}
             CommitInput::Backspace => form.backspace(),
             CommitInput::ToggleAmend | CommitInput::ToggleSignoff | CommitInput::ToggleSigning => {
                 form.toggle()
@@ -3095,6 +3230,7 @@ mod tests {
             preview_generation: 3,
             preview_scroll: 0,
             commit_message: String::new(),
+            commit_cursor: 0,
             commit_editing: false,
             commit_amend: false,
             commit_signoff: false,
@@ -3187,6 +3323,7 @@ mod tests {
             preview_generation: 1,
             preview_scroll: 0,
             commit_message: String::new(),
+            commit_cursor: 0,
             commit_editing: false,
             commit_amend: false,
             commit_signoff: false,
@@ -3254,7 +3391,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
         app.changes = Some(ChangesState {
-            project: value,
+            project: value.clone(),
             return_screen: Screen::Workspace,
             entries: entries.clone(),
             selected: 0,
@@ -3277,6 +3414,7 @@ mod tests {
             confirmation: None,
             message: None,
             commit_message: String::new(),
+            commit_cursor: 0,
             commit_editing: true,
             commit_amend: false,
             commit_signoff: false,
@@ -3300,10 +3438,89 @@ mod tests {
         app.edit_commit_message(CommitInput::Text("subject\r\n\r\nbody".into()));
         app.edit_commit_message(CommitInput::Newline);
         app.edit_commit_message(CommitInput::Character('x'));
+        let changes = app.changes.as_ref().unwrap();
+        assert_eq!(changes.commit_message, "subject\n\nbody\nx");
+        assert_eq!(changes.commit_cursor, changes.commit_message.len());
+
+        {
+            let changes = app.changes.as_mut().unwrap();
+            changes.commit_message = "ab你cd".into();
+            changes.commit_cursor = 2;
+        }
+        app.edit_commit_message(CommitInput::Character('X'));
+        app.edit_commit_message(CommitInput::Text("1\r\n2\r3".into()));
+        let changes = app.changes.as_ref().unwrap();
+        assert_eq!(changes.commit_message, "abX1\n2\n3你cd");
+        assert_eq!(changes.commit_cursor, "abX1\n2\n3".len());
+
+        app.edit_commit_message(CommitInput::MoveRight);
         assert_eq!(
-            app.changes.as_ref().unwrap().commit_message,
-            "subject\n\nbody\nx"
+            app.changes.as_ref().unwrap().commit_cursor,
+            "abX1\n2\n3你".len()
         );
+        app.edit_commit_message(CommitInput::Backspace);
+        let changes = app.changes.as_ref().unwrap();
+        assert_eq!(changes.commit_message, "abX1\n2\n3cd");
+        assert_eq!(changes.commit_cursor, "abX1\n2\n3".len());
+        app.edit_commit_message(CommitInput::Character('你'));
+        app.edit_commit_message(CommitInput::MoveLeft);
+        app.edit_commit_message(CommitInput::Delete);
+        let changes = app.changes.as_ref().unwrap();
+        assert_eq!(changes.commit_message, "abX1\n2\n3cd");
+        assert_eq!(changes.commit_cursor, "abX1\n2\n3".len());
+        app.edit_commit_message(CommitInput::Backspace);
+        assert_eq!(app.changes.as_ref().unwrap().commit_message, "abX1\n2\ncd");
+
+        {
+            let changes = app.changes.as_mut().unwrap();
+            changes.commit_message = "long\nx\nwide".into();
+            changes.commit_cursor = 4;
+        }
+        app.edit_commit_message(CommitInput::MoveDown);
+        assert_eq!(app.changes.as_ref().unwrap().commit_cursor, 6);
+        app.edit_commit_message(CommitInput::MoveDown);
+        assert_eq!(app.changes.as_ref().unwrap().commit_cursor, 8);
+        app.edit_commit_message(CommitInput::MoveEnd);
+        assert_eq!(app.changes.as_ref().unwrap().commit_cursor, 11);
+        app.edit_commit_message(CommitInput::MoveHome);
+        assert_eq!(app.changes.as_ref().unwrap().commit_cursor, 7);
+        app.edit_commit_message(CommitInput::MoveUp);
+        assert_eq!(app.changes.as_ref().unwrap().commit_cursor, 5);
+        app.edit_commit_message(CommitInput::MoveUp);
+        assert_eq!(app.changes.as_ref().unwrap().commit_cursor, 0);
+        app.edit_commit_message(CommitInput::MoveUp);
+        assert_eq!(app.changes.as_ref().unwrap().commit_cursor, 0);
+        {
+            let changes = app.changes.as_mut().unwrap();
+            changes.commit_cursor = usize::MAX;
+        }
+        app.edit_commit_message(CommitInput::MoveLeft);
+        assert_eq!(app.changes.as_ref().unwrap().commit_cursor, 10);
+        app.edit_commit_message(CommitInput::MoveDown);
+        assert_eq!(app.changes.as_ref().unwrap().commit_cursor, 10);
+
+        {
+            let changes = app.changes.as_mut().unwrap();
+            changes.commit_cursor = 8;
+            changes.commit_running = true;
+            changes.commit_editing = false;
+            changes.commit_generation = 3;
+        }
+        app.apply_commit(CommitResult {
+            project_id: value.id,
+            changes_generation: 1,
+            commit_generation: 3,
+            result: Err(anyhow::anyhow!("hook failed")),
+        });
+        let changes = app.changes.as_ref().unwrap();
+        assert!(changes.commit_editing);
+        assert!(!changes.commit_running);
+        assert_eq!(changes.commit_cursor, 8);
+        assert_eq!(changes.commit_message, "long\nx\nwide");
+        assert!(changes
+            .message
+            .as_ref()
+            .is_some_and(|(error, message)| *error && message == "hook failed"));
     }
 
     #[test]

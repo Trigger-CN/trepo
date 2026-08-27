@@ -359,49 +359,98 @@ fn render_confirmation(frame: &mut Frame, changes: &ChangesState) {
 }
 
 fn render_commit_dialog(frame: &mut Frame, changes: &ChangesState) {
-    let area = centered_rect(76, 58, frame.area());
+    let area = centered_rect(84, 75, frame.area());
     frame.render_widget(Clear, area);
     let title = if changes.commit_amend {
         " Commit (amend) "
     } else {
         " Commit "
     };
-    let options = format!(
-        "[Ctrl-A] amend: {}   [Ctrl-U] sign-off: {}   [Ctrl-G] signing: {}",
-        if changes.commit_amend { "on" } else { "off" },
-        if changes.commit_signoff { "on" } else { "off" },
-        if changes.commit_signing { "on" } else { "off" },
-    );
-    let mut text = vec![Line::styled(
-        "Commit message:",
-        Style::default()
-            .fg(Color::Cyan)
-            .add_modifier(Modifier::BOLD),
-    )];
-    if changes.commit_message.is_empty() {
-        text.push(Line::raw("_"));
-    } else {
-        let mut lines = changes.commit_message.split('\n').peekable();
-        while let Some(line) = lines.next() {
-            text.push(Line::raw(if lines.peek().is_none() {
-                format!("{line}_")
-            } else {
-                line.to_owned()
-            }));
-        }
-    }
-    text.extend([
-        Line::raw(""),
-        Line::raw(options),
-        Line::raw(""),
-        Line::raw("Enter newline   Ctrl-Enter/Ctrl-S commit   Esc cancel"),
-    ]);
+    let outer = Block::default().title(title).borders(Borders::ALL);
+    let inner = outer.inner(area);
+    frame.render_widget(outer, area);
+    let sections = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Min(5),
+            Constraint::Length(3),
+            Constraint::Length(3),
+        ])
+        .split(inner);
+
+    let editor_block = Block::default()
+        .title(" Message ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan));
+    let editor_inner = editor_block.inner(sections[0]);
+    let (cursor_line, cursor_byte) = commit_cursor_position(changes);
+    let visible_height = usize::from(editor_inner.height.max(1));
+    let vertical_scroll = cursor_line.saturating_sub(visible_height.saturating_sub(1));
+    let line_start = changes.commit_message[..cursor_byte]
+        .rfind('\n')
+        .map_or(0, |index| index + 1);
+    let cursor_width = Line::raw(&changes.commit_message[line_start..cursor_byte]).width();
+    let visible_width = usize::from(editor_inner.width.max(1));
+    let horizontal_scroll = cursor_width.saturating_sub(visible_width.saturating_sub(1));
+    let text = changes
+        .commit_message
+        .split('\n')
+        .map(Line::raw)
+        .collect::<Vec<_>>();
     frame.render_widget(
-        Paragraph::new(text)
-            .block(Block::default().title(title).borders(Borders::ALL))
-            .wrap(Wrap { trim: false }),
-        area,
+        Paragraph::new(text).block(editor_block).scroll((
+            u16::try_from(vertical_scroll).unwrap_or(u16::MAX),
+            u16::try_from(horizontal_scroll).unwrap_or(u16::MAX),
+        )),
+        sections[0],
     );
+
+    let enabled = |value| if value { "on" } else { "off" };
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::raw(format!(
+                "Ctrl-A amend: {}   Ctrl-U sign-off: {}",
+                enabled(changes.commit_amend),
+                enabled(changes.commit_signoff)
+            )),
+            Line::raw(format!(
+                "Ctrl-G signing: {}",
+                enabled(changes.commit_signing)
+            )),
+        ])
+        .block(Block::default().title(" Options ").borders(Borders::TOP)),
+        sections[1],
+    );
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::raw("Arrows move   Home/End line   Backspace/Delete edit"),
+            Line::raw("Enter newline   Ctrl-Enter/Ctrl-S commit   Esc cancel"),
+        ])
+        .block(Block::default().title(" Keys ").borders(Borders::TOP)),
+        sections[2],
+    );
+
+    if editor_inner.width > 0 && editor_inner.height > 0 {
+        let x = editor_inner.x
+            + u16::try_from(cursor_width.saturating_sub(horizontal_scroll))
+                .unwrap_or(u16::MAX)
+                .min(editor_inner.width - 1);
+        let y = editor_inner.y
+            + u16::try_from(cursor_line.saturating_sub(vertical_scroll))
+                .unwrap_or(u16::MAX)
+                .min(editor_inner.height - 1);
+        frame.set_cursor_position((x, y));
+    }
+}
+
+fn commit_cursor_position(changes: &ChangesState) -> (usize, usize) {
+    let mut cursor = changes.commit_cursor.min(changes.commit_message.len());
+    while !changes.commit_message.is_char_boundary(cursor) {
+        cursor -= 1;
+    }
+    let before = &changes.commit_message[..cursor];
+    let line = before.bytes().filter(|byte| *byte == b'\n').count();
+    (line, cursor)
 }
 fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
     let width = area.width.saturating_mul(percent_x) / 100;
