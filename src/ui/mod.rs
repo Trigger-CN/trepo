@@ -33,15 +33,16 @@ fn render_help(frame: &mut Frame) {
             Style::default().add_modifier(Modifier::BOLD),
         ),
         Line::raw(""),
-        Line::raw("j/k or arrows  Move selection / scroll active Repo task"),
+        Line::raw("j/k or arrows  Move selection / scroll active task"),
         Line::raw("g/G            First / last"),
         Line::raw("Enter          Open graph / newline in commit message"),
-        Line::raw("Space / A      Select current / all projects or Changed files"),
-        Line::raw("d              Toggle changed projects / discard one Changes scope"),
+        Line::raw("Space / A      Select current / all repositories or Changed files"),
+        Line::raw("Z/D            Workspace selected repositories: Stash / Discard"),
+        Line::raw("d              Toggle changed projects / discard Changes scope"),
         Line::raw("a              Open Workspace Repo or Repository actions"),
         Line::raw("f, /, x        Graph filter / query / clear; retry failed Repo task"),
         Line::raw("Tab            Toggle Changes mode or active form field"),
-        Line::raw("s/u            Stage / unstage selected Changes files or active scope"),
+        Line::raw("z/s/u          Stash files / Stage / Unstage in Changes"),
         Line::raw("m              Commit; Ctrl-Enter/S submit, Ctrl-A/U/G options"),
         Line::raw("r              Refresh current page"),
         Line::raw("Esc / q / ?    Back / quit Workspace / toggle help"),
@@ -80,14 +81,15 @@ mod tests {
     use crate::app::repository::{form_for, RepositoryChoice, RepositoryTab};
     use crate::app::state::{
         App, ChangesMode, ChangesState, GraphState, PendingOperation, RepoBatchForm, RepoBatchTask,
-        RepositoryState, Screen,
+        RepositoryState, Screen, WorkspaceGitTask,
     };
     use crate::domain::{
-        BranchEntry, ChangeCode, ChangeEntry, ChangeHunk, ChangeLine, ChangePreview, Commit,
-        CommitRef, CommitRefKind, GitOperationKind, HunkSource, OperationKind, OperationTarget,
-        Project, ProjectId, RemoteBranchEntry, RemoteEntry, RepoBatchAction, RepoBatchSpec,
-        RepoProjectResult, RepoProjectState, RepositoryAction, RepositorySnapshot, StashEntry,
-        TagEntry, Workspace, WorkspaceKind,
+        BatchOperationItem, BranchEntry, ChangeCode, ChangeEntry, ChangeHunk, ChangeLine,
+        ChangePreview, Commit, CommitRef, CommitRefKind, GitOperationKind, HunkSource,
+        OperationKind, OperationTarget, Project, ProjectId, RemoteBranchEntry, RemoteEntry,
+        RepoBatchAction, RepoBatchSpec, RepoProjectResult, RepoProjectState, RepositoryAction,
+        RepositorySnapshot, StashEntry, TagEntry, Workspace, WorkspaceGitAction, WorkspaceGitSpec,
+        WorkspaceGitTarget, WorkspaceKind, WorktreeSummary,
     };
 
     fn app() -> App {
@@ -175,6 +177,60 @@ mod tests {
         let app = app();
         draw(&app, 80, 24);
         draw(&app, 120, 40);
+    }
+
+    #[test]
+    fn renders_workspace_git_confirmation_and_results_at_supported_sizes() {
+        let mut app = app();
+        let project = app.workspace.projects[0].clone();
+        let entry = ChangeEntry {
+            path: PathBuf::from("src/main.rs"),
+            original_path: None,
+            index: Some(ChangeCode::Modified),
+            worktree: Some(ChangeCode::Modified),
+            untracked: false,
+            conflicted: false,
+        };
+        let spec = WorkspaceGitSpec {
+            action: WorkspaceGitAction::Discard,
+            targets: vec![WorkspaceGitTarget {
+                project: project.clone(),
+                items: vec![BatchOperationItem {
+                    change: entry,
+                    expected_token: 42,
+                }],
+                summary: WorktreeSummary {
+                    staged: 1,
+                    unstaged: 1,
+                    untracked: 0,
+                    conflicted: 0,
+                },
+            }],
+        };
+        app.workspace_git.pending = Some(spec.clone());
+        for (width, height) in [(80, 24), (120, 40)] {
+            let text = draw_text(&app, width, height);
+            assert!(text.contains("Confirm Workspace Git operation"));
+            assert!(text.contains("Frozen repositories: 1"));
+            assert!(text.contains("demo  S1 M1 ?0 !0"));
+        }
+        app.workspace_git.pending = None;
+        app.workspace_git.task = Some(WorkspaceGitTask {
+            spec,
+            results: vec![RepoProjectResult {
+                project,
+                state: RepoProjectState::Failed,
+                message: "No repositories were changed: stale".into(),
+            }],
+            running: false,
+            generation: 1,
+        });
+        for (width, height) in [(80, 24), (120, 40)] {
+            let text = draw_text(&app, width, height);
+            assert!(text.contains("pending 0  running 0  success 0  failure 1"));
+            assert!(text.contains("No repositories were changed"));
+            assert!(text.contains("not transactional"));
+        }
     }
 
     #[test]
@@ -439,8 +495,11 @@ mod tests {
             commit_running: false,
             commit_generation: 0,
         });
-        draw(&app, 80, 24);
-        draw(&app, 120, 40);
+        for (width, height) in [(80, 24), (120, 40)] {
+            let text = draw_text(&app, width, height);
+            assert!(text.contains("Push branch"));
+            assert!(text.contains("Force push with lease"));
+        }
         app.graph.as_mut().unwrap().action_menu = false;
         app.graph.as_mut().unwrap().form = Some(GraphForm {
             choice: GraphActionChoice::Commit,
@@ -563,7 +622,7 @@ mod tests {
         }
         let changes = app.changes.as_mut().unwrap();
         changes.commit_editing = false;
-        changes.confirmation = Some(PendingOperation {
+        changes.confirmation = Some(PendingOperation::Single {
             kind: OperationKind::RestoreWorktree,
             change: changes.entries[0].clone(),
             target: OperationTarget::Hunk {
@@ -574,6 +633,23 @@ mod tests {
         });
         draw(&app, 80, 24);
         draw(&app, 120, 40);
+
+        let changes = app.changes.as_mut().unwrap();
+        changes.confirmation = Some(PendingOperation::Batch(crate::domain::BatchOperationSpec {
+            project: changes.project.clone(),
+            items: vec![BatchOperationItem {
+                change: changes.entries[0].clone(),
+                expected_token: 42,
+            }],
+            kind: OperationKind::Stash,
+        }));
+        for (width, height) in [(80, 24), (120, 40)] {
+            let text = draw_text(&app, width, height);
+            assert!(text.contains("Confirm batch stash"));
+            assert!(text.contains("Files: 1"));
+            assert!(text.contains("src/main.rs"));
+            assert!(text.contains("including untracked files"));
+        }
     }
 
     fn repository_snapshot() -> RepositorySnapshot {
@@ -648,17 +724,51 @@ mod tests {
             state.tab = RepositoryTab::Remotes;
             state.action_menu = true;
         }
-        draw(&app, 80, 24);
-        draw(&app, 120, 40);
+        for (width, height) in [(80, 24), (120, 40)] {
+            let text = draw_text(&app, width, height);
+            assert!(text.contains("Push branch"));
+            assert!(text.contains("Force push with lease"));
+        }
+
+        {
+            let state = app.repository.as_mut().unwrap();
+            state.tab = RepositoryTab::Stashes;
+        }
+        for (width, height) in [(80, 24), (120, 40)] {
+            let text = draw_text(&app, width, height);
+            assert!(text.contains("Create branch from stash"));
+            assert!(text.contains("Clear all stashes"));
+        }
 
         {
             let state = app.repository.as_mut().unwrap();
             state.action_menu = false;
-            state.form =
-                form_for(RepositoryChoice::Push, state.snapshot.as_ref().unwrap(), 0).unwrap();
+            state.form = form_for(
+                RepositoryChoice::StashPush,
+                state.snapshot.as_ref().unwrap(),
+                0,
+            )
+            .unwrap();
         }
-        draw(&app, 80, 24);
-        draw(&app, 120, 40);
+        for (width, height) in [(80, 24), (120, 40)] {
+            let text = draw_text(&app, width, height);
+            assert!(text.contains("Include untracked"));
+            assert!(text.contains("Keep index"));
+            assert!(text.contains("Staged only"));
+        }
+
+        {
+            let state = app.repository.as_mut().unwrap();
+            state.form = form_for(
+                RepositoryChoice::StashClear,
+                state.snapshot.as_ref().unwrap(),
+                0,
+            )
+            .unwrap();
+        }
+        for (width, height) in [(80, 24), (120, 40)] {
+            assert!(draw_text(&app, width, height).contains("Enter execute"));
+        }
 
         {
             let state = app.repository.as_mut().unwrap();
@@ -670,8 +780,13 @@ mod tests {
                 force_with_lease: true,
             });
         }
-        draw(&app, 80, 24);
-        draw(&app, 120, 40);
+        for (width, height) in [(80, 24), (120, 40)] {
+            let text = draw_text(&app, width, height);
+            assert!(text.contains("rewrite remote branch history"));
+            assert!(text.contains("Refspec: main:main"));
+            assert!(text.contains("Commit range: aaaaaaaa..bbbbbbbb"));
+            assert!(text.contains("Force with lease: on"));
+        }
 
         {
             let state = app.repository.as_mut().unwrap();

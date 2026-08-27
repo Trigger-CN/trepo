@@ -36,6 +36,8 @@ pub enum RepositoryChoice {
     StashApply,
     StashPop,
     StashDrop,
+    StashBranch,
+    StashClear,
     BranchCreate,
     BranchSwitch,
     BranchRename,
@@ -52,6 +54,7 @@ pub enum RepositoryChoice {
     Fetch,
     Pull,
     Push,
+    ForcePush,
     SetUpstream,
     RemotePrune,
 }
@@ -70,6 +73,8 @@ impl RepositoryChoice {
             Self::StashApply => "Apply stash",
             Self::StashPop => "Pop stash",
             Self::StashDrop => "Drop stash",
+            Self::StashBranch => "Create branch from stash",
+            Self::StashClear => "Clear all stashes",
             Self::BranchCreate => "Create branch",
             Self::BranchSwitch => "Switch branch",
             Self::BranchRename => "Rename branch",
@@ -86,6 +91,7 @@ impl RepositoryChoice {
             Self::Fetch => "Fetch remote",
             Self::Pull => "Pull branch",
             Self::Push => "Push branch",
+            Self::ForcePush => "Force push with lease",
             Self::SetUpstream => "Set upstream",
             Self::RemotePrune => "Prune remote",
         }
@@ -108,6 +114,8 @@ pub fn choices(tab: RepositoryTab) -> &'static [RepositoryChoice] {
             RepositoryChoice::StashApply,
             RepositoryChoice::StashPop,
             RepositoryChoice::StashDrop,
+            RepositoryChoice::StashBranch,
+            RepositoryChoice::StashClear,
         ],
         RepositoryTab::Refs => &[
             RepositoryChoice::BranchCreate,
@@ -128,6 +136,7 @@ pub fn choices(tab: RepositoryTab) -> &'static [RepositoryChoice] {
             RepositoryChoice::Fetch,
             RepositoryChoice::Pull,
             RepositoryChoice::Push,
+            RepositoryChoice::ForcePush,
             RepositoryChoice::SetUpstream,
             RepositoryChoice::RemotePrune,
         ],
@@ -160,6 +169,33 @@ pub fn action_preview(action: &RepositoryAction, snapshot: &RepositorySnapshot) 
                 format!("Set upstream: {}", on_off(*set_upstream)),
                 format!("Force with lease: {}", on_off(*force_with_lease)),
             ]
+        }
+        RepositoryAction::StashPush {
+            include_untracked,
+            keep_index,
+            staged_only,
+            ..
+        } => vec![
+            format!("Include untracked: {}", on_off(*include_untracked)),
+            format!("Keep index: {}", on_off(*keep_index)),
+            format!("Staged only: {}", on_off(*staged_only)),
+        ],
+        RepositoryAction::StashApply {
+            selector,
+            restore_index,
+        }
+        | RepositoryAction::StashPop {
+            selector,
+            restore_index,
+        } => vec![
+            format!("Stash: {selector}"),
+            format!("Restore index: {}", on_off(*restore_index)),
+        ],
+        RepositoryAction::StashBranch { name, selector } => {
+            vec![format!("Branch: {name}"), format!("Stash: {selector}")]
+        }
+        RepositoryAction::StashClear => {
+            vec![format!("Stashes to remove: {}", snapshot.stashes.len())]
         }
         RepositoryAction::RemoteAdd { name, url }
         | RepositoryAction::RemoteSetUrl { name, url } => vec![
@@ -306,16 +342,25 @@ impl RepositoryForm {
             C::StashPush => A::StashPush {
                 message: self.optional_text(0)?.unwrap_or_default(),
                 include_untracked: self.toggle_value(1)?,
+                keep_index: self.toggle_value(2)?,
+                staged_only: self.toggle_value(3)?,
             },
             C::StashApply => A::StashApply {
                 selector: self.text(0)?,
+                restore_index: self.toggle_value(1)?,
             },
             C::StashPop => A::StashPop {
                 selector: self.text(0)?,
+                restore_index: self.toggle_value(1)?,
             },
             C::StashDrop => A::StashDrop {
                 selector: self.text(0)?,
             },
+            C::StashBranch => A::StashBranch {
+                name: self.text(0)?,
+                selector: self.text(1)?,
+            },
+            C::StashClear => A::StashClear,
             C::BranchCreate => A::BranchCreate {
                 name: self.text(0)?,
                 start: self.optional_text(1)?,
@@ -366,11 +411,11 @@ impl RepositoryForm {
                 branch: self.text(1)?,
                 rebase: self.toggle_value(2)?,
             },
-            C::Push => A::Push {
+            C::Push | C::ForcePush => A::Push {
                 remote: self.text(0)?,
                 branch: self.text(1)?,
                 set_upstream: self.toggle_value(2)?,
-                force_with_lease: self.toggle_value(3)?,
+                force_with_lease: matches!(self.choice, C::ForcePush),
             },
             C::SetUpstream => A::SetUpstream {
                 branch: self.text(0)?,
@@ -430,13 +475,27 @@ pub fn form_for(
         C::TakeOurs | C::TakeTheirs | C::MarkResolved => {
             vec![text_field("Path", conflict.unwrap_or_default())]
         }
-        C::StashShow | C::StashApply | C::StashPop | C::StashDrop => vec![text_field(
+        C::StashShow | C::StashDrop => vec![text_field(
             "Stash",
-            stash.unwrap_or_else(|| "stash@{0}".to_owned()),
+            stash.clone().unwrap_or_else(|| "stash@{0}".to_owned()),
         )],
+        C::StashApply | C::StashPop => vec![
+            text_field(
+                "Stash",
+                stash.clone().unwrap_or_else(|| "stash@{0}".to_owned()),
+            ),
+            toggle_field("Restore index", false),
+        ],
+        C::StashBranch => vec![
+            text_field("Branch", ""),
+            text_field("Stash", stash.unwrap_or_else(|| "stash@{0}".to_owned())),
+        ],
+        C::StashClear => Vec::new(),
         C::StashPush => vec![
             text_field("Message", ""),
             toggle_field("Include untracked", false),
+            toggle_field("Keep index", false),
+            toggle_field("Staged only", false),
         ],
         C::BranchCreate => vec![
             text_field("Name", ""),
@@ -470,11 +529,10 @@ pub fn form_for(
             text_field("Branch", current_branch.clone().unwrap_or_default()),
             toggle_field("Rebase", false),
         ],
-        C::Push => vec![
+        C::Push | C::ForcePush => vec![
             text_field("Remote", remote.unwrap_or_else(|| "origin".to_owned())),
             text_field("Branch", current_branch.clone().unwrap_or_default()),
             toggle_field("Set upstream", false),
-            toggle_field("Force with lease", false),
         ],
         C::SetUpstream => vec![
             text_field("Branch", current_branch.unwrap_or_default()),
@@ -491,7 +549,9 @@ pub fn form_for(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::{BranchEntry, RemoteBranchEntry, RemoteEntry, RepositorySnapshot};
+    use crate::domain::{
+        BranchEntry, RemoteBranchEntry, RemoteEntry, RepositorySnapshot, StashEntry,
+    };
 
     fn snapshot() -> RepositorySnapshot {
         RepositorySnapshot {
@@ -537,6 +597,97 @@ mod tests {
             .iter()
             .any(|line| line == "Commit range: aaaaaaaa..bbbbbbbb"));
         assert!(lines.iter().any(|line| line == "Force with lease: on"));
+    }
+
+    #[test]
+    fn forms_split_push_modes_and_map_advanced_stash_options() {
+        let snapshot = snapshot();
+        for (choice, force_with_lease) in [
+            (RepositoryChoice::Push, false),
+            (RepositoryChoice::ForcePush, true),
+        ] {
+            let form = form_for(choice, &snapshot, 0).unwrap().unwrap();
+            assert_eq!(form.fields.len(), 3);
+            assert!(matches!(
+                form.action().unwrap(),
+                RepositoryAction::Push {
+                    ref remote,
+                    ref branch,
+                    set_upstream: false,
+                    force_with_lease: force,
+                } if remote == "origin" && branch == "main" && force == force_with_lease
+            ));
+        }
+
+        let mut stash = form_for(RepositoryChoice::StashPush, &snapshot, 0)
+            .unwrap()
+            .unwrap();
+        if let FormField::Text { value, .. } = &mut stash.fields[0] {
+            *value = "save work".into();
+        }
+        for field in stash.fields.iter_mut().skip(1) {
+            if let FormField::Toggle { value, .. } = field {
+                *value = true;
+            }
+        }
+        assert!(matches!(
+            stash.action().unwrap(),
+            RepositoryAction::StashPush {
+                ref message,
+                include_untracked: true,
+                keep_index: true,
+                staged_only: true,
+            } if message == "save work"
+        ));
+    }
+
+    #[test]
+    fn stash_restore_branch_clear_forms_and_risks_are_explicit() {
+        let mut snapshot = snapshot();
+        snapshot.stashes.push(StashEntry {
+            selector: "stash@{0}".into(),
+            oid: "cccccccc".into(),
+            subject: "WIP".into(),
+        });
+
+        let mut apply = form_for(RepositoryChoice::StashApply, &snapshot, 0)
+            .unwrap()
+            .unwrap();
+        apply.toggle();
+        apply.selected = 1;
+        apply.toggle();
+        assert!(matches!(
+            apply.action().unwrap(),
+            RepositoryAction::StashApply {
+                ref selector,
+                restore_index: true,
+            } if selector == "stash@{0}"
+        ));
+
+        let branch = form_for(RepositoryChoice::StashBranch, &snapshot, 0)
+            .unwrap()
+            .unwrap();
+        assert_eq!(branch.fields.len(), 2);
+        let clear = form_for(RepositoryChoice::StashClear, &snapshot, 0)
+            .unwrap()
+            .unwrap();
+        assert!(clear.fields.is_empty());
+        assert!(matches!(
+            clear.action().unwrap(),
+            RepositoryAction::StashClear
+        ));
+        assert_eq!(
+            RepositoryAction::StashClear.risk(),
+            crate::domain::RiskLevel::Destructive
+        );
+        assert_eq!(
+            RepositoryAction::StashPop {
+                selector: "stash@{0}".into(),
+                restore_index: false,
+            }
+            .risk(),
+            crate::domain::RiskLevel::Destructive
+        );
     }
 
     #[test]

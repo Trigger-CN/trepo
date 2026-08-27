@@ -168,12 +168,13 @@ Git 与 Repo 的参数面很大，而且会随版本、插件和服务端扩展�
 
 - 刷新、fetch、pull/rebase、push。
 - 创建/切换/删除分支，统一设置 upstream。
-- stash push/pop/apply。
-- restore/clean/reset 等破坏性操作。
+- 对已选择仓库执行完整 dirty 状态 Stash（包含 untracked）或完整 Discard（tracked index/worktree 与 untracked）。
 - Repo start/checkout/abandon/prune/sync/upload。
 - 执行白名单 Git/Repo 命令。
 
-批量写操作必须先展示目标项目、前置检查、预计命令和风险。执行结果按项目记录 `success/failed/skipped/cancelled`；部分失败不伪装成整体成功。
+当前 Workspace Git 批任务使用独立于 Android Repo 命令的结构化服务。`Z`/`D` 仅作用于 `Space`/`A` 冻结的仓库选择；空选择不会隐式扩大。确认前读取每个仓库的完整 change 集合、文件 token 和 staged/unstaged/untracked/conflict 统计。确认后获取 workspace 锁和按路径排序的全部 project 锁，并在任何写入前统一复验真实路径边界、HEAD、`index.lock`、change 路径集合与全部 token；任一失败则所有仓库零写入。
+
+执行结果按项目记录 `pending/running/success/failure`。全批预检通过后仍可能发生应用外 Git 竞争，因此执行期失败不会回滚已完成仓库，也不会把部分成功伪装成事务成功。
 
 ## 6. Repository 页面
 
@@ -219,10 +220,10 @@ Graph 是进入仓库后的默认页，由提交列表和详情检查器组成�
 Graph 是仓库操作的首要发现入口。用户在提交树中选中节点并按 `Enter`，先看到该节点的对象菜单：提交本身、HEAD、本地分支、远端分支、标签以及挂在该节点上的 stash entry。再次按 `Enter` 进入所选对象的固定动作菜单。
 
 - 提交和 HEAD：打开 Changes、提交/amend、创建 branch/tag、stash、merge、rebase、cherry-pick 和 revert。
-- 本地分支：switch、merge、rebase、rename 和 delete。
-- 远端分支：以创建本地分支、merge、rebase、cherry-pick 和 revert 为主，不暴露本地 rename/delete。
+- 本地分支：switch、普通 push、force-with-lease push、merge、rebase、rename 和 delete。
+- 远端分支：以创建本地分支、merge、rebase、cherry-pick 和 revert 为主，不暴露本地 rename/delete 或 push。
 - 标签：创建 branch、merge、rebase、cherry-pick、revert 和 delete。
-- stash：show、apply、pop 和 drop。
+- stash：show、apply、pop 和 drop；创建 stash、stash branch 与 clear all 从 Repository 页面进入。
 
 需要参数的动作进入 typed form；破坏性动作和远端写入沿用现有确认及精确预览。Graph 只负责上下文识别、导航和参数收集，实际 Git argv、项目锁、`index.lock` 检查、snapshot token、generation 校验和 OperationRunner 执行保持唯一实现。动作完成后 Graph 刷新 all-refs 历史，并尽可能按原 OID 恢复选择；失败保留真实 Git 错误。
 
@@ -245,8 +246,9 @@ Git 提供提交及 parent 关系，`repo-tui` 负责视觉 lane 分配：
 Changes 页面分为文件树、hunk 列表、diff 检查器和提交对话框：
 
 - Workspace Inspector 与 Changes 使用同一目录树投影，以 `├─`、`└─`、`│` 展示 staged、unstaged、untracked 和 conflicted 文件的路径层级；目录行只负责显示，文件操作始终绑定原始 `PathBuf`。
-- Changes 文件模式用 `Space` 切换当前文件、`A` 全选/清空。存在文件选择时，stage/unstage 作用于该稳定路径集合；否则继续作用于当前 file/hunk/line。
-- 批量 stage/unstage 在同一 workspace/project lock 内重新读取所有条目，先验证全部文件的适用性与 diff token，再开始逐项写入；任一 token 陈旧时不写任何目标。破坏性 discard 不批量化，仍一次确认一个 file/hunk/line。
+- Changes 文件模式用 `Space` 切换当前文件、`A` 全选/清空。存在文件选择时，Stage/Unstage、`z` Stash 和 `d` Discard 作用于该稳定路径集合；无文件选择时 Stage/Unstage/Discard 继续作用于当前 file/hunk/line，Stash 要求先选择文件。
+- 批量 Stage/Unstage 在同一 workspace/project lock 内重新读取所有条目，先验证全部文件的适用性与 diff token，再开始逐项写入；任一 token 陈旧时不写任何目标。
+- 批量 Stash/Discard 在显示确认框前异步冻结全部路径和内容 token；确认框列出动作、文件数、`XY` 状态和路径。确认后 Runner 在同一锁内复验冻结范围。Stash 固定包含 selected tracked/untracked 路径；Discard 恢复 tracked index/worktree、删除 staged-added/untracked，并正确处理 rename 的原路径与新路径，未选择路径不受影响。
 - hunk 与 changed-line 级 stage、unstage、discard；行操作使用当前 diff 重建零上下文 patch，执行 `git apply --check --unidiff-zero` 后写入。
 - diff 模式支持 unified、side-by-side、word diff、忽略空白。
 - 二进制、重命名、submodule、mode change、大文件和不可解码文件明确降级。
@@ -279,10 +281,17 @@ Tags：
 
 Remotes：
 
-- 当前列出 fetch/push URL，并提供 add、set-url、remove、fetch、prune、pull、pull-rebase、push 和 set-upstream。
-- RemoteWrite 确认展示 remote、`branch:branch` refspec、远端到本地 OID range、set-upstream 和 force-with-lease 状态。
+- 当前列出 fetch/push URL，并提供 add、set-url、remove、fetch、prune、pull、pull-rebase、普通 Push、Force push with lease 和 set-upstream。
+- 普通 Push 与 Force Push 是独立可发现入口，但共享 `RepositoryAction::Push` 与同一安全执行链路；Graph 的本地分支对象菜单也提供两个入口。
+- RemoteWrite 确认展示 remote、`branch:branch` refspec、远端到本地 OID range、set-upstream 和 force-with-lease 状态；Force Push 额外明确提示可能改写远端历史。
 - URL 只在显示层隐藏 `scheme://userinfo@host` 的 userinfo；真实 URL 仍作为单独 argv 传给 Git。
-- UI 不提供裸 `--force`，只提供 `--force-with-lease`；确认后任何 ref/remote 状态变化都会使 snapshot token 失效并拒绝执行。
+- UI 不提供裸 `--force`，只提供 `--force-with-lease`；Git 以本地 remote-tracking ref 作为 lease，远端在未 fetch 时被其他客户端推进会使推送失败。确认后任何本地可见 ref/remote 状态变化也会使 snapshot token 失效并拒绝执行。
+
+Stashes：
+
+- `stash push` 以独立开关支持 include-untracked、keep-index 和 staged-only；staged-only 与前两项互斥，非法组合在执行前拒绝。
+- apply/pop 可选择 `--index` 恢复暂存状态；还支持从指定 stash 创建并切换分支，以及清空全部 stash。
+- pop、branch、drop 和 clear 会消费一个或多个 stash/ref，归为 Destructive 并要求确认；show 为 ReadOnly，push/apply 为 ReversibleWrite。
 
 ### 6.6 其他 Git 工作流
 
@@ -379,9 +388,9 @@ Upload 执行前展示 project 和准确 argv。M4 capture 模式只执行 `--cu
 ### 9.1 风险等级
 
 - **ReadOnly**：status、log、show、diff、list；直接执行。
-- **ReversibleWrite**：stage、commit、stash、create branch；显示目标并允许执行。
-- **RemoteWrite**：push、upload、delete remote ref；展示远端、refspec、commit range，并确认。
-- **Destructive**：clean、hard reset、force checkout、drop/clear stash、force delete、abort with local changes；要求二次确认。
+- **ReversibleWrite**：stage、commit、stash push/apply、create branch；显示目标并允许执行。
+- **RemoteWrite**：普通 push、force-with-lease push、upload、delete remote ref；展示远端、refspec、commit range，并确认。
+- **Destructive**：clean、hard reset、force checkout、stash pop/branch/drop/clear、force delete、abort with local changes；要求二次确认。
 - **CrossRepoDestructive**：跨仓库 restore/clean/reset/abandon；展示项目和文件统计，要求输入确认词或使用可配置强确认。
 
 ### 9.2 统一前置检查

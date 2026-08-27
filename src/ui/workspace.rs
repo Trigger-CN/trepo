@@ -6,7 +6,7 @@ use ratatui::Frame;
 
 use super::change_tree::{change_tree_rows, ChangeTreeRow};
 use crate::app::state::App;
-use crate::domain::{HeadState, RepoProjectState, ScanState, WorkspaceKind};
+use crate::domain::{HeadState, RepoProjectState, ScanState, WorkspaceGitAction, WorkspaceKind};
 
 pub fn render(frame: &mut Frame, app: &App) {
     let area = frame.area();
@@ -42,6 +42,7 @@ pub fn render(frame: &mut Frame, app: &App) {
     }
     render_footer(frame, app, vertical[2]);
     render_repo_batch_overlay(frame, app);
+    render_workspace_git_overlay(frame, app);
 }
 
 fn render_header(frame: &mut Frame, app: &App, area: Rect) {
@@ -251,7 +252,15 @@ fn render_inspector(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
-    let task = if let Some(task) = &app.repo_batch.task {
+    let task = if let Some(task) = &app.workspace_git.task {
+        if task.running {
+            format!("{} running", task.spec.action.label())
+        } else {
+            format!("{} finished", task.spec.action.label())
+        }
+    } else if app.workspace_git.preparing {
+        "Preparing Workspace Git confirmation".to_owned()
+    } else if let Some(task) = &app.repo_batch.task {
         if task.running {
             format!("{} running", task.spec.action.label())
         } else {
@@ -272,10 +281,143 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
                     Color::Green
                 }),
             ),
-            Span::raw("   Space Select   d Changed only   a Repo actions   / Search   Enter Open   ? Help"),
+            Span::raw(
+                "   Space Select   Z Stash   D Discard   d Changed only   a Repo actions   / Search",
+            ),
         ])),
         area,
     );
+}
+
+fn render_workspace_git_overlay(frame: &mut Frame, app: &App) {
+    if app.workspace_git.preparing {
+        let area = centered_rect(60, 24, frame.area());
+        render_overlay(
+            frame,
+            area,
+            " Workspace Git ",
+            vec![
+                Line::styled("Freezing repository state...", Color::Yellow),
+                Line::raw("All repositories are read before confirmation."),
+            ],
+        );
+    } else if let Some(spec) = &app.workspace_git.pending {
+        let area = centered_rect(82, 76, frame.area());
+        let mut lines = vec![
+            Line::styled(
+                spec.action.label(),
+                Style::default()
+                    .fg(if spec.action == WorkspaceGitAction::Discard {
+                        Color::LightRed
+                    } else {
+                        Color::Yellow
+                    })
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Line::raw(format!("Frozen repositories: {}", spec.targets.len())),
+            Line::raw(if spec.action == WorkspaceGitAction::Stash {
+                "Each stash includes tracked, staged, and untracked changes."
+            } else {
+                "Tracked index/worktree and untracked files will be permanently cleared."
+            }),
+            Line::raw(""),
+        ];
+        let detail = spec
+            .targets
+            .iter()
+            .map(|target| {
+                Line::raw(format!(
+                    "{}  S{} M{} ?{} !{}",
+                    target.project.relative_path.display(),
+                    target.summary.staged,
+                    target.summary.unstaged,
+                    target.summary.untracked,
+                    target.summary.conflicted
+                ))
+            })
+            .collect::<Vec<_>>();
+        let budget = usize::from(area.height.saturating_sub(9));
+        let max_scroll = detail.len().saturating_sub(budget);
+        let scroll = app.workspace_git.scroll.min(max_scroll);
+        lines.extend(detail.into_iter().skip(scroll).take(budget));
+        lines.push(Line::raw(""));
+        lines.push(Line::styled(
+            "Run now? y Yes   n/Esc No",
+            if spec.action == WorkspaceGitAction::Discard {
+                Color::LightRed
+            } else {
+                Color::Yellow
+            },
+        ));
+        render_overlay(frame, area, " Confirm Workspace Git operation ", lines);
+    } else if let Some(task) = &app.workspace_git.task {
+        let area = centered_rect(84, 76, frame.area());
+        let counts = task.results.iter().fold([0usize; 4], |mut counts, result| {
+            let index = match result.state {
+                RepoProjectState::Pending => 0,
+                RepoProjectState::Running => 1,
+                RepoProjectState::Succeeded => 2,
+                _ => 3,
+            };
+            counts[index] += 1;
+            counts
+        });
+        let mut lines = vec![
+            Line::styled(
+                format!(
+                    "{}  {}",
+                    task.spec.action.label(),
+                    if task.running { "running" } else { "complete" }
+                ),
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            Line::raw(format!(
+                "pending {}  running {}  success {}  failure {}",
+                counts[0], counts[1], counts[2], counts[3]
+            )),
+            Line::raw("Cross-repository operations are not transactional; completed work is not rolled back."),
+            Line::raw(""),
+        ];
+        let detail = task
+            .results
+            .iter()
+            .map(|result| {
+                result_line(
+                    &result.project.relative_path.display().to_string(),
+                    result.state,
+                    &result.message,
+                )
+            })
+            .collect::<Vec<_>>();
+        let budget = usize::from(area.height.saturating_sub(8));
+        let max_scroll = detail.len().saturating_sub(budget);
+        let scroll = app.workspace_git.scroll.min(max_scroll);
+        lines.extend(detail.into_iter().skip(scroll).take(budget));
+        lines.push(Line::styled(
+            if task.running {
+                "j/k Scroll"
+            } else {
+                "j/k Scroll   Esc Close"
+            },
+            Color::DarkGray,
+        ));
+        render_overlay(frame, area, " Workspace Git task ", lines);
+    } else if let Some((error, message)) = &app.workspace_git.message {
+        let area = centered_rect(64, 24, frame.area());
+        render_overlay(
+            frame,
+            area,
+            " Workspace Git ",
+            vec![Line::styled(
+                message.clone(),
+                if *error {
+                    Color::LightRed
+                } else {
+                    Color::Green
+                },
+            )],
+        );
+    }
 }
 
 fn render_repo_batch_overlay(frame: &mut Frame, app: &App) {

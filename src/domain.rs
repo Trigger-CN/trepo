@@ -121,6 +121,41 @@ pub struct RepoProjectResult {
     pub state: RepoProjectState,
     pub message: String,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkspaceGitAction {
+    Stash,
+    Discard,
+}
+
+impl WorkspaceGitAction {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Stash => "Stash selected repositories",
+            Self::Discard => "Discard selected repositories",
+        }
+    }
+
+    pub fn operation_kind(self) -> OperationKind {
+        match self {
+            Self::Stash => OperationKind::Stash,
+            Self::Discard => OperationKind::Discard,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct WorkspaceGitTarget {
+    pub project: Project,
+    pub items: Vec<BatchOperationItem>,
+    pub summary: WorktreeSummary,
+}
+
+#[derive(Debug, Clone)]
+pub struct WorkspaceGitSpec {
+    pub action: WorkspaceGitAction,
+    pub targets: Vec<WorkspaceGitTarget>,
+}
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ProjectId(pub PathBuf);
 
@@ -378,6 +413,8 @@ pub enum OperationKind {
     Stage,
     Unstage,
     RestoreWorktree,
+    Stash,
+    Discard,
 }
 
 impl OperationKind {
@@ -386,13 +423,15 @@ impl OperationKind {
             Self::Stage => "Stage",
             Self::Unstage => "Unstage",
             Self::RestoreWorktree => "Discard worktree changes",
+            Self::Stash => "Stash",
+            Self::Discard => "Discard",
         }
     }
 
     pub fn risk(self) -> RiskLevel {
         match self {
-            Self::Stage | Self::Unstage => RiskLevel::ReversibleWrite,
-            Self::RestoreWorktree => RiskLevel::Destructive,
+            Self::Stage | Self::Unstage | Self::Stash => RiskLevel::ReversibleWrite,
+            Self::RestoreWorktree | Self::Discard => RiskLevel::Destructive,
         }
     }
 }
@@ -538,16 +577,25 @@ pub enum RepositoryAction {
     StashPush {
         message: String,
         include_untracked: bool,
+        keep_index: bool,
+        staged_only: bool,
     },
     StashApply {
         selector: String,
+        restore_index: bool,
     },
     StashPop {
         selector: String,
+        restore_index: bool,
     },
     StashDrop {
         selector: String,
     },
+    StashBranch {
+        name: String,
+        selector: String,
+    },
+    StashClear,
     ConflictTakeOurs {
         path: PathBuf,
     },
@@ -643,6 +691,8 @@ impl RepositoryAction {
             Self::StashApply { .. } => "Apply stash",
             Self::StashPop { .. } => "Pop stash",
             Self::StashDrop { .. } => "Drop stash",
+            Self::StashBranch { .. } => "Create branch from stash",
+            Self::StashClear => "Clear all stashes",
             Self::ConflictTakeOurs { .. } => "Take ours",
             Self::ConflictTakeTheirs { .. } => "Take theirs",
             Self::ConflictMarkResolved { .. } => "Mark resolved",
@@ -672,7 +722,10 @@ impl RepositoryAction {
 
     pub fn risk(&self) -> RiskLevel {
         match self {
-            Self::StashDrop { .. }
+            Self::StashPop { .. }
+            | Self::StashDrop { .. }
+            | Self::StashBranch { .. }
+            | Self::StashClear
             | Self::ConflictTakeOurs { .. }
             | Self::ConflictTakeTheirs { .. }
             | Self::Abort { .. }
