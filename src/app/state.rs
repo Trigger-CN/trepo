@@ -8,11 +8,11 @@ use crate::app::repository::{
     choices, form_for, FormField, RepositoryChoice, RepositoryForm, RepositoryTab,
 };
 use crate::domain::{
-    ChangeEntry, ChangePreview, Commit, CommitOutcome, CommitSpec, HunkSource, OperationKind,
-    OperationOutcome, OperationSpec, OperationTarget, Project, ProjectId, ProjectSnapshot,
-    RepoBatchAction, RepoBatchSpec, RepoProjectResult, RepoProjectState, RepositoryAction,
-    RepositoryActionOutcome, RepositoryActionSpec, RepositorySnapshot, RiskLevel, Workspace,
-    WorkspaceKind, WorkspaceSummary,
+    BatchOperationItem, BatchOperationSpec, ChangeEntry, ChangePreview, Commit, CommitOutcome,
+    CommitSpec, HunkSource, OperationKind, OperationOutcome, OperationSpec, OperationTarget,
+    Project, ProjectId, ProjectSnapshot, RepoBatchAction, RepoBatchSpec, RepoProjectResult,
+    RepoProjectState, RepositoryAction, RepositoryActionOutcome, RepositoryActionSpec,
+    RepositorySnapshot, RiskLevel, Workspace, WorkspaceKind, WorkspaceSummary,
 };
 use crate::services::operations::OperationRunner;
 use crate::services::repo_batch::{self, RepoBatchEvent, RepoBatchEventKind, RepoBatchHandle};
@@ -130,6 +130,7 @@ impl GraphForm {
                     text.push(value);
                 }
             }
+            CommitInput::Text(_) | CommitInput::Newline => {}
             CommitInput::Backspace => {
                 if let Some(FormField::Text { value, .. }) = self.fields.get_mut(self.selected) {
                     value.pop();
@@ -659,9 +660,11 @@ pub struct RepositoryState {
     pub message: Option<(bool, String)>,
     pub detail: Option<String>,
 }
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub enum CommitInput {
     Character(char),
+    Text(String),
+    Newline,
     Backspace,
     ToggleAmend,
     ToggleSignoff,
@@ -689,6 +692,7 @@ pub struct ChangesState {
     pub return_screen: Screen,
     pub entries: Vec<ChangeEntry>,
     pub selected: usize,
+    pub selected_files: HashSet<PathBuf>,
     pub mode: ChangesMode,
     pub selected_hunk: usize,
     pub selected_hunk_identity: Option<(HunkSource, u64)>,
@@ -1788,6 +1792,7 @@ impl App {
             return_screen,
             entries: Vec::new(),
             selected: 0,
+            selected_files: HashSet::new(),
             mode: ChangesMode::File,
             selected_hunk: 0,
             selected_hunk_identity: None,
@@ -1838,6 +1843,9 @@ impl App {
                 changes.selected = changes
                     .selected
                     .min(changes.entries.len().saturating_sub(1));
+                changes
+                    .selected_files
+                    .retain(|path| changes.entries.iter().any(|entry| &entry.path == path));
             }
             Err(error) => changes.error = Some(error.to_string()),
         }
@@ -1848,6 +1856,45 @@ impl App {
         self.changes
             .as_ref()
             .and_then(|changes| changes.entries.get(changes.selected))
+    }
+
+    pub fn toggle_change_selected(&mut self) {
+        let Some(changes) = self.changes.as_mut() else {
+            return;
+        };
+        if changes.mode != ChangesMode::File || changes.operation_running {
+            return;
+        }
+        let Some(path) = changes
+            .entries
+            .get(changes.selected)
+            .map(|entry| entry.path.clone())
+        else {
+            return;
+        };
+        if !changes.selected_files.remove(&path) {
+            changes.selected_files.insert(path);
+        }
+        changes.message = None;
+    }
+
+    pub fn toggle_all_changes_selected(&mut self) {
+        let Some(changes) = self.changes.as_mut() else {
+            return;
+        };
+        if changes.mode != ChangesMode::File || changes.operation_running {
+            return;
+        }
+        if changes.selected_files.len() == changes.entries.len() {
+            changes.selected_files.clear();
+        } else {
+            changes.selected_files = changes
+                .entries
+                .iter()
+                .map(|entry| entry.path.clone())
+                .collect();
+        }
+        changes.message = None;
     }
 
     pub fn move_change_selection(&mut self, delta: isize) {
@@ -2119,6 +2166,39 @@ impl App {
         if changes.operation_running {
             return;
         }
+        if changes.mode == ChangesMode::File && !changes.selected_files.is_empty() {
+            if kind == OperationKind::RestoreWorktree {
+                changes.message = Some((
+                    true,
+                    "Batch discard is not supported; clear selection and discard one file".into(),
+                ));
+                return;
+            }
+            let selected = changes
+                .entries
+                .iter()
+                .filter(|entry| changes.selected_files.contains(&entry.path))
+                .cloned()
+                .collect::<Vec<_>>();
+            let inapplicable = selected.iter().find(|entry| match kind {
+                OperationKind::Stage => !entry.can_stage(),
+                OperationKind::Unstage => !entry.can_unstage(),
+                OperationKind::RestoreWorktree => true,
+            });
+            if let Some(entry) = inapplicable {
+                changes.message = Some((
+                    true,
+                    format!(
+                        "{} is not available for {}",
+                        kind.label(),
+                        entry.path.display()
+                    ),
+                ));
+                return;
+            }
+            self.spawn_batch_operation(kind, selected);
+            return;
+        }
         let Some(change) = changes.entries.get(changes.selected).cloned() else {
             return;
         };
@@ -2228,6 +2308,10 @@ impl App {
         }
         match input {
             CommitInput::Character(value) => changes.commit_message.push(value),
+            CommitInput::Text(value) => changes
+                .commit_message
+                .push_str(&value.replace("\r\n", "\n").replace('\r', "\n")),
+            CommitInput::Newline => changes.commit_message.push('\n'),
             CommitInput::Backspace => {
                 changes.commit_message.pop();
             }
@@ -2304,6 +2388,55 @@ impl App {
             }
         }
     }
+    fn spawn_batch_operation(&mut self, kind: OperationKind, entries: Vec<ChangeEntry>) {
+        let Some(changes) = self.changes.as_mut() else {
+            return;
+        };
+        changes.operation_running = true;
+        changes.message = None;
+        changes.operation_generation = changes.operation_generation.wrapping_add(1);
+        let operation_generation = changes.operation_generation;
+        let changes_generation = changes.generation;
+        let project = changes.project.clone();
+        let project_id = project.id.clone();
+        let sender = self.operation_tx.clone();
+        let runner = self.operation_runner.clone();
+        tokio::spawn(async move {
+            let mut items = Vec::with_capacity(entries.len());
+            for change in entries {
+                let expected_token = match git::change_token(&project.path, &change).await {
+                    Ok(token) => token,
+                    Err(error) => {
+                        let _ = sender.send(OperationResult {
+                            project_id,
+                            operation_generation,
+                            changes_generation,
+                            result: Err(error),
+                        });
+                        return;
+                    }
+                };
+                items.push(BatchOperationItem {
+                    change,
+                    expected_token,
+                });
+            }
+            let result = runner
+                .execute_batch(BatchOperationSpec {
+                    project,
+                    items,
+                    kind,
+                })
+                .await;
+            let _ = sender.send(OperationResult {
+                project_id,
+                operation_generation,
+                changes_generation,
+                result,
+            });
+        });
+    }
+
     fn spawn_operation(&mut self, pending: PendingOperation) {
         let Some(changes) = self.changes.as_mut() else {
             return;
@@ -2555,6 +2688,7 @@ impl App {
         };
         match input {
             CommitInput::Character(value) => form.edit_char(value),
+            CommitInput::Text(_) | CommitInput::Newline => {}
             CommitInput::Backspace => form.backspace(),
             CommitInput::ToggleAmend | CommitInput::ToggleSignoff | CommitInput::ToggleSigning => {
                 form.toggle()
@@ -2946,6 +3080,7 @@ mod tests {
             return_screen: Screen::Workspace,
             entries: Vec::new(),
             selected: 0,
+            selected_files: HashSet::new(),
             mode: ChangesMode::File,
             selected_hunk: 0,
             selected_hunk_identity: None,
@@ -3016,6 +3151,7 @@ mod tests {
             return_screen: Screen::Workspace,
             entries: vec![entry.clone()],
             selected: 0,
+            selected_files: HashSet::new(),
             mode: ChangesMode::File,
             selected_hunk: 0,
             selected_hunk_identity: None,
@@ -3095,6 +3231,79 @@ mod tests {
             .message
             .as_ref()
             .is_some_and(|(error, message)| *error && message == "patch failed"));
+    }
+
+    #[tokio::test]
+    async fn changes_multiselect_uses_stable_paths_and_commit_accepts_multiline_paste() {
+        let value = project("alpha");
+        let workspace = Workspace {
+            root: PathBuf::from("/tmp"),
+            kind: WorkspaceKind::Git,
+            projects: vec![value.clone()],
+        };
+        let mut app = App::new(workspace, 1);
+        let entries = ["src/app.rs", "src/main.rs"]
+            .into_iter()
+            .map(|path| ChangeEntry {
+                path: PathBuf::from(path),
+                original_path: None,
+                index: None,
+                worktree: Some(crate::domain::ChangeCode::Modified),
+                untracked: false,
+                conflicted: false,
+            })
+            .collect::<Vec<_>>();
+        app.changes = Some(ChangesState {
+            project: value,
+            return_screen: Screen::Workspace,
+            entries: entries.clone(),
+            selected: 0,
+            selected_files: HashSet::new(),
+            mode: ChangesMode::File,
+            selected_hunk: 0,
+            selected_hunk_identity: None,
+            selected_line: 0,
+            selected_line_identity: None,
+            loading: false,
+            error: None,
+            generation: 1,
+            preview: None,
+            preview_path: None,
+            preview_loading: false,
+            preview_generation: 0,
+            preview_scroll: 0,
+            operation_running: false,
+            operation_generation: 0,
+            confirmation: None,
+            message: None,
+            commit_message: String::new(),
+            commit_editing: true,
+            commit_amend: false,
+            commit_signoff: false,
+            commit_signing: false,
+            commit_running: false,
+            commit_generation: 0,
+        });
+
+        app.toggle_change_selected();
+        app.move_change_selection(1);
+        app.toggle_change_selected();
+        let changes = app.changes.as_ref().unwrap();
+        assert_eq!(changes.selected_files.len(), 2);
+        assert!(changes.selected_files.contains(&entries[0].path));
+        assert!(changes.selected_files.contains(&entries[1].path));
+        app.toggle_all_changes_selected();
+        assert!(app.changes.as_ref().unwrap().selected_files.is_empty());
+        app.toggle_all_changes_selected();
+        assert_eq!(app.changes.as_ref().unwrap().selected_files.len(), 2);
+
+        app.edit_commit_message(CommitInput::Text("subject\r\n\r\nbody".into()));
+        app.edit_commit_message(CommitInput::Newline);
+        app.edit_commit_message(CommitInput::Character('x'));
+        assert_eq!(
+            app.changes.as_ref().unwrap().commit_message,
+            "subject\n\nbody\nx"
+        );
     }
 
     #[test]

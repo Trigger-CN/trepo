@@ -429,6 +429,19 @@ pub struct OperationSpec {
 }
 
 #[derive(Debug, Clone)]
+pub struct BatchOperationItem {
+    pub change: ChangeEntry,
+    pub expected_token: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct BatchOperationSpec {
+    pub project: Project,
+    pub items: Vec<BatchOperationItem>,
+    pub kind: OperationKind,
+}
+
+#[derive(Debug, Clone)]
 pub struct OperationOutcome {
     pub kind: OperationKind,
     pub path: PathBuf,

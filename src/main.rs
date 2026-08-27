@@ -4,7 +4,10 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyEventKind,
+    KeyModifiers,
+};
 use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -137,7 +140,7 @@ impl TerminalGuard {
     fn enter() -> Result<Self> {
         enable_raw_mode().context("failed to enable terminal raw mode")?;
         let mut stdout = io::stdout();
-        if let Err(error) = execute!(stdout, EnterAlternateScreen) {
+        if let Err(error) = execute!(stdout, EnterAlternateScreen, EnableBracketedPaste) {
             let _ = disable_raw_mode();
             return Err(error).context("failed to enter alternate screen");
         }
@@ -146,8 +149,9 @@ impl TerminalGuard {
             Ok(terminal) => terminal,
             Err(error) => {
                 let _ = disable_raw_mode();
+                let _ = disable_raw_mode();
                 let mut stdout = io::stdout();
-                let _ = execute!(stdout, LeaveAlternateScreen);
+                let _ = execute!(stdout, DisableBracketedPaste, LeaveAlternateScreen);
                 return Err(error).context("failed to initialize terminal");
             }
         };
@@ -162,7 +166,11 @@ impl TerminalGuard {
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
         let _ = disable_raw_mode();
-        let _ = execute!(self.terminal.backend_mut(), LeaveAlternateScreen);
+        let _ = execute!(
+            self.terminal.backend_mut(),
+            DisableBracketedPaste,
+            LeaveAlternateScreen
+        );
         let _ = self.terminal.show_cursor();
     }
 }
@@ -183,6 +191,9 @@ async fn run_tui(app: &mut App) -> Result<()> {
         if event::poll(Duration::from_millis(50)).context("failed to poll terminal input")? {
             match event::read().context("failed to read terminal input")? {
                 Event::Key(key) if key.kind == KeyEventKind::Press => handle_key(app, key),
+                Event::Paste(text) => {
+                    app.edit_commit_message(repo_tui::app::state::CommitInput::Text(text))
+                }
                 Event::Resize(_, _) => {}
                 _ => {}
             }
@@ -379,7 +390,11 @@ fn handle_key(app: &mut App, key: KeyEvent) {
     {
         match key.code {
             KeyCode::Esc => app.cancel_commit_editing(),
-            KeyCode::Enter => app.submit_commit(),
+            KeyCode::Enter if key.modifiers.contains(KeyModifiers::CONTROL) => app.submit_commit(),
+            KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                app.submit_commit()
+            }
+            KeyCode::Enter => app.edit_commit_message(repo_tui::app::state::CommitInput::Newline),
             KeyCode::Backspace => {
                 app.edit_commit_message(repo_tui::app::state::CommitInput::Backspace)
             }
@@ -463,6 +478,8 @@ fn handle_key(app: &mut App, key: KeyEvent) {
             KeyCode::Char('r') => app.reload_changes(),
             KeyCode::Tab => app.toggle_changes_mode(),
             KeyCode::Char('o') => app.open_repository(),
+            KeyCode::Char(' ') => app.toggle_change_selected(),
+            KeyCode::Char('A') => app.toggle_all_changes_selected(),
             KeyCode::Char('s') => app.begin_operation(repo_tui::domain::OperationKind::Stage),
             KeyCode::Char('u') => app.begin_operation(repo_tui::domain::OperationKind::Unstage),
             KeyCode::Char('d') => {

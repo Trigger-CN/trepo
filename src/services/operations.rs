@@ -7,8 +7,9 @@ use tokio::sync::Mutex;
 
 use crate::adapters::git;
 use crate::domain::{
-    ChangeEntry, CommitOutcome, CommitSpec, HunkSource, OperationKind, OperationOutcome,
-    OperationSpec, OperationTarget, Project, RepositoryActionOutcome, RepositoryActionSpec,
+    BatchOperationSpec, ChangeEntry, CommitOutcome, CommitSpec, HunkSource, OperationKind,
+    OperationOutcome, OperationSpec, OperationTarget, Project, RepositoryActionOutcome,
+    RepositoryActionSpec,
 };
 
 use crate::services::repo_batch::workspace_lock_for_project;
@@ -106,6 +107,58 @@ impl OperationRunner {
                 suffix,
                 current.path.display()
             ),
+        })
+    }
+
+    pub async fn execute_batch(&self, spec: BatchOperationSpec) -> Result<OperationOutcome> {
+        if spec.items.is_empty() {
+            bail!("no files were selected");
+        }
+        if spec.kind == OperationKind::RestoreWorktree {
+            bail!("batch discard is not supported");
+        }
+        let workspace_lock = workspace_lock_for_project(&spec.project.path);
+        let _workspace_guard = match &workspace_lock {
+            Some(lock) => Some(lock.lock().await),
+            None => None,
+        };
+        let lock = project_lock(spec.project.path.clone());
+        let _guard = lock.lock().await;
+        let root = &spec.project.path;
+
+        if git::git_path(root, "index.lock").await?.is_file() {
+            bail!("Git index is locked; another writer may be active");
+        }
+        let current = git::changes(root).await?;
+        let mut validated = Vec::with_capacity(spec.items.len());
+        for item in &spec.items {
+            let entry = current
+                .iter()
+                .find(|entry| entry.path == item.change.path)
+                .with_context(|| {
+                    format!(
+                        "precondition failed: {} is no longer changed",
+                        item.change.path.display()
+                    )
+                })?;
+            ensure_applicable(spec.kind, entry)?;
+            let token = git::change_token(root, entry).await?;
+            ensure_token(token, item.expected_token, entry)?;
+            validated.push(entry.clone());
+        }
+
+        for entry in &validated {
+            match spec.kind {
+                OperationKind::Stage => git::stage_path(root, &entry.path).await?,
+                OperationKind::Unstage => git::unstage_path(root, &entry.path).await?,
+                OperationKind::RestoreWorktree => unreachable!(),
+            }
+        }
+        let count = validated.len();
+        Ok(OperationOutcome {
+            kind: spec.kind,
+            path: validated[0].path.clone(),
+            message: format!("{} {count} files", spec.kind.label()),
         })
     }
 
@@ -373,6 +426,88 @@ mod tests {
             fs::read_to_string(temp.path().join("tracked.txt")).unwrap(),
             "base\n"
         );
+    }
+
+    #[tokio::test]
+    async fn batches_stage_and_unstage_for_multiple_files() {
+        let temp = tempdir().unwrap();
+        initialize(temp.path());
+        fs::write(temp.path().join("first.txt"), "first\n").unwrap();
+        fs::write(temp.path().join("second.txt"), "second\n").unwrap();
+        let repository = project(temp.path());
+        let entries = git::changes(temp.path()).await.unwrap();
+        let mut items = Vec::new();
+        for change in entries.into_iter().filter(|entry| entry.untracked) {
+            let expected_token = git::change_token(temp.path(), &change).await.unwrap();
+            items.push(crate::domain::BatchOperationItem {
+                change,
+                expected_token,
+            });
+        }
+        let outcome = OperationRunner
+            .execute_batch(BatchOperationSpec {
+                project: repository.clone(),
+                items,
+                kind: OperationKind::Stage,
+            })
+            .await
+            .unwrap();
+        assert_eq!(outcome.message, "Stage 2 files");
+        let staged = git::changes(temp.path())
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|entry| entry.can_unstage())
+            .collect::<Vec<_>>();
+        assert_eq!(staged.len(), 2);
+
+        let mut items = Vec::new();
+        for change in staged {
+            let expected_token = git::change_token(temp.path(), &change).await.unwrap();
+            items.push(crate::domain::BatchOperationItem {
+                change,
+                expected_token,
+            });
+        }
+        OperationRunner
+            .execute_batch(BatchOperationSpec {
+                project: repository,
+                items,
+                kind: OperationKind::Unstage,
+            })
+            .await
+            .unwrap();
+        let current = git::changes(temp.path()).await.unwrap();
+        assert_eq!(current.iter().filter(|entry| entry.untracked).count(), 2);
+    }
+
+    #[tokio::test]
+    async fn batch_preflight_rejects_all_writes_when_one_token_is_stale() {
+        let temp = tempdir().unwrap();
+        initialize(temp.path());
+        fs::write(temp.path().join("first.txt"), "first\n").unwrap();
+        fs::write(temp.path().join("second.txt"), "second\n").unwrap();
+        let repository = project(temp.path());
+        let entries = git::changes(temp.path()).await.unwrap();
+        let mut items = Vec::new();
+        for change in entries.into_iter().filter(|entry| entry.untracked) {
+            let expected_token = git::change_token(temp.path(), &change).await.unwrap();
+            items.push(crate::domain::BatchOperationItem {
+                change,
+                expected_token,
+            });
+        }
+        fs::write(temp.path().join("second.txt"), "changed after selection\n").unwrap();
+        let error = OperationRunner
+            .execute_batch(BatchOperationSpec {
+                project: repository,
+                items,
+                kind: OperationKind::Stage,
+            })
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("changed after preview"));
+        assert!(git_text(temp.path(), &["diff", "--cached"]).is_empty());
     }
 
     #[tokio::test]
