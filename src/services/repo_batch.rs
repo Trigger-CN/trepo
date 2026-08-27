@@ -603,7 +603,7 @@ pub(crate) fn workspace_lock_for_project(path: &Path) -> Option<Arc<Mutex<()>>> 
         .map(|root| workspace_lock(root.to_path_buf()))
 }
 
-fn workspace_lock(path: PathBuf) -> Arc<Mutex<()>> {
+pub(crate) fn workspace_lock(path: PathBuf) -> Arc<Mutex<()>> {
     static LOCKS: OnceLock<StdMutex<HashMap<PathBuf, Arc<Mutex<()>>>>> = OnceLock::new();
     let locks = LOCKS.get_or_init(|| StdMutex::new(HashMap::new()));
     let mut locks = locks

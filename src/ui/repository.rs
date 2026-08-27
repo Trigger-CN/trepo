@@ -6,7 +6,7 @@ use ratatui::Frame;
 
 use crate::app::repository::{action_preview, choices, FormField, RepositoryTab};
 use crate::app::state::{App, RepositoryState};
-use crate::domain::RiskLevel;
+use crate::domain::{RepositoryAction, RiskLevel};
 
 pub fn render(frame: &mut Frame, app: &App) {
     let area = frame.area();
@@ -292,12 +292,18 @@ fn render_confirmation(frame: &mut Frame, state: &RepositoryState) {
     let Some(action) = state.pending.as_ref() else {
         return;
     };
-    let area = centered_rect(68, 42, frame.area());
+    let area = centered_rect(68, 60, frame.area());
     frame.render_widget(Clear, area);
-    let risk = match action.risk() {
-        RiskLevel::RemoteWrite => "This action writes to a remote repository.",
-        RiskLevel::Destructive => "This action can discard local or reference state.",
-        _ => "Confirm this repository operation.",
+    let risk = match action {
+        RepositoryAction::Push {
+            force_with_lease: true,
+            ..
+        } => "This action may rewrite remote branch history and uses force-with-lease.",
+        _ => match action.risk() {
+            RiskLevel::RemoteWrite => "This action writes to a remote repository.",
+            RiskLevel::Destructive => "This action can discard local or reference state.",
+            _ => "Confirm this repository operation.",
+        },
     };
     let mut lines = vec![
         Line::styled(

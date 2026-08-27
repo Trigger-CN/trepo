@@ -216,6 +216,9 @@ fn drain_background_messages(app: &mut App) {
     while let Ok(result) = app.preview_rx.try_recv() {
         app.apply_preview(result);
     }
+    while let Ok(result) = app.batch_prepare_rx.try_recv() {
+        app.apply_batch_prepare(result);
+    }
     while let Ok(result) = app.operation_rx.try_recv() {
         app.apply_operation(result);
     }
@@ -231,12 +234,40 @@ fn drain_background_messages(app: &mut App) {
     while let Ok(result) = app.repository_action_rx.try_recv() {
         app.apply_repository_action(result);
     }
+    while let Ok(result) = app.workspace_git_prepare_rx.try_recv() {
+        app.apply_workspace_git_prepare(result);
+    }
+    while let Ok(event) = app.workspace_git_rx.try_recv() {
+        app.apply_workspace_git(event);
+    }
     while let Ok(event) = app.repo_batch_rx.try_recv() {
         app.apply_repo_batch(event);
     }
 }
 
 fn handle_key(app: &mut App, key: KeyEvent) {
+    if app.screen == Screen::Workspace && app.workspace_git_overlay_active() {
+        let pending = app.workspace_git.pending.is_some();
+        let running = app
+            .workspace_git
+            .task
+            .as_ref()
+            .is_some_and(|task| task.running);
+        match key.code {
+            KeyCode::Char('y') | KeyCode::Char('Y') if pending => app.confirm_workspace_git(true),
+            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc if pending => {
+                app.confirm_workspace_git(false);
+                app.close_workspace_git();
+            }
+            KeyCode::Esc if !running => app.close_workspace_git(),
+            KeyCode::Down | KeyCode::Char('j') => app.scroll_workspace_git(1),
+            KeyCode::Up | KeyCode::Char('k') => app.scroll_workspace_git(-1),
+            KeyCode::PageDown => app.scroll_workspace_git(10),
+            KeyCode::PageUp => app.scroll_workspace_git(-10),
+            _ => {}
+        }
+        return;
+    }
     if app.screen == Screen::Workspace && app.repo_batch_overlay_active() {
         let menu = app.repo_batch.action_menu;
         let form = app.repo_batch.form.is_some();
@@ -452,6 +483,12 @@ fn handle_key(app: &mut App, key: KeyEvent) {
             KeyCode::Char('a') => app.open_repo_batch_menu(),
             KeyCode::Char(' ') => app.toggle_project_selection(),
             KeyCode::Char('A') => app.toggle_filtered_selection(),
+            KeyCode::Char('Z') => {
+                app.begin_workspace_git(repo_tui::domain::WorkspaceGitAction::Stash)
+            }
+            KeyCode::Char('D') => {
+                app.begin_workspace_git(repo_tui::domain::WorkspaceGitAction::Discard)
+            }
             KeyCode::Char('d') => app.toggle_changed_only(),
             KeyCode::Char('r') => app.refresh(),
             KeyCode::Char('c') => app.open_changes(),
@@ -489,6 +526,7 @@ fn handle_key(app: &mut App, key: KeyEvent) {
             KeyCode::Char('A') => app.toggle_all_changes_selected(),
             KeyCode::Char('s') => app.begin_operation(repo_tui::domain::OperationKind::Stage),
             KeyCode::Char('u') => app.begin_operation(repo_tui::domain::OperationKind::Unstage),
+            KeyCode::Char('z') => app.begin_operation(repo_tui::domain::OperationKind::Stash),
             KeyCode::Char('d') => {
                 app.begin_operation(repo_tui::domain::OperationKind::RestoreWorktree)
             }

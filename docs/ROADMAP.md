@@ -52,11 +52,11 @@ M1 是所有后续里程碑的共同数据与交互基础。M4 可以在 M2 后�
 
 - 从任意子目录识别 Repo 工作区或单 Git 仓库，并并发扫描状态。
 - Workspace、完整 all-refs Graph、Changes 和 Repository 管理页面均已可用。
-- Workspace 支持稳定 ProjectId 多选、命名搜索、`d` 一键仅显示工作区有改动项目，以及宽屏 Inspector 的同次扫描文件状态列表。
-- Graph 支持 commit/HEAD/local branch/remote branch/tag/stash 两级上下文操作及 typed form。
-- 文件/hunk/changed-line、commit/stash/conflict、refs/integration 和 remotes 写操作受锁、token 和 generation 保护。
+- Workspace 支持稳定 ProjectId 多选、命名搜索、`d` 一键仅显示工作区有改动项目、宽屏 Inspector 文件状态树，以及 `Z`/`D` 对冻结仓库选择执行确认后的 Stash/Discard。
+- Graph 支持 commit/HEAD/local branch/remote branch/tag/stash 两级上下文操作及 typed form，本地分支直接提供普通 Push 与 Force push with lease。
+- Changes 支持文件多选批量 Stage/Unstage、selected-path Stash 和完整 Discard；文件/hunk/changed-line、commit/stash/conflict、refs/integration 和 remotes 写操作受锁、token 和 generation 保护。
 - Repo `sync/start/checkout/abandon/prune/rebase/upload/download` 和 pinned manifest export 具有 workspace lock、逐项目结果、流式日志、取消后复扫与失败重试。
-- Graph 与 Repo overlay、confirmation 和结果状态均覆盖 80x24 与 120x40 TestBackend 渲染。
+- Graph、Changes、Workspace Git 与 Repo overlay、confirmation 和结果状态均覆盖 80x24 与 120x40 TestBackend 渲染。
 
 下一执行点是 M5 命令面板与终端接管；交互认证、外部 editor/mergetool 和任意受控命令不在 M4 后台任务中启动。
 
@@ -227,9 +227,9 @@ cargo run -- doctor .
 范围：
 
 - Workspace Inspector 与 Changes 共享展开式文件树，目录连接符不改变稳定文件身份。
-- Changes 文件多选和批量 stage/unstage；文件、hunk、changed-line 单目标 stage/unstage/discard。
+- Changes 文件多选和批量 Stage/Unstage、selected-path Stash、完整 Discard；文件、hunk、changed-line 单目标 Stage/Unstage/Discard。
 - 多行 commit/amend 编辑器支持光标导航、当前位置输入与粘贴、signoff/signing、hook 输出和 message/cursor 恢复。
-- stash list/show/push/apply/pop/drop。
+- stash list/show/push/apply/pop/branch/drop/clear；push 支持 include-untracked、keep-index、staged-only，apply/pop 支持恢复 index。
 - operation state、冲突列表、ours/theirs/mark-resolved 和 continue/skip/abort。
 
 完成证据：
@@ -238,11 +238,11 @@ cargo run -- doctor .
 - `OperationSpec`、风险等级、per-project 写锁、worktree-aware index lock 检查。
 - diff token、hunk/line fingerprint 和 `git apply --check --unidiff-zero` 拒绝陈旧目标。
 - destructive file/hunk/line discard 确认；失败保留选择与错误，成功自动刷新。
-- 批量 stage/unstage 使用稳定 `PathBuf` 集合，在单次 project lock 内先验证全部 diff token；陈旧批次不产生部分写入。
+- 文件批次使用稳定 `PathBuf` 集合，在写入前验证全部 diff token；Stash 保存 selected tracked/untracked，Discard 清理 tracked index/worktree、staged-added、untracked 和 rename 新旧路径，未选路径保持不变。
+- Workspace `Z`/`D` 冻结 selected repositories 与改动统计，全批路径/token/index-lock 预检失败时零写入，执行结果按仓库保留且不承诺跨仓库回滚。
 - bracketed paste 保留提交正文换行；Unicode 光标移动、中间插入/删除、行首尾和跨行移动有状态测试覆盖。
-- 80x24/120x40 TestBackend 验证独立 Message 边框、Options/Keys 分隔区和真实 cursor 位于消息编辑区域。
-- commit hook 失败保留 message/cursor/选项；stash 和 conflict 操作均有真实临时仓库测试。
-- merge conflict 下 ours/theirs、mark-resolved、continue/abort，以及 cherry-pick skip 已验证。
+- 80x24/120x40 TestBackend 验证 Changes/Workspace Git 确认与结果、Message 边框、Options/Keys 分隔区和真实 cursor。
+- 真实临时仓库覆盖 selected-path Stash、完整 Discard、双仓库 Stash/Discard、stale 全批零写入，以及高级 stash 与 conflict 工作流。
 
 关键基础设施：
 
@@ -267,15 +267,15 @@ cargo run -- doctor .
 
 - Repository 页 Status、Stashes、Branches & Tags、Remotes 四个 tab。
 - branch/tag create/switch/rename/delete，merge/rebase/cherry-pick/revert。
-- fetch、pull/rebase、push、set upstream、prune 和 remote add/set-url/remove。
+- fetch、pull/rebase、普通 push、force-with-lease push、set upstream、prune 和 remote add/set-url/remove；Repository 与 Graph 本地分支均有独立 Push/Force Push 入口。
 - conflict resolver 与合法 continue/skip/abort。
-- remote-write 精确预览和 `force-with-lease`；不提供裸 `--force`。
+- remote-write 精确预览、Force Push 历史重写警告和 `force-with-lease`；不提供裸 `--force`。
 
 验收证据：
 
 - 真实临时仓库完成 branch/tag、merge/rebase/cherry-pick/revert 和 operation control 矩阵。
-- workspace-local seed/client/bare remote 完成 fetch/pull/push/upstream/prune 与 remote 管理闭环。
-- remote write 显示准确 `branch:branch` refspec、OID range、upstream 和 lease 状态，URL userinfo 脱敏。
+- workspace-local seed/client/peer/bare remote 完成 fetch/pull/push/upstream/prune 与 remote 管理闭环，并验证普通非快进拒绝、陈旧 lease 拒绝和更新 tracking ref 后 lease 强推成功。
+- remote write 显示准确 `branch:branch` refspec、OID range、upstream 和 lease 状态，Force Push 显示历史重写警告，URL userinfo 脱敏。
 - repository snapshot token 在锁内拒绝确认后发生的 refs/stash/conflict/remote 状态变化。
 - 外部 mergetool/editor 依赖 M5 PTY takeover，明确不在 M3 后台任务中启动。
 
@@ -386,11 +386,11 @@ cargo run -- doctor .
 | M1 工作区发现 | Done | 单 Git + fake Repo client 端到端通过 |
 | M1 状态扫描 | Done | porcelain fixture + 真实 Git + 缺失项目隔离通过 |
 | M1 Workspace UI | Done | 80x24/120x40 渲染和真实导航通过 |
-| M2 Changes/commit | Done | 文件树、批量 stage/unstage、可导航多行 editor、file/hunk/line、stale/index lock 和真实 Git 通过 |
-| M2 stash/conflict | Done | stash 全流程、ours/theirs/resolved、continue/skip/abort 通过 |
-| M3 refs/integration | Done | branch/tag、merge/rebase/cherry-pick/revert 真实矩阵通过 |
-| M3 remotes | Done | bare remote fetch/pull/push/upstream/prune 与 remote 管理通过 |
-| M4 Repo batch | Done | stable multi-select、workspace lock、fake Repo partial failure/cancel、80x24/120x40 通过 |
+| M2 Changes/commit | Done | 文件树、批量 Stage/Unstage/Stash/Discard、可导航多行 editor、file/hunk/line、stale/index lock 和真实 Git 通过 |
+| M2 stash/conflict | Done | staged/keep-index/index restore/branch/clear、非法组合拒绝、ours/theirs/resolved、continue/skip/abort 通过 |
+| M3 refs/integration | Done | branch/tag、merge/rebase/cherry-pick/revert 与 Graph 本地分支 Push/Force Push 矩阵通过 |
+| M3 remotes | Done | bare remote 普通 push、非快进拒绝、陈旧/当前 lease、fetch/pull/upstream/prune 与 remote 管理通过 |
+| M4 Repo/Workspace batch | Done | Repo batch 与 Workspace Git Stash/Discard 的 stable multi-select、全批预检、逐项结果和 80x24/120x40 通过 |
 | M5-M7 | Planned | 下一步从 M5 命令面板与终端接管开始 |
 
 M0-M4 最终验证（Rust 1.98、Git 2.43.0、Repo launcher 2.54）：
@@ -407,9 +407,11 @@ cargo build
 
 - Graph 加载所有本地分支、远端分支、tag、HEAD 和每条 stash 的完整可达历史；大型仓库流式虚拟化仍是后续优化。
 - Graph 的 Branch/Query/Author/Since/Until 过滤在内存中组合执行，保留完整 all-refs topology，并按稳定 OID 维护选择和对象操作。
-- Workspace Inspector 与 Changes 共享稳定路径文件树；Changes 批量 stage/unstage 全量预检 token 后写入，多行提交编辑器支持 bracketed paste、Unicode 光标导航和清晰分区。
+- Workspace Inspector 与 Changes 共享稳定路径文件树；Changes 批量 Stage/Unstage/Stash/Discard 在全量预检 token 后写入，多行提交编辑器支持 bracketed paste、Unicode 光标导航和清晰分区。
 - Git 与 Repo 写操作协调 workspace/project 锁、实时前置检查、确认和 generation。
-- Repo 批处理保留凭据脱敏后的逐行日志和逐项目结果，取消不承诺回滚并通过复扫恢复事实状态。
+- Repository 与 Graph 的普通 Push/Force Push 使用固定 `branch:branch` refspec；裸 `--force` 不可达，force-with-lease 并发推进场景由真实 peer/bare remote 覆盖。
+- Stash 高级模式、index 恢复、branch/clear，以及 selected-file/selected-repository Stash 的领域映射、范围确认和 80x24/120x40 可见性均有测试覆盖。
+- Repo 批处理保留凭据脱敏日志；Workspace Git 批任务保留逐仓库 pending/running/success/failure。两者均不承诺跨仓库回滚并在结束后复扫事实状态。
 - 当前无任意命令面板或 PTY takeover；交互认证、外部 editor/mergetool 明确依赖 M5。
 
 ## 15. 下一执行点

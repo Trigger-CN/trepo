@@ -5,8 +5,8 @@ use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, Wrap}
 use ratatui::Frame;
 
 use super::change_tree::{change_tree_rows, ChangeTreeRow};
-use crate::app::state::{App, ChangesMode, ChangesState};
-use crate::domain::OperationTarget;
+use crate::app::state::{App, ChangesMode, ChangesState, PendingOperation};
+use crate::domain::{OperationKind, OperationTarget};
 
 pub fn render(frame: &mut Frame, app: &App) {
     let area = frame.area();
@@ -292,9 +292,7 @@ fn render_footer(frame: &mut Frame, changes: &ChangesState, area: Rect) {
             Style::default().fg(if *is_error { Color::Red } else { Color::Green }),
         )
     } else {
-        Span::raw(
-            "Space Select   A All   s Stage   u Unstage   d Discard   m Commit   PgUp/PgDn Diff",
-        )
+        Span::raw("Space Select   A All   z Stash   s Stage   u Unstage   d Discard   m Commit")
     };
     let mode = match changes.mode {
         ChangesMode::File => "FILE",
@@ -316,12 +314,12 @@ fn render_confirmation(frame: &mut Frame, changes: &ChangesState) {
     let Some(pending) = &changes.confirmation else {
         return;
     };
-    let area = centered_rect(64, 30, frame.area());
-    frame.render_widget(Clear, area);
-    frame.render_widget(
-        Paragraph::new(vec![
-            Line::styled(
-                match pending.target {
+    let area = centered_rect(76, 62, frame.area());
+    let mut lines = Vec::new();
+    let (title, action) = match pending {
+        PendingOperation::Single { change, target, .. } => {
+            lines.push(Line::styled(
+                match target {
                     OperationTarget::File => {
                         "This permanently discards all worktree changes in the file."
                     }
@@ -333,10 +331,10 @@ fn render_confirmation(frame: &mut Frame, changes: &ChangesState) {
                     }
                 },
                 Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-            ),
-            Line::raw(""),
-            Line::raw(format!("File: {}", pending.change.path.display())),
-            Line::raw(match pending.target {
+            ));
+            lines.push(Line::raw(""));
+            lines.push(Line::raw(format!("File: {}", change.path.display())));
+            lines.push(Line::raw(match target {
                 OperationTarget::File => "Scope: entire file".to_owned(),
                 OperationTarget::Hunk { source, .. } => {
                     format!("Scope: selected {} hunk", source.label())
@@ -344,16 +342,66 @@ fn render_confirmation(frame: &mut Frame, changes: &ChangesState) {
                 OperationTarget::Line { source, .. } => {
                     format!("Scope: selected {} line", source.label())
                 }
-            }),
-            Line::raw(""),
-            Line::raw("Press y to discard or n/Esc to cancel."),
-        ])
-        .block(
-            Block::default()
-                .title(" Confirm destructive operation ")
-                .borders(Borders::ALL),
-        )
-        .wrap(Wrap { trim: false }),
+            }));
+            (" Confirm destructive operation ", "discard")
+        }
+        PendingOperation::Batch(spec) => {
+            let destructive = spec.kind == OperationKind::Discard;
+            lines.push(Line::styled(
+                match spec.kind {
+                    OperationKind::Stash => "Stash frozen files, including untracked files.",
+                    OperationKind::Discard => {
+                        "Permanently discard staged, worktree, and untracked changes."
+                    }
+                    _ => "Run the frozen file batch.",
+                },
+                Style::default()
+                    .fg(if destructive {
+                        Color::Red
+                    } else {
+                        Color::Yellow
+                    })
+                    .add_modifier(Modifier::BOLD),
+            ));
+            lines.push(Line::raw(format!(
+                "Repository: {}   Files: {}",
+                spec.project.relative_path.display(),
+                spec.items.len()
+            )));
+            lines.push(Line::raw(""));
+            let budget = usize::from(area.height.saturating_sub(9));
+            for item in spec.items.iter().take(budget) {
+                lines.push(Line::raw(format!(
+                    "  {}  {}",
+                    item.change.status_label(),
+                    item.change.path.display()
+                )));
+            }
+            if spec.items.len() > budget {
+                lines.push(Line::raw(format!(
+                    "  ... {} more files",
+                    spec.items.len() - budget
+                )));
+            }
+            (
+                if destructive {
+                    " Confirm batch discard "
+                } else {
+                    " Confirm batch stash "
+                },
+                if destructive { "discard" } else { "stash" },
+            )
+        }
+    };
+    lines.push(Line::raw(""));
+    lines.push(Line::raw(format!(
+        "Press y to {action} or n/Esc to cancel."
+    )));
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(Block::default().title(title).borders(Borders::ALL))
+            .wrap(Wrap { trim: false }),
         area,
     );
 }

@@ -110,7 +110,7 @@ pub async fn git_path(root: &Path, name: &str) -> Result<PathBuf> {
     })
 }
 
-async fn has_head(root: &Path) -> Result<bool> {
+pub(crate) async fn has_head(root: &Path) -> Result<bool> {
     let status = Command::new("git")
         .args(["rev-parse", "--verify", "--quiet", "HEAD"])
         .current_dir(root)
@@ -830,6 +830,127 @@ pub async fn restore_worktree_path(root: &Path, path: &Path) -> Result<()> {
     Ok(())
 }
 
+pub async fn stash_paths(root: &Path, entries: &[ChangeEntry], message: &str) -> Result<()> {
+    if entries.is_empty() {
+        bail!("no files were selected");
+    }
+    if !has_head(root).await? {
+        bail!("stash requires an initial commit");
+    }
+    let paths = entries
+        .iter()
+        .map(|entry| entry.path.as_path())
+        .collect::<Vec<_>>();
+    let mut args = vec![
+        OsString::from("stash"),
+        OsString::from("push"),
+        OsString::from("--include-untracked"),
+        OsString::from("--message"),
+        OsString::from(message),
+    ];
+    append_paths(&mut args, &paths)?;
+    git_output(root, args).await?;
+
+    let original_paths = entries
+        .iter()
+        .filter_map(|entry| entry.original_path.as_deref())
+        .collect::<Vec<_>>();
+    if !original_paths.is_empty() {
+        let mut restore = vec![
+            OsString::from("restore"),
+            OsString::from("--source=HEAD"),
+            OsString::from("--staged"),
+            OsString::from("--worktree"),
+        ];
+        append_paths(&mut restore, &original_paths)?;
+        git_output(root, restore)
+            .await
+            .context("stash was created, but cleaning the original rename paths failed")?;
+    }
+    Ok(())
+}
+
+pub async fn discard_paths(root: &Path, entries: &[ChangeEntry]) -> Result<()> {
+    if entries.is_empty() {
+        bail!("no files were selected");
+    }
+    let head = has_head(root).await?;
+    let mut restore_paths = Vec::new();
+    let mut remove_from_index = Vec::new();
+    let mut clean_paths = Vec::new();
+    for entry in entries {
+        validate_path(&entry.path)?;
+        if let Some(original) = entry.original_path.as_deref() {
+            validate_path(original)?;
+            if head {
+                restore_paths.push(original);
+            }
+            if entry.index.is_some() {
+                remove_from_index.push(entry.path.as_path());
+            }
+            clean_paths.push(entry.path.as_path());
+        } else if head && path_exists_in_head(root, &entry.path).await? {
+            restore_paths.push(entry.path.as_path());
+        } else {
+            if entry.index.is_some() {
+                remove_from_index.push(entry.path.as_path());
+            }
+            clean_paths.push(entry.path.as_path());
+        }
+    }
+
+    if !restore_paths.is_empty() {
+        let mut args = vec![
+            OsString::from("restore"),
+            OsString::from("--source=HEAD"),
+            OsString::from("--staged"),
+            OsString::from("--worktree"),
+        ];
+        append_paths(&mut args, &restore_paths)?;
+        git_output(root, args).await?;
+    }
+    if !remove_from_index.is_empty() {
+        let mut args = if head {
+            vec![OsString::from("restore"), OsString::from("--staged")]
+        } else {
+            vec![
+                OsString::from("rm"),
+                OsString::from("--cached"),
+                OsString::from("--quiet"),
+            ]
+        };
+        append_paths(&mut args, &remove_from_index)?;
+        git_output(root, args).await?;
+    }
+    if !clean_paths.is_empty() {
+        let mut args = vec![
+            OsString::from("clean"),
+            OsString::from("-f"),
+            OsString::from("-d"),
+        ];
+        append_paths(&mut args, &clean_paths)?;
+        git_output(root, args).await?;
+    }
+    Ok(())
+}
+
+async fn path_exists_in_head(root: &Path, path: &Path) -> Result<bool> {
+    validate_path(path)?;
+    let mut spec = OsString::from("HEAD:");
+    spec.push(path.as_os_str());
+    let status = Command::new("git")
+        .args([OsString::from("cat-file"), OsString::from("-e"), spec])
+        .current_dir(root)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .status()
+        .await
+        .with_context(|| format!("failed to inspect HEAD path in {}", root.display()))?;
+    Ok(status.success())
+}
+
 pub async fn commit(root: &Path, spec: &CommitSpec) -> Result<String> {
     if spec.message.trim().is_empty() {
         bail!("commit message cannot be empty");
@@ -1146,9 +1267,10 @@ pub(crate) async fn validate_repository_action(
     validate_repository_action_values(action)?;
     match action {
         RepositoryAction::StashShow { selector }
-        | RepositoryAction::StashApply { selector }
-        | RepositoryAction::StashPop { selector }
-        | RepositoryAction::StashDrop { selector } => {
+        | RepositoryAction::StashApply { selector, .. }
+        | RepositoryAction::StashPop { selector, .. }
+        | RepositoryAction::StashDrop { selector }
+        | RepositoryAction::StashBranch { selector, .. } => {
             git_output(root, ["rev-parse", "--verify", selector.as_str()]).await?;
         }
         RepositoryAction::ConflictTakeOurs { path }
@@ -1199,9 +1321,13 @@ fn validate_repository_action_values(action: &RepositoryAction) -> Result<()> {
     let mut values = Vec::new();
     match action {
         RepositoryAction::StashShow { selector }
-        | RepositoryAction::StashApply { selector }
-        | RepositoryAction::StashPop { selector }
+        | RepositoryAction::StashApply { selector, .. }
+        | RepositoryAction::StashPop { selector, .. }
         | RepositoryAction::StashDrop { selector } => values.push(("stash", selector.as_str())),
+        RepositoryAction::StashBranch { name, selector } => {
+            values.push(("branch", name));
+            values.push(("stash", selector));
+        }
         RepositoryAction::BranchCreate { name, start } => {
             values.push(("branch", name));
             if let Some(start) = start {
@@ -1244,7 +1370,20 @@ fn validate_repository_action_values(action: &RepositoryAction) -> Result<()> {
             values.push(("branch", branch));
             values.push(("upstream", upstream));
         }
-        RepositoryAction::StashPush { .. }
+        RepositoryAction::StashPush {
+            include_untracked,
+            keep_index,
+            staged_only,
+            ..
+        } => {
+            if *staged_only && *include_untracked {
+                bail!("staged-only stash cannot include untracked files");
+            }
+            if *staged_only && *keep_index {
+                bail!("staged-only stash cannot keep the index");
+            }
+        }
+        RepositoryAction::StashClear
         | RepositoryAction::ConflictTakeOurs { .. }
         | RepositoryAction::ConflictTakeTheirs { .. }
         | RepositoryAction::ConflictMarkResolved { .. }
@@ -1272,26 +1411,57 @@ fn action_args(action: &RepositoryAction) -> Result<(Vec<OsString>, bool)> {
         RepositoryAction::StashPush {
             message,
             include_untracked,
+            keep_index,
+            staged_only,
         } => {
             args.extend(["stash", "push"].map(OsString::from));
             if *include_untracked {
                 args.push("--include-untracked".into());
             }
+            if *keep_index {
+                args.push("--keep-index".into());
+            }
+            if *staged_only {
+                args.push("--staged".into());
+            }
             if !message.is_empty() {
                 args.extend(["--message".into(), message.into()]);
             }
         }
-        RepositoryAction::StashApply { selector } => {
+        RepositoryAction::StashApply {
+            selector,
+            restore_index,
+        } => {
             args.extend(["stash", "apply"].map(OsString::from));
+            if *restore_index {
+                args.push("--index".into());
+            }
             args.push(selector.into());
         }
-        RepositoryAction::StashPop { selector } => {
+        RepositoryAction::StashPop {
+            selector,
+            restore_index,
+        } => {
             args.extend(["stash", "pop"].map(OsString::from));
+            if *restore_index {
+                args.push("--index".into());
+            }
             args.push(selector.into());
         }
         RepositoryAction::StashDrop { selector } => {
             args.extend(["stash", "drop"].map(OsString::from));
             args.push(selector.into());
+        }
+        RepositoryAction::StashBranch { name, selector } => {
+            args.extend([
+                "stash".into(),
+                "branch".into(),
+                name.into(),
+                selector.into(),
+            ]);
+        }
+        RepositoryAction::StashClear => {
+            args.extend(["stash", "clear"].map(OsString::from));
         }
         RepositoryAction::ConflictTakeOurs { path } => {
             args.extend(["checkout", "--ours", "--"].map(OsString::from));
@@ -1435,6 +1605,15 @@ fn path_args(prefix: &[&str], path: &Path) -> Vec<OsString> {
     args.push(OsString::from("--"));
     args.push(path.as_os_str().to_owned());
     args
+}
+
+fn append_paths(args: &mut Vec<OsString>, paths: &[&Path]) -> Result<()> {
+    args.push(OsString::from("--"));
+    for path in paths {
+        validate_path(path)?;
+        args.push(path.as_os_str().to_owned());
+    }
+    Ok(())
 }
 
 fn validate_path(path: &Path) -> Result<()> {
@@ -2167,6 +2346,8 @@ u UU N... 100644 100644 100644 100644 a b c conflict.txt\x00\
             &RepositoryAction::StashPush {
                 message: "saved".into(),
                 include_untracked: false,
+                keep_index: false,
+                staged_only: false,
             },
             false,
         )
@@ -2188,6 +2369,7 @@ u UU N... 100644 100644 100644 100644 a b c conflict.txt\x00\
             temp.path(),
             &RepositoryAction::StashApply {
                 selector: "stash@{0}".into(),
+                restore_index: false,
             },
             false,
         )
@@ -2213,6 +2395,8 @@ u UU N... 100644 100644 100644 100644 a b c conflict.txt\x00\
             &RepositoryAction::StashPush {
                 message: "pop".into(),
                 include_untracked: false,
+                keep_index: false,
+                staged_only: false,
             },
             false,
         )
@@ -2222,6 +2406,7 @@ u UU N... 100644 100644 100644 100644 a b c conflict.txt\x00\
             temp.path(),
             &RepositoryAction::StashPop {
                 selector: "stash@{0}".into(),
+                restore_index: false,
             },
             false,
         )
@@ -2569,6 +2754,205 @@ u UU N... 100644 100644 100644 100644 a b c conflict.txt\x00\
     }
 
     #[tokio::test]
+    async fn repository_actions_cover_advanced_stash_modes() {
+        let temp = tempdir().unwrap();
+        run_git(temp.path(), &["init", "-q", "-b", "main"]);
+        run_git(temp.path(), &["config", "user.name", "Test"]);
+        run_git(temp.path(), &["config", "user.email", "test@example.com"]);
+        commit_file(temp.path(), "staged.txt", "base staged\n", "base staged");
+        commit_file(
+            temp.path(),
+            "unstaged.txt",
+            "base unstaged\n",
+            "base unstaged",
+        );
+
+        fs::write(temp.path().join("staged.txt"), "saved staged\n").unwrap();
+        run_git(temp.path(), &["add", "staged.txt"]);
+        fs::write(temp.path().join("unstaged.txt"), "left unstaged\n").unwrap();
+        execute_repository_action(
+            temp.path(),
+            &RepositoryAction::StashPush {
+                message: "staged only".into(),
+                include_untracked: false,
+                keep_index: false,
+                staged_only: true,
+            },
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            fs::read_to_string(temp.path().join("staged.txt")).unwrap(),
+            "base staged\n"
+        );
+        assert_eq!(
+            fs::read_to_string(temp.path().join("unstaged.txt")).unwrap(),
+            "left unstaged\n"
+        );
+        assert!(run_git(temp.path(), &["diff", "--cached", "--name-only"]).is_empty());
+
+        execute_repository_action(
+            temp.path(),
+            &RepositoryAction::StashApply {
+                selector: "stash@{0}".into(),
+                restore_index: true,
+            },
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            run_git(temp.path(), &["diff", "--cached", "--name-only"]),
+            "staged.txt"
+        );
+        run_git(temp.path(), &["reset", "--hard", "-q", "HEAD"]);
+        execute_repository_action(
+            temp.path(),
+            &RepositoryAction::StashPop {
+                selector: "stash@{0}".into(),
+                restore_index: true,
+            },
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            run_git(temp.path(), &["diff", "--cached", "--name-only"]),
+            "staged.txt"
+        );
+        assert!(repository_snapshot(temp.path())
+            .await
+            .unwrap()
+            .stashes
+            .is_empty());
+        run_git(temp.path(), &["reset", "--hard", "-q", "HEAD"]);
+
+        fs::write(temp.path().join("staged.txt"), "kept index\n").unwrap();
+        run_git(temp.path(), &["add", "staged.txt"]);
+        fs::write(temp.path().join("staged.txt"), "stashed worktree\n").unwrap();
+        execute_repository_action(
+            temp.path(),
+            &RepositoryAction::StashPush {
+                message: "keep index".into(),
+                include_untracked: false,
+                keep_index: true,
+                staged_only: false,
+            },
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            run_git(temp.path(), &["diff", "--cached", "--name-only"]),
+            "staged.txt"
+        );
+        assert_eq!(
+            fs::read_to_string(temp.path().join("staged.txt")).unwrap(),
+            "kept index\n"
+        );
+        run_git(temp.path(), &["reset", "--hard", "-q", "HEAD"]);
+        execute_repository_action(
+            temp.path(),
+            &RepositoryAction::StashDrop {
+                selector: "stash@{0}".into(),
+            },
+            false,
+        )
+        .await
+        .unwrap();
+
+        fs::write(temp.path().join("unstaged.txt"), "branch stash\n").unwrap();
+        execute_repository_action(
+            temp.path(),
+            &RepositoryAction::StashPush {
+                message: "branch source".into(),
+                include_untracked: false,
+                keep_index: false,
+                staged_only: false,
+            },
+            false,
+        )
+        .await
+        .unwrap();
+        execute_repository_action(
+            temp.path(),
+            &RepositoryAction::StashBranch {
+                name: "from-stash".into(),
+                selector: "stash@{0}".into(),
+            },
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            run_git(temp.path(), &["branch", "--show-current"]),
+            "from-stash"
+        );
+        assert_eq!(
+            fs::read_to_string(temp.path().join("unstaged.txt")).unwrap(),
+            "branch stash\n"
+        );
+        assert!(repository_snapshot(temp.path())
+            .await
+            .unwrap()
+            .stashes
+            .is_empty());
+        run_git(temp.path(), &["reset", "--hard", "-q", "HEAD"]);
+
+        for (message, content) in [("one", "stash one\n"), ("two", "stash two\n")] {
+            fs::write(temp.path().join("unstaged.txt"), content).unwrap();
+            execute_repository_action(
+                temp.path(),
+                &RepositoryAction::StashPush {
+                    message: message.into(),
+                    include_untracked: false,
+                    keep_index: false,
+                    staged_only: false,
+                },
+                false,
+            )
+            .await
+            .unwrap();
+        }
+        assert_eq!(
+            repository_snapshot(temp.path())
+                .await
+                .unwrap()
+                .stashes
+                .len(),
+            2
+        );
+        execute_repository_action(temp.path(), &RepositoryAction::StashClear, false)
+            .await
+            .unwrap();
+        assert!(repository_snapshot(temp.path())
+            .await
+            .unwrap()
+            .stashes
+            .is_empty());
+
+        assert!(
+            validate_repository_action_values(&RepositoryAction::StashPush {
+                message: String::new(),
+                include_untracked: true,
+                keep_index: false,
+                staged_only: true,
+            })
+            .is_err()
+        );
+        assert!(
+            validate_repository_action_values(&RepositoryAction::StashPush {
+                message: String::new(),
+                include_untracked: false,
+                keep_index: true,
+                staged_only: true,
+            })
+            .is_err()
+        );
+    }
+
+    #[tokio::test]
     async fn repository_actions_cover_remote_round_trip_and_force_with_lease() {
         let root = tempdir().unwrap();
         let remote = root.path().join("remote.git");
@@ -2653,6 +3037,54 @@ u UU N... 100644 100644 100644 100644 a b c conflict.txt\x00\
         assert!(args.iter().any(|arg| arg == "--force-with-lease"));
         assert!(!args.iter().any(|arg| arg == "--force"));
         assert!(args.iter().any(|arg| arg == "main:main"));
+        execute_repository_action(&client, &push, false)
+            .await
+            .unwrap();
+        assert_eq!(
+            run_git(&remote, &["rev-parse", "refs/heads/main"]),
+            run_git(&client, &["rev-parse", "main"])
+        );
+
+        let peer = root.path().join("peer");
+        run_git(
+            root.path(),
+            &[
+                "clone",
+                "-q",
+                remote.to_str().unwrap(),
+                peer.to_str().unwrap(),
+            ],
+        );
+        run_git(&peer, &["config", "user.name", "Peer"]);
+        run_git(&peer, &["config", "user.email", "peer@example.com"]);
+        commit_file(&peer, "peer.txt", "peer\n", "peer advance");
+        run_git(&peer, &["push", "-q", "origin", "main"]);
+
+        run_git(&client, &["reset", "--hard", "-q", "HEAD~1"]);
+        commit_file(&client, "replacement.txt", "replacement\n", "replacement");
+        let normal_push = RepositoryAction::Push {
+            remote: "origin".into(),
+            branch: "main".into(),
+            set_upstream: false,
+            force_with_lease: false,
+        };
+        assert!(execute_repository_action(&client, &normal_push, false)
+            .await
+            .is_err());
+        assert!(execute_repository_action(&client, &push, false)
+            .await
+            .is_err());
+
+        execute_repository_action(
+            &client,
+            &RepositoryAction::Fetch {
+                remote: "origin".into(),
+                prune: false,
+            },
+            false,
+        )
+        .await
+        .unwrap();
         execute_repository_action(&client, &push, false)
             .await
             .unwrap();

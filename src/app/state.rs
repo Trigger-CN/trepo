@@ -12,11 +12,15 @@ use crate::domain::{
     CommitSpec, HunkSource, OperationKind, OperationOutcome, OperationSpec, OperationTarget,
     Project, ProjectId, ProjectSnapshot, RepoBatchAction, RepoBatchSpec, RepoProjectResult,
     RepoProjectState, RepositoryAction, RepositoryActionOutcome, RepositoryActionSpec,
-    RepositorySnapshot, RiskLevel, Workspace, WorkspaceKind, WorkspaceSummary,
+    RepositorySnapshot, RiskLevel, Workspace, WorkspaceGitAction, WorkspaceGitSpec, WorkspaceKind,
+    WorkspaceSummary,
 };
 use crate::services::operations::OperationRunner;
 use crate::services::repo_batch::{self, RepoBatchEvent, RepoBatchEventKind, RepoBatchHandle};
 use crate::services::scanner::{self, ScanResult};
+use crate::services::workspace_git::{
+    self, WorkspaceGitEvent, WorkspaceGitEventKind, WorkspaceGitPrepareResult,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Screen {
@@ -70,6 +74,8 @@ pub enum GraphActionChoice {
     StashApply,
     StashPop,
     StashDrop,
+    Push,
+    ForcePush,
 }
 
 impl GraphActionChoice {
@@ -93,6 +99,8 @@ impl GraphActionChoice {
             Self::StashApply => "Apply stash",
             Self::StashPop => "Pop stash",
             Self::StashDrop => "Drop stash",
+            Self::Push => "Push branch",
+            Self::ForcePush => "Force push with lease",
         }
     }
 }
@@ -166,6 +174,8 @@ impl GraphForm {
             C::StashCreate => A::StashPush {
                 message: self.text(0).unwrap_or_default(),
                 include_untracked: self.toggle(1)?,
+                keep_index: self.toggle(2)?,
+                staged_only: self.toggle(3)?,
             },
             C::CreateBranch => A::BranchCreate {
                 name: self.text(0)?,
@@ -182,6 +192,12 @@ impl GraphForm {
             C::DeleteBranch => A::BranchDelete {
                 name: self.text(0)?,
                 force: self.toggle(1)?,
+            },
+            C::Push | C::ForcePush => A::Push {
+                remote: self.text(0)?,
+                branch: self.text(1)?,
+                set_upstream: self.toggle(2)?,
+                force_with_lease: matches!(self.choice, C::ForcePush),
             },
             _ => anyhow::bail!("unsupported graph form action"),
         })
@@ -205,6 +221,8 @@ pub fn graph_actions(kind: GraphObjectKind) -> &'static [GraphActionChoice] {
         ],
         GraphObjectKind::LocalBranch => &[
             C::SwitchBranch,
+            C::Push,
+            C::ForcePush,
             C::Merge,
             C::Rebase,
             C::RenameBranch,
@@ -255,6 +273,14 @@ fn graph_form(choice: GraphActionChoice, object: GraphObject) -> Option<GraphFor
                 label: "Include untracked",
                 value: false,
             },
+            FormField::Toggle {
+                label: "Keep index",
+                value: false,
+            },
+            FormField::Toggle {
+                label: "Staged only",
+                value: false,
+            },
         ],
         C::CreateBranch => vec![
             FormField::Text {
@@ -296,6 +322,20 @@ fn graph_form(choice: GraphActionChoice, object: GraphObject) -> Option<GraphFor
                 value: false,
             },
         ],
+        C::Push | C::ForcePush => vec![
+            FormField::Text {
+                label: "Remote",
+                value: "origin".to_owned(),
+            },
+            FormField::Text {
+                label: "Branch",
+                value: object.name.clone(),
+            },
+            FormField::Toggle {
+                label: "Set upstream",
+                value: false,
+            },
+        ],
         _ => return None,
     };
     Some(GraphForm {
@@ -333,9 +373,11 @@ fn graph_action(choice: GraphActionChoice, object: &GraphObject) -> Option<Repos
         },
         C::StashApply => A::StashApply {
             selector: object.name.clone(),
+            restore_index: false,
         },
         C::StashPop => A::StashPop {
             selector: object.name.clone(),
+            restore_index: false,
         },
         C::StashDrop => A::StashDrop {
             selector: object.name.clone(),
@@ -619,6 +661,14 @@ pub struct OperationResult {
 }
 
 #[derive(Debug)]
+pub struct BatchPrepareResult {
+    pub project_id: ProjectId,
+    pub changes_generation: u64,
+    pub operation_generation: u64,
+    pub result: anyhow::Result<BatchOperationSpec>,
+}
+
+#[derive(Debug)]
 pub struct CommitResult {
     pub project_id: ProjectId,
     pub changes_generation: u64,
@@ -694,11 +744,14 @@ pub enum ChangesMode {
 }
 
 #[derive(Debug, Clone)]
-pub struct PendingOperation {
-    pub kind: OperationKind,
-    pub change: ChangeEntry,
-    pub expected_token: u64,
-    pub target: OperationTarget,
+pub enum PendingOperation {
+    Single {
+        kind: OperationKind,
+        change: ChangeEntry,
+        expected_token: u64,
+        target: OperationTarget,
+    },
+    Batch(BatchOperationSpec),
 }
 
 #[derive(Debug)]
@@ -832,6 +885,22 @@ pub struct RepoBatchState {
 }
 
 #[derive(Debug)]
+pub struct WorkspaceGitTask {
+    pub spec: WorkspaceGitSpec,
+    pub results: Vec<RepoProjectResult>,
+    pub running: bool,
+    pub generation: u64,
+}
+
+#[derive(Debug, Default)]
+pub struct WorkspaceGitState {
+    pub preparing: bool,
+    pub pending: Option<WorkspaceGitSpec>,
+    pub task: Option<WorkspaceGitTask>,
+    pub scroll: usize,
+    pub message: Option<(bool, String)>,
+}
+#[derive(Debug)]
 pub struct App {
     pub workspace: Workspace,
     pub projects: Vec<ProjectSnapshot>,
@@ -848,6 +917,7 @@ pub struct App {
     pub repository: Option<RepositoryState>,
     pub selected_projects: HashSet<ProjectId>,
     pub repo_batch: RepoBatchState,
+    pub workspace_git: WorkspaceGitState,
     pub should_quit: bool,
     scan_tx: mpsc::UnboundedSender<ScanResult>,
     pub scan_rx: mpsc::UnboundedReceiver<ScanResult>,
@@ -859,6 +929,8 @@ pub struct App {
     pub preview_rx: mpsc::UnboundedReceiver<PreviewResult>,
     pub operation_tx: mpsc::UnboundedSender<OperationResult>,
     pub operation_rx: mpsc::UnboundedReceiver<OperationResult>,
+    batch_prepare_tx: mpsc::UnboundedSender<BatchPrepareResult>,
+    pub batch_prepare_rx: mpsc::UnboundedReceiver<BatchPrepareResult>,
     pub commit_tx: mpsc::UnboundedSender<CommitResult>,
     pub commit_rx: mpsc::UnboundedReceiver<CommitResult>,
     graph_commit_tx: mpsc::UnboundedSender<GraphCommitResult>,
@@ -872,6 +944,11 @@ pub struct App {
     pub repo_batch_rx: mpsc::UnboundedReceiver<RepoBatchEvent>,
     repo_batch_handle: Option<RepoBatchHandle>,
     repo_batch_generation: u64,
+    workspace_git_prepare_tx: mpsc::UnboundedSender<WorkspaceGitPrepareResult>,
+    pub workspace_git_prepare_rx: mpsc::UnboundedReceiver<WorkspaceGitPrepareResult>,
+    workspace_git_tx: mpsc::UnboundedSender<WorkspaceGitEvent>,
+    pub workspace_git_rx: mpsc::UnboundedReceiver<WorkspaceGitEvent>,
+    workspace_git_generation: u64,
     operation_runner: OperationRunner,
     concurrency: usize,
 }
@@ -881,12 +958,15 @@ impl App {
         let (graph_tx, graph_rx) = mpsc::unbounded_channel();
         let (changes_tx, changes_rx) = mpsc::unbounded_channel();
         let (operation_tx, operation_rx) = mpsc::unbounded_channel();
+        let (batch_prepare_tx, batch_prepare_rx) = mpsc::unbounded_channel();
         let (preview_tx, preview_rx) = mpsc::unbounded_channel();
         let (commit_tx, commit_rx) = mpsc::unbounded_channel();
         let (graph_commit_tx, graph_commit_rx) = mpsc::unbounded_channel();
         let (repository_tx, repository_rx) = mpsc::unbounded_channel();
         let (repository_action_tx, repository_action_rx) = mpsc::unbounded_channel();
         let (repo_batch_tx, repo_batch_rx) = mpsc::unbounded_channel();
+        let (workspace_git_prepare_tx, workspace_git_prepare_rx) = mpsc::unbounded_channel();
+        let (workspace_git_tx, workspace_git_rx) = mpsc::unbounded_channel();
         let projects = workspace
             .projects
             .iter()
@@ -909,6 +989,7 @@ impl App {
             repository: None,
             selected_projects: HashSet::new(),
             repo_batch: RepoBatchState::default(),
+            workspace_git: WorkspaceGitState::default(),
             should_quit: false,
             scan_tx,
             scan_rx,
@@ -920,6 +1001,8 @@ impl App {
             preview_rx,
             operation_tx,
             operation_rx,
+            batch_prepare_tx,
+            batch_prepare_rx,
             commit_tx,
             commit_rx,
             graph_commit_tx,
@@ -932,6 +1015,11 @@ impl App {
             repo_batch_rx,
             repo_batch_handle: None,
             repo_batch_generation: 0,
+            workspace_git_prepare_tx,
+            workspace_git_prepare_rx,
+            workspace_git_tx,
+            workspace_git_rx,
+            workspace_git_generation: 0,
             operation_runner: OperationRunner,
             concurrency: concurrency.max(1),
             repository_intent: None,
@@ -1075,6 +1163,150 @@ impl App {
 
     pub fn selected_project_count(&self) -> usize {
         self.selected_projects.len()
+    }
+
+    pub fn begin_workspace_git(&mut self, action: WorkspaceGitAction) {
+        if self.workspace_git.preparing
+            || self
+                .workspace_git
+                .task
+                .as_ref()
+                .is_some_and(|task| task.running)
+        {
+            self.workspace_git.message =
+                Some((true, "A Workspace Git task is already active".into()));
+            return;
+        }
+        let targets = self
+            .workspace
+            .projects
+            .iter()
+            .filter(|project| self.selected_projects.contains(&project.id))
+            .cloned()
+            .collect::<Vec<_>>();
+        if targets.is_empty() {
+            self.workspace_git.message =
+                Some((true, "Select at least one repository with Space".into()));
+            return;
+        }
+        self.workspace_git_generation = self.workspace_git_generation.wrapping_add(1);
+        let generation = self.workspace_git_generation;
+        self.workspace_git.preparing = true;
+        self.workspace_git.pending = None;
+        self.workspace_git.task = None;
+        self.workspace_git.message = None;
+        workspace_git::spawn_prepare(
+            action,
+            targets,
+            generation,
+            self.workspace_git_prepare_tx.clone(),
+        );
+    }
+
+    pub fn apply_workspace_git_prepare(&mut self, result: WorkspaceGitPrepareResult) {
+        if result.generation != self.workspace_git_generation || !self.workspace_git.preparing {
+            return;
+        }
+        self.workspace_git.preparing = false;
+        match result.result {
+            Ok(spec) => self.workspace_git.pending = Some(spec),
+            Err(error) => self.workspace_git.message = Some((true, error.to_string())),
+        }
+    }
+
+    pub fn confirm_workspace_git(&mut self, confirmed: bool) {
+        let pending = self.workspace_git.pending.take();
+        if !confirmed {
+            return;
+        }
+        let Some(spec) = pending else {
+            return;
+        };
+        let generation = self.workspace_git_generation;
+        let results = spec
+            .targets
+            .iter()
+            .map(|target| RepoProjectResult {
+                project: target.project.clone(),
+                state: RepoProjectState::Pending,
+                message: "Waiting for full-batch preflight".to_owned(),
+            })
+            .collect();
+        self.workspace_git.task = Some(WorkspaceGitTask {
+            spec: spec.clone(),
+            results,
+            running: true,
+            generation,
+        });
+        self.workspace_git.scroll = 0;
+        workspace_git::spawn_execute(
+            self.workspace.root.clone(),
+            spec,
+            generation,
+            self.workspace_git_tx.clone(),
+        );
+    }
+
+    pub fn apply_workspace_git(&mut self, event: WorkspaceGitEvent) {
+        let Some(task) = self.workspace_git.task.as_mut() else {
+            return;
+        };
+        if event.generation != task.generation {
+            return;
+        }
+        match event.kind {
+            WorkspaceGitEventKind::Started { project } => {
+                if let Some(result) = task
+                    .results
+                    .iter_mut()
+                    .find(|result| result.project.id == project.id)
+                {
+                    result.state = RepoProjectState::Running;
+                    result.message = "Running".to_owned();
+                }
+            }
+            WorkspaceGitEventKind::Finished {
+                project,
+                state,
+                message,
+            } => {
+                if let Some(result) = task
+                    .results
+                    .iter_mut()
+                    .find(|result| result.project.id == project.id)
+                {
+                    result.state = state;
+                    result.message = message;
+                }
+            }
+            WorkspaceGitEventKind::Complete => {
+                task.running = false;
+                self.refresh();
+            }
+        }
+    }
+
+    pub fn close_workspace_git(&mut self) {
+        if self
+            .workspace_git
+            .task
+            .as_ref()
+            .is_some_and(|task| task.running)
+        {
+            return;
+        }
+        self.workspace_git = WorkspaceGitState::default();
+    }
+
+    pub fn scroll_workspace_git(&mut self, delta: isize) {
+        self.workspace_git.scroll = self.workspace_git.scroll.saturating_add_signed(delta);
+    }
+
+    pub fn workspace_git_overlay_active(&self) -> bool {
+        self.workspace_git.preparing
+            || self.workspace_git.pending.is_some()
+            || self.workspace_git.task.is_some()
+            || self.workspace_git.message.is_some()
     }
 
     pub fn open_repo_batch_menu(&mut self) {
@@ -2249,13 +2481,11 @@ impl App {
             return;
         }
         if changes.mode == ChangesMode::File && !changes.selected_files.is_empty() {
-            if kind == OperationKind::RestoreWorktree {
-                changes.message = Some((
-                    true,
-                    "Batch discard is not supported; clear selection and discard one file".into(),
-                ));
-                return;
-            }
+            let kind = if kind == OperationKind::RestoreWorktree {
+                OperationKind::Discard
+            } else {
+                kind
+            };
             let selected = changes
                 .entries
                 .iter()
@@ -2265,6 +2495,8 @@ impl App {
             let inapplicable = selected.iter().find(|entry| match kind {
                 OperationKind::Stage => !entry.can_stage(),
                 OperationKind::Unstage => !entry.can_unstage(),
+                OperationKind::Stash => entry.conflicted,
+                OperationKind::Discard => false,
                 OperationKind::RestoreWorktree => true,
             });
             if let Some(entry) = inapplicable {
@@ -2278,7 +2510,15 @@ impl App {
                 ));
                 return;
             }
-            self.spawn_batch_operation(kind, selected);
+            if matches!(kind, OperationKind::Stash | OperationKind::Discard) {
+                self.prepare_batch_confirmation(kind, selected);
+            } else {
+                self.spawn_batch_operation(kind, selected);
+            }
+            return;
+        }
+        if matches!(kind, OperationKind::Stash | OperationKind::Discard) {
+            changes.message = Some((true, "Select one or more files first".to_owned()));
             return;
         }
         let Some(change) = changes.entries.get(changes.selected).cloned() else {
@@ -2298,6 +2538,7 @@ impl App {
                     OperationKind::Stage => change.can_stage(),
                     OperationKind::Unstage => change.can_unstage(),
                     OperationKind::RestoreWorktree => change.can_restore(),
+                    OperationKind::Stash | OperationKind::Discard => false,
                 };
                 (OperationTarget::File, applicable, "file")
             }
@@ -2338,7 +2579,7 @@ impl App {
             ));
             return;
         }
-        let pending = PendingOperation {
+        let pending = PendingOperation::Single {
             kind,
             target,
             change,
@@ -2357,8 +2598,12 @@ impl App {
             .as_mut()
             .and_then(|changes| changes.confirmation.take());
         if accepted {
-            if let Some(pending) = pending {
-                self.spawn_operation(pending);
+            match pending {
+                Some(single @ PendingOperation::Single { .. }) => {
+                    self.spawn_operation(single);
+                }
+                Some(PendingOperation::Batch(spec)) => self.spawn_prepared_batch(spec),
+                None => {}
             }
         }
     }
@@ -2515,6 +2760,92 @@ impl App {
             }
         }
     }
+    fn prepare_batch_confirmation(&mut self, kind: OperationKind, entries: Vec<ChangeEntry>) {
+        let Some(changes) = self.changes.as_mut() else {
+            return;
+        };
+        changes.operation_running = true;
+        changes.message = None;
+        changes.operation_generation = changes.operation_generation.wrapping_add(1);
+        let operation_generation = changes.operation_generation;
+        let changes_generation = changes.generation;
+        let project = changes.project.clone();
+        let project_id = project.id.clone();
+        let sender = self.batch_prepare_tx.clone();
+        tokio::spawn(async move {
+            let mut items = Vec::with_capacity(entries.len());
+            let mut error = None;
+            for change in entries {
+                match git::change_token(&project.path, &change).await {
+                    Ok(expected_token) => items.push(BatchOperationItem {
+                        change,
+                        expected_token,
+                    }),
+                    Err(value) => {
+                        error = Some(value);
+                        break;
+                    }
+                }
+            }
+            let result = error.map_or_else(
+                || {
+                    Ok(BatchOperationSpec {
+                        project,
+                        items,
+                        kind,
+                    })
+                },
+                Err,
+            );
+            let _ = sender.send(BatchPrepareResult {
+                project_id,
+                changes_generation,
+                operation_generation,
+                result,
+            });
+        });
+    }
+
+    pub fn apply_batch_prepare(&mut self, result: BatchPrepareResult) {
+        let Some(changes) = self.changes.as_mut() else {
+            return;
+        };
+        if changes.project.id != result.project_id
+            || changes.operation_generation != result.operation_generation
+            || changes.generation != result.changes_generation
+        {
+            return;
+        }
+        changes.operation_running = false;
+        match result.result {
+            Ok(spec) => changes.confirmation = Some(PendingOperation::Batch(spec)),
+            Err(error) => changes.message = Some((true, error.to_string())),
+        }
+    }
+
+    fn spawn_prepared_batch(&mut self, spec: BatchOperationSpec) {
+        let Some(changes) = self.changes.as_mut() else {
+            return;
+        };
+        changes.operation_running = true;
+        changes.message = None;
+        changes.operation_generation = changes.operation_generation.wrapping_add(1);
+        let operation_generation = changes.operation_generation;
+        let changes_generation = changes.generation;
+        let project_id = spec.project.id.clone();
+        let sender = self.operation_tx.clone();
+        let runner = self.operation_runner.clone();
+        tokio::spawn(async move {
+            let result = runner.execute_batch(spec).await;
+            let _ = sender.send(OperationResult {
+                project_id,
+                operation_generation,
+                changes_generation,
+                result,
+            });
+        });
+    }
+
     fn spawn_batch_operation(&mut self, kind: OperationKind, entries: Vec<ChangeEntry>) {
         let Some(changes) = self.changes.as_mut() else {
             return;
@@ -2565,6 +2896,15 @@ impl App {
     }
 
     fn spawn_operation(&mut self, pending: PendingOperation) {
+        let PendingOperation::Single {
+            kind,
+            change,
+            expected_token,
+            target,
+        } = pending
+        else {
+            return;
+        };
         let Some(changes) = self.changes.as_mut() else {
             return;
         };
@@ -2581,10 +2921,10 @@ impl App {
             let result = runner
                 .execute(OperationSpec {
                     project,
-                    change: pending.change,
-                    kind: pending.kind,
-                    target: pending.target,
-                    expected_token: pending.expected_token,
+                    change,
+                    kind,
+                    target,
+                    expected_token,
                 })
                 .await;
             let _ = sender.send(OperationResult {
@@ -3344,13 +3684,16 @@ mod tests {
         assert_eq!(changes.preview_scroll, 2);
         app.begin_operation(OperationKind::RestoreWorktree);
         let pending = app.changes.as_ref().unwrap().confirmation.as_ref().unwrap();
-        assert_eq!(
-            pending.target,
-            OperationTarget::Hunk {
-                source: HunkSource::Worktree,
-                fingerprint: 22,
+        assert!(matches!(
+            pending,
+            PendingOperation::Single {
+                target: OperationTarget::Hunk {
+                    source: HunkSource::Worktree,
+                    fingerprint: 22,
+                },
+                ..
             }
-        );
+        ));
         app.confirm_operation(false);
         app.changes.as_mut().unwrap().operation_running = true;
         app.changes.as_mut().unwrap().operation_generation = 9;
@@ -3597,10 +3940,62 @@ mod tests {
         assert!(
             graph_actions(GraphObjectKind::LocalBranch).contains(&GraphActionChoice::DeleteBranch)
         );
+        assert!(graph_actions(GraphObjectKind::LocalBranch).contains(&GraphActionChoice::Push));
+        assert!(graph_actions(GraphObjectKind::LocalBranch).contains(&GraphActionChoice::ForcePush));
         assert!(!graph_actions(GraphObjectKind::RemoteBranch)
             .contains(&GraphActionChoice::RenameBranch));
         assert!(!graph_actions(GraphObjectKind::RemoteBranch)
             .contains(&GraphActionChoice::DeleteBranch));
+        assert!(!graph_actions(GraphObjectKind::RemoteBranch).contains(&GraphActionChoice::Push));
+        assert!(
+            !graph_actions(GraphObjectKind::RemoteBranch).contains(&GraphActionChoice::ForcePush)
+        );
+    }
+
+    #[test]
+    fn graph_forms_map_push_and_stash_options_to_structured_actions() {
+        let branch = GraphObject {
+            kind: GraphObjectKind::LocalBranch,
+            name: "topic".into(),
+            oid: "aaaaaaaa".into(),
+        };
+        for (choice, force_with_lease) in [
+            (GraphActionChoice::Push, false),
+            (GraphActionChoice::ForcePush, true),
+        ] {
+            let mut form = graph_form(choice, branch.clone()).unwrap();
+            if let FormField::Toggle { value, .. } = &mut form.fields[2] {
+                *value = true;
+            }
+            assert!(matches!(
+                form.action().unwrap(),
+                RepositoryAction::Push {
+                    ref remote,
+                    ref branch,
+                    set_upstream: true,
+                    force_with_lease: force,
+                } if remote == "origin" && branch == "topic" && force == force_with_lease
+            ));
+        }
+
+        let mut stash = graph_form(GraphActionChoice::StashCreate, branch).unwrap();
+        if let FormField::Text { value, .. } = &mut stash.fields[0] {
+            *value = "save work".into();
+        }
+        for field in stash.fields.iter_mut().skip(1) {
+            if let FormField::Toggle { value, .. } = field {
+                *value = true;
+            }
+        }
+        assert!(matches!(
+            stash.action().unwrap(),
+            RepositoryAction::StashPush {
+                ref message,
+                include_untracked: true,
+                keep_index: true,
+                staged_only: true,
+            } if message == "save work"
+        ));
     }
 
     #[test]
@@ -3900,6 +4295,66 @@ mod tests {
         assert_eq!(
             task.workspace_result.as_ref().unwrap().0,
             RepoProjectState::Pending
+        );
+    }
+
+    #[test]
+    fn workspace_git_events_are_generation_scoped() {
+        let alpha = project("alpha");
+        let workspace = Workspace {
+            root: PathBuf::from("/tmp"),
+            kind: WorkspaceKind::Git,
+            projects: vec![alpha.clone()],
+        };
+        let mut app = App::new(workspace, 1);
+        let spec = WorkspaceGitSpec {
+            action: WorkspaceGitAction::Discard,
+            targets: Vec::new(),
+        };
+        app.workspace_git_generation = 4;
+        app.workspace_git.task = Some(WorkspaceGitTask {
+            spec,
+            results: vec![RepoProjectResult {
+                project: alpha.clone(),
+                state: RepoProjectState::Pending,
+                message: String::new(),
+            }],
+            running: true,
+            generation: 4,
+        });
+        app.apply_workspace_git(WorkspaceGitEvent {
+            generation: 3,
+            kind: WorkspaceGitEventKind::Finished {
+                project: alpha.clone(),
+                state: RepoProjectState::Failed,
+                message: "stale".into(),
+            },
+        });
+        assert_eq!(
+            app.workspace_git.task.as_ref().unwrap().results[0].state,
+            RepoProjectState::Pending
+        );
+        app.apply_workspace_git(WorkspaceGitEvent {
+            generation: 4,
+            kind: WorkspaceGitEventKind::Started {
+                project: alpha.clone(),
+            },
+        });
+        assert_eq!(
+            app.workspace_git.task.as_ref().unwrap().results[0].state,
+            RepoProjectState::Running
+        );
+        app.apply_workspace_git(WorkspaceGitEvent {
+            generation: 4,
+            kind: WorkspaceGitEventKind::Finished {
+                project: alpha,
+                state: RepoProjectState::Succeeded,
+                message: "done".into(),
+            },
+        });
+        assert_eq!(
+            app.workspace_git.task.as_ref().unwrap().results[0].state,
+            RepoProjectState::Succeeded
         );
     }
 }

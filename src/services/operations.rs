@@ -52,6 +52,9 @@ impl OperationRunner {
                     OperationKind::RestoreWorktree => {
                         git::restore_worktree_path(root, &current.path).await?
                     }
+                    OperationKind::Stash | OperationKind::Discard => {
+                        bail!("{} requires a file batch", spec.kind.label())
+                    }
                 }
                 ""
             }
@@ -115,7 +118,7 @@ impl OperationRunner {
             bail!("no files were selected");
         }
         if spec.kind == OperationKind::RestoreWorktree {
-            bail!("batch discard is not supported");
+            bail!("worktree-scope discard is not a file batch operation");
         }
         let workspace_lock = workspace_lock_for_project(&spec.project.path);
         let _workspace_guard = match &workspace_lock {
@@ -147,12 +150,21 @@ impl OperationRunner {
             validated.push(entry.clone());
         }
 
-        for entry in &validated {
-            match spec.kind {
-                OperationKind::Stage => git::stage_path(root, &entry.path).await?,
-                OperationKind::Unstage => git::unstage_path(root, &entry.path).await?,
-                OperationKind::RestoreWorktree => unreachable!(),
+        match spec.kind {
+            OperationKind::Stash => {
+                git::stash_paths(root, &validated, "repo-tui selected files").await?
             }
+            OperationKind::Discard => git::discard_paths(root, &validated).await?,
+            OperationKind::Stage | OperationKind::Unstage => {
+                for entry in &validated {
+                    match spec.kind {
+                        OperationKind::Stage => git::stage_path(root, &entry.path).await?,
+                        OperationKind::Unstage => git::unstage_path(root, &entry.path).await?,
+                        _ => unreachable!(),
+                    }
+                }
+            }
+            OperationKind::RestoreWorktree => unreachable!(),
         }
         let count = validated.len();
         Ok(OperationOutcome {
@@ -253,6 +265,8 @@ fn ensure_applicable(kind: OperationKind, change: &crate::domain::ChangeEntry) -
         OperationKind::Stage => change.can_stage(),
         OperationKind::Unstage => change.can_unstage(),
         OperationKind::RestoreWorktree => change.can_restore(),
+        OperationKind::Stash => !change.conflicted,
+        OperationKind::Discard => true,
     };
     if !applicable {
         bail!(
@@ -264,7 +278,7 @@ fn ensure_applicable(kind: OperationKind, change: &crate::domain::ChangeEntry) -
     Ok(())
 }
 
-fn project_lock(path: PathBuf) -> Arc<Mutex<()>> {
+pub(crate) fn project_lock(path: PathBuf) -> Arc<Mutex<()>> {
     static LOCKS: OnceLock<StdMutex<HashMap<PathBuf, Arc<Mutex<()>>>>> = OnceLock::new();
     let locks = LOCKS.get_or_init(|| StdMutex::new(HashMap::new()));
     let mut locks = locks
@@ -479,6 +493,229 @@ mod tests {
             .unwrap();
         let current = git::changes(temp.path()).await.unwrap();
         assert_eq!(current.iter().filter(|entry| entry.untracked).count(), 2);
+    }
+
+    #[tokio::test]
+    async fn stashes_selected_mixed_changes_and_preserves_unselected_paths() {
+        let temp = tempdir().unwrap();
+        initialize(temp.path());
+        fs::write(temp.path().join("tracked.txt"), "staged\n").unwrap();
+        run_git(temp.path(), &["add", "tracked.txt"]);
+        fs::write(temp.path().join("tracked.txt"), "worktree\n").unwrap();
+        fs::write(temp.path().join("selected.txt"), "selected\n").unwrap();
+        fs::write(temp.path().join("other.txt"), "other\n").unwrap();
+        let entries = git::changes(temp.path()).await.unwrap();
+        let mut items = Vec::new();
+        for change in entries
+            .into_iter()
+            .filter(|entry| entry.path != Path::new("other.txt"))
+        {
+            let expected_token = git::change_token(temp.path(), &change).await.unwrap();
+            items.push(crate::domain::BatchOperationItem {
+                change,
+                expected_token,
+            });
+        }
+        let outcome = OperationRunner
+            .execute_batch(BatchOperationSpec {
+                project: project(temp.path()),
+                items,
+                kind: OperationKind::Stash,
+            })
+            .await
+            .unwrap();
+        assert_eq!(outcome.message, "Stash 2 files");
+        let current = git::changes(temp.path()).await.unwrap();
+        assert_eq!(current.len(), 1);
+        assert_eq!(current[0].path, Path::new("other.txt"));
+        assert_eq!(
+            git_text(
+                temp.path(),
+                &[
+                    "stash",
+                    "show",
+                    "--name-only",
+                    "--include-untracked",
+                    "stash@{0}",
+                ],
+            ),
+            "selected.txt\ntracked.txt\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn stashes_staged_rename_and_restores_it_from_stash() {
+        let temp = tempdir().unwrap();
+        initialize(temp.path());
+        fs::write(temp.path().join("before.txt"), "renamed content\n").unwrap();
+        run_git(temp.path(), &["add", "before.txt"]);
+        run_git(
+            temp.path(),
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.com",
+                "commit",
+                "-q",
+                "-m",
+                "add rename source",
+            ],
+        );
+        run_git(temp.path(), &["mv", "before.txt", "after.txt"]);
+        let change = git::changes(temp.path())
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|entry| entry.path == Path::new("after.txt"))
+            .unwrap();
+        assert_eq!(
+            change.original_path.as_deref(),
+            Some(Path::new("before.txt"))
+        );
+        let expected_token = git::change_token(temp.path(), &change).await.unwrap();
+        OperationRunner
+            .execute_batch(BatchOperationSpec {
+                project: project(temp.path()),
+                items: vec![crate::domain::BatchOperationItem {
+                    change,
+                    expected_token,
+                }],
+                kind: OperationKind::Stash,
+            })
+            .await
+            .unwrap();
+        assert!(git::changes(temp.path()).await.unwrap().is_empty());
+
+        run_git(temp.path(), &["stash", "apply", "--index", "stash@{0}"]);
+        let restored = git::changes(temp.path()).await.unwrap();
+        assert_eq!(restored.len(), 1);
+        assert_eq!(restored[0].path, Path::new("after.txt"));
+        assert_eq!(
+            restored[0].original_path.as_deref(),
+            Some(Path::new("before.txt"))
+        );
+    }
+
+    #[tokio::test]
+    async fn discards_selected_tracked_added_untracked_and_rename_changes() {
+        let temp = tempdir().unwrap();
+        initialize(temp.path());
+        fs::write(temp.path().join("rename.txt"), "rename\n").unwrap();
+        fs::write(temp.path().join("keep.txt"), "keep\n").unwrap();
+        run_git(temp.path(), &["add", "."]);
+        run_git(
+            temp.path(),
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.com",
+                "commit",
+                "-q",
+                "-m",
+                "second",
+            ],
+        );
+        fs::write(temp.path().join("tracked.txt"), "changed\n").unwrap();
+        run_git(temp.path(), &["add", "tracked.txt"]);
+        fs::write(temp.path().join("added.txt"), "added\n").unwrap();
+        run_git(temp.path(), &["add", "added.txt"]);
+        fs::write(temp.path().join("loose.txt"), "loose\n").unwrap();
+        fs::write(temp.path().join("keep.txt"), "preserved\n").unwrap();
+        run_git(temp.path(), &["mv", "rename.txt", "renamed.txt"]);
+        let entries = git::changes(temp.path()).await.unwrap();
+        let mut items = Vec::new();
+        for change in entries
+            .into_iter()
+            .filter(|entry| entry.path != Path::new("keep.txt"))
+        {
+            let expected_token = git::change_token(temp.path(), &change).await.unwrap();
+            items.push(crate::domain::BatchOperationItem {
+                change,
+                expected_token,
+            });
+        }
+        OperationRunner
+            .execute_batch(BatchOperationSpec {
+                project: project(temp.path()),
+                items,
+                kind: OperationKind::Discard,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            fs::read_to_string(temp.path().join("tracked.txt")).unwrap(),
+            "base\n"
+        );
+        assert!(temp.path().join("rename.txt").is_file());
+        assert!(!temp.path().join("renamed.txt").exists());
+        assert!(!temp.path().join("added.txt").exists());
+        assert!(!temp.path().join("loose.txt").exists());
+        let current = git::changes(temp.path()).await.unwrap();
+        assert_eq!(current.len(), 1);
+        assert_eq!(current[0].path, Path::new("keep.txt"));
+    }
+
+    #[tokio::test]
+    async fn discard_batch_preflight_is_zero_write_when_one_token_is_stale() {
+        let temp = tempdir().unwrap();
+        initialize(temp.path());
+        fs::write(temp.path().join("first.txt"), "first\n").unwrap();
+        fs::write(temp.path().join("second.txt"), "second\n").unwrap();
+        let entries = git::changes(temp.path()).await.unwrap();
+        let mut items = Vec::new();
+        for change in entries {
+            let expected_token = git::change_token(temp.path(), &change).await.unwrap();
+            items.push(crate::domain::BatchOperationItem {
+                change,
+                expected_token,
+            });
+        }
+        fs::write(temp.path().join("second.txt"), "stale\n").unwrap();
+        let error = OperationRunner
+            .execute_batch(BatchOperationSpec {
+                project: project(temp.path()),
+                items,
+                kind: OperationKind::Discard,
+            })
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("changed after preview"));
+        assert!(temp.path().join("first.txt").is_file());
+        assert_eq!(
+            fs::read_to_string(temp.path().join("second.txt")).unwrap(),
+            "stale\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn discards_staged_and_untracked_files_on_unborn_branch() {
+        let temp = tempdir().unwrap();
+        run_git(temp.path(), &["init", "-q", "-b", "main"]);
+        fs::write(temp.path().join("staged.txt"), "staged\n").unwrap();
+        fs::write(temp.path().join("loose.txt"), "loose\n").unwrap();
+        run_git(temp.path(), &["add", "staged.txt"]);
+        let entries = git::changes(temp.path()).await.unwrap();
+        let mut items = Vec::new();
+        for change in entries {
+            let expected_token = git::change_token(temp.path(), &change).await.unwrap();
+            items.push(crate::domain::BatchOperationItem {
+                change,
+                expected_token,
+            });
+        }
+        OperationRunner
+            .execute_batch(BatchOperationSpec {
+                project: project(temp.path()),
+                items,
+                kind: OperationKind::Discard,
+            })
+            .await
+            .unwrap();
+        assert!(git::changes(temp.path()).await.unwrap().is_empty());
+        assert!(!temp.path().join("staged.txt").exists());
+        assert!(!temp.path().join("loose.txt").exists());
     }
 
     #[tokio::test]
