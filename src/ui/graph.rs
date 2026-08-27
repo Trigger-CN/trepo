@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -9,7 +8,7 @@ use ratatui::Frame;
 
 use crate::app::repository::{action_preview, FormField};
 use crate::app::state::{graph_actions, graph_object_label, App, GraphState};
-use crate::domain::{Commit, CommitRef, CommitRefKind, RiskLevel};
+use crate::domain::{CommitRef, CommitRefKind, RiskLevel};
 
 pub fn render(frame: &mut Frame, app: &App) {
     let area = frame.area();
@@ -308,6 +307,56 @@ fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
         height.max(1),
     )
 }
+
+#[derive(Debug, Clone, Copy)]
+struct CommitTableLayout {
+    graph_width: u16,
+    refs_width: u16,
+    show_oid: bool,
+    show_date: bool,
+    show_author: bool,
+    show_age: bool,
+}
+
+fn commit_table_layout(width: u16, desired_graph_width: u16) -> CommitTableLayout {
+    let show_oid = width >= 72;
+    let show_date = width >= 88;
+    let show_author = width >= 112;
+    let show_age = width >= 130;
+    let refs_width = if width >= 88 {
+        20
+    } else if width >= 72 {
+        18
+    } else {
+        16
+    };
+    let column_count = 4
+        + usize::from(show_oid)
+        + usize::from(show_date)
+        + usize::from(show_author)
+        + usize::from(show_age);
+    let fixed_width = 2u16
+        .saturating_add(18)
+        .saturating_add(refs_width)
+        .saturating_add(if show_oid { 9 } else { 0 })
+        .saturating_add(if show_date { 10 } else { 0 })
+        .saturating_add(if show_author { 10 } else { 0 })
+        .saturating_add(if show_age { 5 } else { 0 })
+        .saturating_add(column_count.saturating_sub(1) as u16)
+        .saturating_add(2);
+    let graph_width = desired_graph_width
+        .max(7)
+        .min(width.saturating_sub(fixed_width).clamp(7, 24));
+    CommitTableLayout {
+        graph_width,
+        refs_width,
+        show_oid,
+        show_date,
+        show_author,
+        show_age,
+    }
+}
+
 fn render_commits(frame: &mut Frame, graph: &crate::app::state::GraphState, area: Rect) {
     if let Some(error) = &graph.error {
         frame.render_widget(
@@ -331,14 +380,14 @@ fn render_commits(frame: &mut Frame, graph: &crate::app::state::GraphState, area
         .unwrap_or(0);
     let visible = area.height.saturating_sub(3) as usize;
     let start = viewport_start(selected_visible, visible, indices.len());
-    let topology = topology_rows(&graph.commits);
-    let graph_width = topology
+    let topology = super::graph_layout::topology_rows(&graph.commits, 10);
+    let desired_graph_width = topology
         .iter()
-        .map(|row| row.cells.len().saturating_mul(2))
+        .map(|row| row.cells.len().saturating_mul(2) + if row.hidden_lanes > 0 { 3 } else { 0 })
         .max()
         .unwrap_or(2)
-        .max(7)
-        .min(area.width.saturating_sub(59).max(7) as usize) as u16;
+        .max(7) as u16;
+    let table_layout = commit_table_layout(area.width, desired_graph_width);
     let rows = indices
         .iter()
         .copied()
@@ -362,71 +411,90 @@ fn render_commits(frame: &mut Frame, graph: &crate::app::state::GraphState, area
                     .fg(Color::White)
                     .add_modifier(Modifier::BOLD)
             };
-            Some(
-                Row::new(vec![
-                    Cell::from(Line::styled(
-                        if index == graph.selected { ">" } else { " " },
-                        Style::default()
-                            .fg(Color::Cyan)
-                            .add_modifier(Modifier::BOLD),
-                    )),
-                    Cell::from(topology),
-                    Cell::from(Line::styled(
-                        commit.oid.chars().take(8).collect::<String>(),
-                        Style::default().fg(Color::LightBlue),
-                    )),
-                    Cell::from(Line::styled(commit.subject.clone(), subject_style)),
-                    Cell::from(refs_line(&commit.refs)),
-                    Cell::from(Line::styled(
-                        commit.author.clone(),
-                        Style::default().fg(Color::Gray),
-                    )),
-                    Cell::from(Line::styled(
-                        calendar_date(commit.timestamp),
-                        Style::default().fg(Color::Gray),
-                    )),
-                    Cell::from(Line::styled(
-                        relative_age(commit.timestamp),
-                        Style::default().fg(Color::DarkGray),
-                    )),
-                ])
-                .style(style),
-            )
+            let mut cells = vec![
+                Cell::from(Line::styled(
+                    if index == graph.selected { ">" } else { " " },
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                )),
+                Cell::from(topology),
+            ];
+            if table_layout.show_oid {
+                cells.push(Cell::from(Line::styled(
+                    commit.oid.chars().take(8).collect::<String>(),
+                    Style::default().fg(Color::LightBlue),
+                )));
+            }
+            cells.push(Cell::from(Line::styled(
+                commit.subject.clone(),
+                subject_style,
+            )));
+            cells.push(Cell::from(main_refs_line(&commit.refs)));
+            if table_layout.show_date {
+                cells.push(Cell::from(Line::styled(
+                    calendar_date(commit.timestamp),
+                    Style::default().fg(Color::Gray),
+                )));
+            }
+            if table_layout.show_author {
+                cells.push(Cell::from(Line::styled(
+                    commit.author.clone(),
+                    Style::default().fg(Color::Gray),
+                )));
+            }
+            if table_layout.show_age {
+                cells.push(Cell::from(Line::styled(
+                    relative_age(commit.timestamp),
+                    Style::default().fg(Color::DarkGray),
+                )));
+            }
+            Some(Row::new(cells).style(style))
         });
-    let table = Table::new(
-        rows,
-        [
-            Constraint::Length(2),
-            Constraint::Length(graph_width),
-            Constraint::Length(9),
-            Constraint::Min(18),
-            Constraint::Length(30),
-            Constraint::Length(10),
-            Constraint::Length(10),
-            Constraint::Length(5),
-        ],
-    )
-    .header(
-        Row::new([
-            "", "Graph", "Commit", "Subject", "Refs", "Author", "Date", "Age",
-        ])
-        .style(
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        ),
-    )
-    .column_spacing(1)
-    .block(
-        Block::default()
-            .title(format!(
-                " All refs commit graph ({}/{}) ",
-                indices.len(),
-                graph.commits.len()
-            ))
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::DarkGray)),
-    );
+    let mut constraints = vec![
+        Constraint::Length(2),
+        Constraint::Length(table_layout.graph_width),
+    ];
+    let mut headers = vec!["", "Graph"];
+    if table_layout.show_oid {
+        constraints.push(Constraint::Length(9));
+        headers.push("Commit");
+    }
+    constraints.push(Constraint::Min(18));
+    headers.push("Subject");
+    constraints.push(Constraint::Length(table_layout.refs_width));
+    headers.push("Refs");
+    if table_layout.show_date {
+        constraints.push(Constraint::Length(10));
+        headers.push("Date");
+    }
+    if table_layout.show_author {
+        constraints.push(Constraint::Length(10));
+        headers.push("Author");
+    }
+    if table_layout.show_age {
+        constraints.push(Constraint::Length(5));
+        headers.push("Age");
+    }
+    let table = Table::new(rows, constraints)
+        .header(
+            Row::new(headers).style(
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        )
+        .column_spacing(1)
+        .block(
+            Block::default()
+                .title(format!(
+                    " All refs commit graph ({}/{}) ",
+                    indices.len(),
+                    graph.commits.len()
+                ))
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::DarkGray)),
+        );
     frame.render_widget(table, area);
 }
 
@@ -503,15 +571,8 @@ fn render_detail(frame: &mut Frame, graph: &crate::app::state::GraphState, area:
                     },
                     Color::LightBlue,
                 ),
-                Line::styled("Refs", Style::default().fg(Color::DarkGray)),
             ];
-            if commit.refs.is_empty() {
-                lines.push(Line::raw("  -"));
-            } else {
-                for reference in &commit.refs {
-                    lines.push(Line::from(vec![Span::raw("  "), ref_span(reference)]));
-                }
-            }
+            lines.extend(ref_detail_lines(&commit.refs));
             lines.push(Line::raw(""));
             lines.push(Line::raw(commit.body.clone()));
             lines
@@ -529,192 +590,28 @@ fn render_detail(frame: &mut Frame, graph: &crate::app::state::GraphState, area:
     );
 }
 
-#[derive(Debug, Clone)]
-struct Lane {
-    oid: String,
-    color: usize,
-}
-
-#[derive(Debug, Clone)]
-struct TopologyRow {
-    cells: Vec<(char, usize)>,
-}
-
-fn topology_rows(commits: &[Commit]) -> Vec<TopologyRow> {
-    const UP: u8 = 1;
-    const DOWN: u8 = 2;
-    const LEFT: u8 = 4;
-    const RIGHT: u8 = 8;
-
-    let mut lanes: Vec<Lane> = Vec::new();
-    let mut rows = Vec::with_capacity(commits.len());
-    let positions: HashMap<&str, usize> = commits
+fn topology_line(row: &super::graph_layout::TopologyRow) -> Line<'static> {
+    let mut spans = row
+        .cells
         .iter()
-        .enumerate()
-        .map(|(index, commit)| (commit.oid.as_str(), index))
-        .collect();
-    let mut next_color = 0;
-
-    for commit in commits {
-        let (lane, inherited_color, display_lanes, mut next_lanes) =
-            if let Some(lane) = lanes.iter().position(|value| value.oid == commit.oid) {
-                let inherited_color = lanes[lane].color;
-                let mut next_lanes = lanes.clone();
-                next_lanes.remove(lane);
-                (lane, inherited_color, lanes.clone(), next_lanes)
-            } else {
-                let color = next_color;
-                next_color += 1;
-                let lane = lanes.len();
-                let mut display_lanes = lanes.clone();
-                display_lanes.push(Lane {
-                    oid: commit.oid.clone(),
-                    color,
-                });
-                (lane, color, display_lanes, lanes.clone())
-            };
-        let cell_count = display_lanes.len().max(next_lanes.len()).max(lane + 1);
-        let mut connections = vec![0u8; cell_count];
-        let mut colors = (0..cell_count)
-            .map(|index| {
-                display_lanes
-                    .get(index)
-                    .or_else(|| next_lanes.get(index))
-                    .map_or(inherited_color, |value| value.color)
-            })
-            .collect::<Vec<_>>();
-
-        for (index, connection) in connections.iter_mut().enumerate().take(cell_count) {
-            if display_lanes.get(index).is_some() {
-                *connection |= UP;
-            }
-            if next_lanes.get(index).is_some() {
-                *connection |= DOWN;
-            }
-        }
-
-        let mut insert_at = lane.min(next_lanes.len());
-        for (parent_index, parent) in commit.parents.iter().enumerate() {
-            if !positions.contains_key(parent.as_str())
-                || next_lanes.iter().any(|value| value.oid == *parent)
-            {
-                continue;
-            }
-            let color = if parent_index == 0 {
-                inherited_color
-            } else {
-                let color = next_color;
-                next_color += 1;
-                color
-            };
-            next_lanes.insert(
-                insert_at,
-                Lane {
-                    oid: parent.clone(),
-                    color,
-                },
-            );
-            insert_at += 1;
-        }
-
-        let next_cell_count = cell_count.max(next_lanes.len());
-        connections.resize(next_cell_count, 0);
-        colors.resize(next_cell_count, inherited_color);
-        for index in cell_count..next_cell_count {
-            if next_lanes.get(index).is_some() {
-                connections[index] |= DOWN;
-                colors[index] = next_lanes[index].color;
-            }
-        }
-
-        for (parent_index, parent) in commit.parents.iter().enumerate() {
-            let Some(target) = next_lanes.iter().position(|value| value.oid == *parent) else {
-                continue;
-            };
-            if target == lane && parent_index == 0 {
-                continue;
-            }
-            let (start, end) = if target < lane {
-                (target, lane)
-            } else {
-                (lane, target)
-            };
-            if target < lane {
-                connections[target] |= RIGHT;
-            } else {
-                connections[target] |= LEFT;
-            }
-            for connection in connections.iter_mut().take(end).skip(start + 1) {
-                *connection |= LEFT | RIGHT;
-            }
-        }
-
-        connections[lane] = 0;
-        if display_lanes.get(lane).is_some() {
-            connections[lane] |= UP;
-        }
-        if next_lanes.get(lane).is_some() {
-            connections[lane] |= DOWN;
-        }
-        let node = if commit.parents.len() > 1 {
-            '◆'
-        } else {
-            '●'
-        };
-        let cells = connections
-            .into_iter()
-            .zip(colors)
-            .enumerate()
-            .map(|(index, (mask, color))| {
-                if index == lane {
-                    (node, inherited_color)
-                } else {
-                    (box_glyph(mask), color)
-                }
-            })
-            .collect();
-        rows.push(TopologyRow { cells });
-        lanes = next_lanes;
+        .map(|cell| {
+            Span::styled(
+                format!("{} ", cell.glyph),
+                Style::default()
+                    .fg(lane_color(cell.color))
+                    .add_modifier(Modifier::BOLD),
+            )
+        })
+        .collect::<Vec<_>>();
+    if row.hidden_lanes > 0 {
+        spans.push(Span::styled(
+            format!("~{}", row.hidden_lanes),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ));
     }
-    rows
-}
-
-fn box_glyph(mask: u8) -> char {
-    match mask {
-        0 => ' ',
-        1 => '│',
-        2 => '│',
-        3 => '│',
-        4 => '─',
-        8 => '─',
-        5 => '┘',
-        6 => '┐',
-        9 => '└',
-        10 => '┌',
-        12 => '─',
-        7 => '┤',
-        11 => '├',
-        13 => '┴',
-        14 => '┬',
-        15 => '┼',
-        _ => ' ',
-    }
-}
-
-fn topology_line(row: &TopologyRow) -> Line<'static> {
-    Line::from(
-        row.cells
-            .iter()
-            .map(|(glyph, color)| {
-                Span::styled(
-                    format!("{glyph} "),
-                    Style::default()
-                        .fg(lane_color(*color))
-                        .add_modifier(Modifier::BOLD),
-                )
-            })
-            .collect::<Vec<_>>(),
-    )
+    Line::from(spans)
 }
 fn lane_color(index: usize) -> Color {
     const COLORS: [Color; 8] = [
@@ -730,41 +627,108 @@ fn lane_color(index: usize) -> Color {
     COLORS[index % COLORS.len()]
 }
 
-fn refs_line(refs: &[CommitRef]) -> Line<'static> {
+fn main_refs_line(refs: &[CommitRef]) -> Line<'static> {
     let mut spans = Vec::new();
-    for (index, reference) in refs.iter().enumerate() {
-        if index > 0 {
+    let mut append = |span: Span<'static>| {
+        if !spans.is_empty() {
             spans.push(Span::raw(" "));
         }
-        spans.push(ref_span(reference));
+        spans.push(span);
+    };
+    for kind in [
+        CommitRefKind::Head,
+        CommitRefKind::LocalBranch,
+        CommitRefKind::Stash,
+    ] {
+        for reference in refs.iter().filter(|reference| reference.kind == kind) {
+            append(ref_span(reference));
+        }
+    }
+    for kind in [CommitRefKind::RemoteBranch, CommitRefKind::Tag] {
+        let matching = refs
+            .iter()
+            .filter(|reference| reference.kind == kind)
+            .collect::<Vec<_>>();
+        if matching.len() > 1 {
+            append(ref_count_span(kind, matching.len() - 1));
+        }
+        if let Some(reference) = matching.first() {
+            append(ref_span(reference));
+        }
     }
     Line::from(spans)
 }
 
-fn ref_span(reference: &CommitRef) -> Span<'static> {
-    let (label, style) = match reference.kind {
-        CommitRefKind::Head => (
-            "HEAD".to_owned(),
-            Style::default().fg(Color::Black).bg(Color::LightGreen),
-        ),
-        CommitRefKind::LocalBranch => (
-            format!("L:{}", reference.name),
-            Style::default().fg(Color::Black).bg(Color::Cyan),
-        ),
-        CommitRefKind::RemoteBranch => (
-            format!("R:{}", reference.name),
-            Style::default().fg(Color::White).bg(Color::Blue),
-        ),
-        CommitRefKind::Tag => (
-            format!("T:{}", reference.name),
-            Style::default().fg(Color::Black).bg(Color::Yellow),
-        ),
-        CommitRefKind::Stash => (
-            format!("S:{}", reference.name),
-            Style::default().fg(Color::White).bg(Color::Magenta),
-        ),
+fn ref_detail_lines(refs: &[CommitRef]) -> Vec<Line<'static>> {
+    let mut lines = vec![Line::styled(
+        format!("Refs ({})", refs.len()),
+        Style::default().fg(Color::DarkGray),
+    )];
+    if refs.is_empty() {
+        lines.push(Line::raw("  -"));
+        return lines;
+    }
+    for (kind, label) in [
+        (CommitRefKind::Head, "HEAD"),
+        (CommitRefKind::LocalBranch, "Local branches"),
+        (CommitRefKind::RemoteBranch, "Remote branches"),
+        (CommitRefKind::Tag, "Tags"),
+        (CommitRefKind::Stash, "Stashes"),
+    ] {
+        let matching = refs
+            .iter()
+            .filter(|reference| reference.kind == kind)
+            .collect::<Vec<_>>();
+        if matching.is_empty() {
+            continue;
+        }
+        lines.push(Line::styled(
+            format!("{label} ({})", matching.len()),
+            Style::default().fg(Color::DarkGray),
+        ));
+        lines.extend(
+            matching
+                .into_iter()
+                .map(|reference| Line::from(vec![Span::raw("  "), ref_span(reference)])),
+        );
+    }
+    lines
+}
+
+fn ref_count_span(kind: CommitRefKind, count: usize) -> Span<'static> {
+    let prefix = match kind {
+        CommitRefKind::RemoteBranch => "R",
+        CommitRefKind::Tag => "T",
+        _ => "Refs",
     };
-    Span::styled(format!(" {label} "), style.add_modifier(Modifier::BOLD))
+    Span::styled(
+        format!(" {prefix}:+{count} "),
+        ref_style(kind).add_modifier(Modifier::BOLD),
+    )
+}
+
+fn ref_span(reference: &CommitRef) -> Span<'static> {
+    let label = match reference.kind {
+        CommitRefKind::Head => "HEAD".to_owned(),
+        CommitRefKind::LocalBranch => format!("L:{}", reference.name),
+        CommitRefKind::RemoteBranch => format!("R:{}", reference.name),
+        CommitRefKind::Tag => format!("T:{}", reference.name),
+        CommitRefKind::Stash => format!("S:{}", reference.name),
+    };
+    Span::styled(
+        format!(" {label} "),
+        ref_style(reference.kind).add_modifier(Modifier::BOLD),
+    )
+}
+
+fn ref_style(kind: CommitRefKind) -> Style {
+    match kind {
+        CommitRefKind::Head => Style::default().fg(Color::Black).bg(Color::LightGreen),
+        CommitRefKind::LocalBranch => Style::default().fg(Color::Black).bg(Color::Cyan),
+        CommitRefKind::RemoteBranch => Style::default().fg(Color::White).bg(Color::Blue),
+        CommitRefKind::Tag => Style::default().fg(Color::Black).bg(Color::Yellow),
+        CommitRefKind::Stash => Style::default().fg(Color::White).bg(Color::Magenta),
+    }
 }
 
 fn detail_line(label: &str, value: String, color: Color) -> Line<'static> {
@@ -786,6 +750,7 @@ fn viewport_start(selected: usize, visible: usize, total: usize) -> usize {
 mod tests {
     use super::*;
 
+    use crate::domain::Commit;
     fn commit(oid: &str, parents: &[&str]) -> Commit {
         Commit {
             oid: oid.into(),
@@ -814,11 +779,11 @@ mod tests {
             commit("main", &["base"]),
             commit("base", &[]),
         ];
-        let rows = topology_rows(&commits);
+        let rows = super::super::graph_layout::topology_rows(&commits, 10);
         assert_eq!(rows.len(), commits.len());
-        assert_eq!(rows[0].cells[0].0, '◆');
-        assert!(rows[0].cells.iter().any(|(glyph, _)| *glyph == '┐'));
-        assert!(rows[2].cells.iter().any(|(glyph, _)| *glyph == '├'));
+        assert_eq!(rows[0].cells[0].glyph, '◆');
+        assert!(rows[0].cells.iter().any(|cell| cell.glyph == '┐'));
+        assert!(rows[2].cells.iter().any(|cell| cell.glyph == '├'));
         assert!(rows.iter().any(|row| row.cells.len() >= 2));
     }
 
@@ -829,8 +794,8 @@ mod tests {
             commit("main", &["base"]),
             commit("base", &[]),
         ];
-        let rows = topology_rows(&commits);
-        assert!(rows[1].cells.iter().any(|(glyph, _)| *glyph == '├'));
+        let rows = super::super::graph_layout::topology_rows(&commits, 10);
+        assert!(rows[1].cells.iter().any(|cell| cell.glyph == '├'));
         assert!(rows[1].cells.len() >= 2);
     }
 
@@ -846,7 +811,7 @@ mod tests {
             commit("f", &["base"]),
             commit("base", &[]),
         ];
-        let rows = topology_rows(&commits);
+        let rows = super::super::graph_layout::topology_rows(&commits, 10);
         assert!(rows.iter().any(|row| row.cells.len() == 6));
         let colors = rows
             .iter()
@@ -854,31 +819,9 @@ mod tests {
             .unwrap()
             .cells
             .iter()
-            .map(|(_, color)| *color)
+            .map(|cell| cell.color)
             .collect::<std::collections::HashSet<_>>();
         assert_eq!(colors.len(), 6);
-    }
-
-    #[test]
-    fn box_glyph_covers_line_junction_combinations() {
-        assert_eq!(box_glyph(12), '─');
-        assert_eq!(box_glyph(7), '┤');
-        assert_eq!(box_glyph(11), '├');
-        assert_eq!(box_glyph(13), '┴');
-        assert_eq!(box_glyph(14), '┬');
-        assert_eq!(box_glyph(15), '┼');
-        assert_eq!(box_glyph(5), '┘');
-        assert_eq!(box_glyph(6), '┐');
-        assert_eq!(box_glyph(9), '└');
-        assert_eq!(box_glyph(10), '┌');
-    }
-
-    #[test]
-    fn box_glyph_uses_solid_single_direction_lines() {
-        assert_eq!(box_glyph(1), '│');
-        assert_eq!(box_glyph(2), '│');
-        assert_eq!(box_glyph(4), '─');
-        assert_eq!(box_glyph(8), '─');
     }
 
     #[test]
@@ -903,5 +846,94 @@ mod tests {
             })
             .collect::<std::collections::HashSet<_>>();
         assert_eq!(backgrounds.len(), 5);
+    }
+
+    fn line_text(line: &Line<'_>) -> String {
+        line.spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect()
+    }
+
+    #[test]
+    fn folds_dense_refs_without_discarding_detail_entries() {
+        let refs = vec![
+            CommitRef {
+                name: "HEAD".into(),
+                kind: CommitRefKind::Head,
+            },
+            CommitRef {
+                name: "main".into(),
+                kind: CommitRefKind::LocalBranch,
+            },
+            CommitRef {
+                name: "v1".into(),
+                kind: CommitRefKind::Tag,
+            },
+            CommitRef {
+                name: "v2".into(),
+                kind: CommitRefKind::Tag,
+            },
+            CommitRef {
+                name: "v3".into(),
+                kind: CommitRefKind::Tag,
+            },
+        ];
+        let summary = line_text(&main_refs_line(&refs));
+        assert!(summary.contains("HEAD"));
+        assert!(summary.contains("L:main"));
+        assert!(summary.contains("T:v1"));
+        assert!(summary.contains("T:+2"));
+        assert!(summary.find("T:+2").unwrap() < summary.find("T:v1").unwrap());
+        assert!(!summary.contains("T:v2"));
+        assert!(!summary.contains("T:v3"));
+
+        let detail = ref_detail_lines(&refs)
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(detail.contains("Refs (5)"));
+        assert!(detail.contains("Local branches (1)"));
+        assert!(detail.contains("Tags (3)"));
+        assert!(detail.contains("T:v1"));
+        assert!(detail.contains("T:v2"));
+        assert!(detail.contains("T:v3"));
+        assert_eq!(refs.len(), 5);
+    }
+
+    #[test]
+    fn topology_line_marks_hidden_lanes() {
+        let row = super::super::graph_layout::TopologyRow {
+            cells: vec![super::super::graph_layout::TopologyCell {
+                glyph: '●',
+                color: 0,
+            }],
+            pipes: vec![],
+            hidden_lanes: 4,
+            has_missing_edge: false,
+        };
+        assert!(line_text(&topology_line(&row)).contains("~4"));
+    }
+
+    #[test]
+    fn responsive_columns_preserve_subject_before_metadata() {
+        let narrow = commit_table_layout(80, 30);
+        assert_eq!(narrow.graph_width, 24);
+        assert!(narrow.show_oid);
+        assert!(!narrow.show_date);
+        assert!(!narrow.show_author);
+        assert!(!narrow.show_age);
+
+        let split_wide = commit_table_layout(93, 30);
+        assert_eq!(split_wide.graph_width, 24);
+        assert!(split_wide.show_oid);
+        assert!(split_wide.show_date);
+        assert!(!split_wide.show_author);
+        assert!(!split_wide.show_age);
+
+        let very_wide = commit_table_layout(140, 30);
+        assert!(very_wide.show_author);
+        assert!(very_wide.show_age);
     }
 }

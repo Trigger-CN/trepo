@@ -1,6 +1,7 @@
 mod change_tree;
 mod changes;
 mod graph;
+mod graph_layout;
 mod repository;
 mod workspace;
 
@@ -351,6 +352,72 @@ mod tests {
         });
         draw(&app, 80, 24);
         draw(&app, 120, 40);
+    }
+
+    #[test]
+    fn graph_prioritizes_subject_and_folds_dense_refs_at_supported_sizes() {
+        let mut app = app();
+        let project = app.workspace.projects[0].clone();
+        app.screen = Screen::Graph;
+        app.graph = Some(GraphState {
+            project,
+            commits: vec![Commit {
+                oid: "aaaaaaaa".into(),
+                parents: vec![],
+                refs: vec![
+                    CommitRef {
+                        name: "v1".into(),
+                        kind: CommitRefKind::Tag,
+                    },
+                    CommitRef {
+                        name: "v2".into(),
+                        kind: CommitRefKind::Tag,
+                    },
+                    CommitRef {
+                        name: "v3".into(),
+                        kind: CommitRefKind::Tag,
+                    },
+                ],
+                author: "Ada".into(),
+                timestamp: 1_700_000_000,
+                subject: "Subject remains readable".into(),
+                body: "Body".into(),
+            }],
+            selected: 0,
+            loading: false,
+            error: None,
+            generation: 1,
+            object_menu: false,
+            object_selected: 0,
+            action_menu: false,
+            action_selected: 0,
+            selected_object: None,
+            form: None,
+            message: None,
+            selected_oid: None,
+            filter: crate::app::state::GraphFilter::default(),
+            filter_form: None,
+            filter_error: None,
+            commit_message: String::new(),
+            commit_amend: false,
+            commit_running: false,
+            commit_generation: 0,
+        });
+
+        let narrow = draw_text(&app, 80, 24);
+        assert!(narrow.contains("Subject remains readable"));
+        assert!(narrow.contains("T:v1"));
+        assert!(narrow.contains("T:+2"));
+        assert!(!narrow.contains("Date"));
+
+        let wide = draw_text(&app, 120, 40);
+        assert!(wide.contains("Subject remains readable"));
+        assert!(wide.contains("2023-11-14"));
+        assert!(wide.contains("Refs (3)"));
+        assert!(wide.contains("Tags (3)"));
+        assert!(wide.contains("T:v1"));
+        assert!(wide.contains("T:v2"));
+        assert!(wide.contains("T:v3"));
     }
 
     #[test]

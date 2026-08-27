@@ -182,23 +182,23 @@ cargo run -- doctor .
 
 交付物：
 
-- 使用显式 NUL 字段协议读取 `git log --topo-order --all` 的完整可达历史。
+- 使用显式 NUL 字段协议读取纯 `git log --topo-order --all` 的完整可达历史，禁止再叠加 date-order 打散平行开发线。
 - 独立解析本地分支、远端分支、annotated/lightweight tag、HEAD 和每条 stash reflog entry。
-- 展示不限四路的多色 topology lane、OID、refs、subject、author、UTC `YYYY-MM-DD` 日期和相对 Age。
-- 分支从共同祖先分出、merge parent 展开以及重新汇入共同祖先时，显示方向明确的连接线。
-- HEAD/local/remote/tag/stash 使用独立颜色 badge，右侧检查器保持相同语义配色。
-- Graph 支持 Branch、Query、Author、Since、Until 组合过滤；分支按匹配 tip 的 parent 可达历史过滤，日期按 UTC 日历日闭区间。
-- Graph 过滤在已加载的完整 all-refs 数据上执行并保持 topology DAG；选择、详情和对象菜单继续绑定稳定 commit OID。
+- 展示多色 pipe topology、OID、subject 和响应式 metadata；Graph/Subject/重要 refs 优先于 Date、Author、Age。
+- 主列表完整优先展示 HEAD/local/stash，remote/tag 使用有界 badge 和 `R:+N`/`T:+N`；Inspector 与对象菜单保留全部 refs。
+- `graph_layout` 将 Direct/Indirect/Missing edge、Starts/Continues/Terminates pipe 与 Ratatui 渲染分离，支持 continuing lane 向左压缩。
+- lane 超过紧凑模式上限时显示 `~N`，missing parent 使用 `◉`，不静默裁剪或伪造直接连接。
+- Graph 支持 Branch、Query、Author、Since、Until 组合过滤；过滤保留完整 all-refs topology DAG 和稳定 commit OID。
 - 空仓库、unborn HEAD 和 log 错误可恢复。
 
 验收：
 
 - parser 覆盖普通 commit、merge commit、全部 ref 类型、stash 和含换行 message。
-- topology fixture 覆盖无 merge commit 的分支分叉、双亲 merge、octopus merge 和多 lane 连接。
-- 进入/返回不会丢失 Workspace selection 和搜索。
-- graph 加载不阻塞 event loop。
+- topology fixture 覆盖无 merge commit 的分叉、双亲/octopus merge、多 lane、continuing lane 左移、missing parent 和 lane cap。
+- 真实 Git 日期交错双分支 fixture 证明加载顺序等于纯 topo-order 且不同于 date-order。
+- Graph 加载不阻塞 event loop；进入/返回不丢失 Workspace selection 和搜索。
 - 过滤语义覆盖分支可达闭包、文本/作者/日期 AND、无效日期、稳定选择和零匹配安全状态。
-- 80x24 与 120x40 TestBackend 覆盖过滤表单、活动摘要、可见/总数和零匹配详情。
+- 80x24 与 120x40 TestBackend 覆盖响应式列、Subject、refs 摘要、完整 Inspector 分组、过滤和零匹配详情。
 
 ### M1.6 测试与文档
 
@@ -407,6 +407,7 @@ cargo build
 
 - Graph 加载所有本地分支、远端分支、tag、HEAD 和每条 stash 的完整可达历史；大型仓库流式虚拟化仍是后续优化。
 - Graph 的 Branch/Query/Author/Since/Until 过滤在内存中组合执行，保留完整 all-refs topology，并按稳定 OID 维护选择和对象操作。
+- Graph 使用纯 topo-order 和独立 pipe 布局；continuing lane 可向左收缩，missing parent 与 lane cap 分别使用 `◉`/`~N`，高密度 remote/tag 在列表汇总但 Inspector/对象菜单保留完整 refs。
 - Workspace Inspector 与 Changes 共享稳定路径文件树；Changes 批量 Stage/Unstage/Stash/Discard 在全量预检 token 后写入，多行提交编辑器支持 bracketed paste、Unicode 光标导航和清晰分区。
 - Git 与 Repo 写操作协调 workspace/project 锁、实时前置检查、确认和 generation。
 - Repository 与 Graph 的普通 Push/Force Push 使用固定 `branch:branch` refspec；裸 `--force` 不可达，force-with-lease 并发推进场景由真实 peer/bare remote 覆盖。

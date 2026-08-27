@@ -1777,7 +1777,6 @@ pub async fn log_all(path: &Path) -> Result<Vec<Commit>> {
     let mut args = vec![
         OsString::from("log"),
         OsString::from("--topo-order"),
-        OsString::from("--date-order"),
         OsString::from("--all"),
         OsString::from(pretty),
     ];
@@ -1973,6 +1972,32 @@ mod tests {
                 "-m",
                 message,
             ],
+        );
+    }
+
+    fn commit_file_at(root: &Path, path: &str, content: &str, message: &str, date: &str) {
+        fs::write(root.join(path), content).unwrap();
+        run_git(root, &["add", path]);
+        let output = std::process::Command::new("git")
+            .args([
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.com",
+                "commit",
+                "-q",
+                "-m",
+                message,
+            ])
+            .env("GIT_AUTHOR_DATE", date)
+            .env("GIT_COMMITTER_DATE", date)
+            .current_dir(root)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "dated commit failed: {}",
+            String::from_utf8_lossy(&output.stderr)
         );
     }
 
@@ -2242,6 +2267,76 @@ u UU N... 100644 100644 100644 100644 a b c conflict.txt\x00\
         assert!(commits[0].refs.is_empty());
         assert!(commits[0].body.contains("Details"));
         assert_eq!(commits[1].subject, "Initial");
+    }
+
+    #[tokio::test]
+    async fn loads_parallel_histories_in_pure_topological_order() {
+        let temp = tempdir().unwrap();
+        run_git(temp.path(), &["init", "-q", "-b", "main"]);
+        commit_file_at(
+            temp.path(),
+            "base.txt",
+            "base\n",
+            "base",
+            "2020-01-01T00:00:00Z",
+        );
+        run_git(temp.path(), &["switch", "-q", "-c", "feature"]);
+        commit_file_at(
+            temp.path(),
+            "feature.txt",
+            "one\n",
+            "feature-one",
+            "2020-01-02T00:00:00Z",
+        );
+        commit_file_at(
+            temp.path(),
+            "feature.txt",
+            "two\n",
+            "feature-two",
+            "2020-01-04T00:00:00Z",
+        );
+        run_git(temp.path(), &["switch", "-q", "main"]);
+        commit_file_at(
+            temp.path(),
+            "main.txt",
+            "one\n",
+            "main-one",
+            "2020-01-03T00:00:00Z",
+        );
+        commit_file_at(
+            temp.path(),
+            "main.txt",
+            "two\n",
+            "main-two",
+            "2020-01-05T00:00:00Z",
+        );
+
+        let actual = log_all(temp.path())
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|commit| commit.subject)
+            .collect::<Vec<_>>();
+        let topo = run_git(
+            temp.path(),
+            &["log", "--topo-order", "--all", "--format=%s"],
+        )
+        .lines()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+        let date = run_git(
+            temp.path(),
+            &["log", "--date-order", "--all", "--format=%s"],
+        )
+        .lines()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+        assert_eq!(actual, topo);
+        assert_ne!(actual, date);
+        assert_eq!(
+            actual,
+            vec!["main-two", "main-one", "feature-two", "feature-one", "base"]
+        );
     }
 
     #[tokio::test]

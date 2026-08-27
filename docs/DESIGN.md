@@ -180,27 +180,26 @@ Git 与 Repo 的参数面很大，而且会随版本、插件和服务端扩展�
 
 ### 6.1 Graph 标签页
 
-Graph 是进入仓库后的默认页，由提交列表和详情检查器组成：
+Graph 是进入仓库后的默认页，由提交列表和详情检查器组成。提交区按终端宽度响应式降级，固定优先级为 Graph、Subject、重要 refs、短 OID、Date、Author、Age；窄屏先隐藏 Age 和 Author，不能让固定元数据列吞掉 Subject。
 
 ```text
-┌ platform/camera  Graph  Changes(5)  Branches  Tags  Remotes  Stashes ┐
-├ Graph ── Commit ─────────── Refs ───────────── Author ───── Date ───── Age ┤
-│ ●  91f2c7a Fix frame ownership      (HEAD -> feature/x)       2026-08-26  2h │
-│ │\                                                                        │
-│ │ ● 5aa82e1 Tune exposure           (origin/feature/x)        2026-08-26  4h │
-│ ● │ e30d991 Add stream metrics      (tag: v2.4-rc1)           2026-08-25  1d │
-│ ●─┘ 0c671b0 Merge camera HAL update                            2026-08-24  2d │
-├───────────────────────────────────┬─────────────────────────────────┤
-│ Commit message / metadata         │ Files / stats / selected diff    │
-└ j/k Move  Enter Detail  d Diff  b Branch  t Tag  c Cherry-pick ─────┘
+┌ platform/camera / Graph ──────────────────────────────────────────────┐
+├ Graph ── Commit ─ Subject ───────────────── Refs ─────── Date ───────┤
+│ ●        91f2c7a   Fix frame ownership         HEAD L:feature/x  2026-08-26 │
+│ ├─┐      5aa82e1   Tune exposure               R:origin/feature  2026-08-26 │
+│ ● │      e30d991   Add stream metrics          T:v2.4-rc1 T:+6  2026-08-25 │
+│ ◉ ┘      0c671b0   Imported shallow boundary                         │
+├───────────────────────────────────┬───────────────────────────────────┤
+│ all-refs commit list              │ grouped complete ref inspector    │
+└ j/k Move  Enter Objects  f Filter  / Search  x Clear  r Reload ──────┘
 ```
 
 提交行展示：
 
-- ASCII/Unicode 拓扑线、commit 符号和 merge 连接。
-- 短 OID、subject、refs decoration。
-- author、UTC `YYYY-MM-DD` 日历日期和相对 Age；详情检查器也显示同一可读日期。
-- 签名状态、GPG/SSH signer、父提交数量等可选字段。
+- 实心 Unicode box-drawing topology、commit/merge/boundary 符号和有色连接。
+- 短 OID、subject 和有界 refs 摘要；HEAD、本地分支和 stash 始终优先，remote/tag 各显示一个代表项，多余数量使用 `R:+N`/`T:+N`。
+- Date 在空间允许时使用 UTC `YYYY-MM-DD`；Author 和 Age 仅在更宽布局显示，完整 OID、Author、Age、parents 和 body 始终保留在 Inspector。
+- Inspector 按 HEAD、Local branches、Remote branches、Tags、Stashes 分组并显示数量和全部 badge；主列表折叠不修改 `Commit.refs`，过滤和对象菜单仍能访问每个真实 ref。
 
 交互能力：
 
@@ -227,19 +226,19 @@ Graph 是仓库操作的首要发现入口。用户在提交树中选中节点�
 
 需要参数的动作进入 typed form；破坏性动作和远端写入沿用现有确认及精确预览。Graph 只负责上下文识别、导航和参数收集，实际 Git argv、项目锁、`index.lock` 检查、snapshot token、generation 校验和 OperationRunner 执行保持唯一实现。动作完成后 Graph 刷新 all-refs 历史，并尽可能按原 OID 恢复选择；失败保留真实 Git 错误。
 
-Git 提供提交及 parent 关系，`repo-tui` 负责视觉 lane 分配：
+Git 提供提交及 parent 关系，`repo-tui` 的纯数据 `graph_layout` 模块负责布局，Ratatui 层只将 cell 投影为颜色和字符：
 
-1. 按 `--topo-order` 获取提交，保证父提交不会出现在子提交之前。
-2. 为当前 commit 复用等待它的 lane；若不存在则分配最左可用 lane。
-3. 先按当前 lanes 绘制节点，再计算提交后的 parent lanes，避免 lane 插入掩盖来源位置。
-4. first parent 延续当前 lane，其余 parent 分配或复用其他 lane；每个 cell 根据上、下、左、右连接位动态选择 `─`、`│`、`├`、`┤`、`┬`、`┴`、`┼`、`┌`、`┐`、`└`、`┘` 等 box-drawing 字符。
-5. merge 节点使用菱形标记，多个 parent 连接从该节点展开；共同祖先重新进入同一 lane 时保留反向连接。
-6. octopus merge、boundary commit 和 shallow history 使用独立标记。
-7. ref 变化后使当前 graph generation 失效，保留选中 OID；如果 OID 不再可达，给出提示而不是静默跳行。
+1. 只使用 `git log --topo-order --all` 获取提交，避免后置 date-order 让平行开发线按日期交错，同时保证父提交不会出现在子提交之前。
+2. 输入先转换为 `GraphNode { oid, edges }`，edge 显式区分 `Direct`、`Indirect` 和 `Missing`；缺失 parent 不伪装为普通直接连接，并用 `◉` 标记 boundary。
+3. 每行根据旧 lanes 和新 lanes 生成 `Pipe { from_lane, to_lane, Starts | Continues | Terminates }`；continuing pipe 优先复用 ancestry color，左侧 lane 终止后右侧 continuation 安全向左收缩。
+4. parent 优先占用当前节点释放的最左位置，first parent 继承当前颜色，其余 parent 分配稳定颜色；每个 cell 根据上、下、左、右连接位选择 `─`、`│`、`├`、`┤`、`┬`、`┴`、`┼`、`┌`、`┐`、`└`、`┘`。
+5. merge 节点使用 `◆`，普通节点使用 `●`；布局保留 starts/continues/terminates pipes，便于测试分叉来源、汇入方向和 crossing。
+6. 紧凑模式每个 commit 一行，最多投影 10 条 lane；更多 lane 不静默裁剪，而是在准确的左侧投影后显示 `~N` 隐藏数量。
+7. ref 变化后使当前 graph generation 失效并保留选中 OID；如果 OID 不再可达，给出提示而不是静默跳行。
 
-内部数据以 OID 和 parents 构成 DAG，不把 `git log --graph` 的终端文本当数据源。渲染算法需覆盖直线、分叉、双亲 merge、octopus merge、交叉 lane、shallow boundary 和 replace/graft 等 fixture。
+内部数据以完整 all-refs OID/parents DAG 为基础，不解析 `git log --graph` 的终端文本。过滤只控制可见 commit 行，布局仍对完整 commits 计算，确保隐藏中间节点不会破坏选择、ref 身份或 ancestry。fixture 覆盖直线、分叉、双亲/octopus merge、多 lane、lane 左移、missing parent 和 lane cap。
 
-当前实现一次加载 all-refs 完整可达历史，优先保证分支树和 stash 不被分页边界隐藏。大型仓库的后续优化应采用保持全局拓扑与 ref 可见性的虚拟化或流式加载，不能退化为仅显示 HEAD 或静默截断其他 refs。
+当前实现一次加载 all-refs 完整可达历史，优先保证分支树和 stash 不被分页边界隐藏。大型仓库的后续优化应采用保持全局拓扑与 ref 可见性的虚拟化或流式加载，不能退化为仅显示 HEAD 或静默丢弃其他 refs。
 
 ### 6.3 Changes 标签页
 
