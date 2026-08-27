@@ -244,14 +244,15 @@ Git 提供提交及 parent 关系，`repo-tui` 负责视觉 lane 分配：
 
 Changes 页面分为文件树、hunk 列表、diff 检查器和提交对话框：
 
-- 分类展示 staged、unstaged、untracked、conflicted、ignored（按需）。
-- 文件级 stage/unstage/restore/delete/intent-to-add。
+- Workspace Inspector 与 Changes 使用同一目录树投影，以 `├─`、`└─`、`│` 展示 staged、unstaged、untracked 和 conflicted 文件的路径层级；目录行只负责显示，文件操作始终绑定原始 `PathBuf`。
+- Changes 文件模式用 `Space` 切换当前文件、`A` 全选/清空。存在文件选择时，stage/unstage 作用于该稳定路径集合；否则继续作用于当前 file/hunk/line。
+- 批量 stage/unstage 在同一 workspace/project lock 内重新读取所有条目，先验证全部文件的适用性与 diff token，再开始逐项写入；任一 token 陈旧时不写任何目标。破坏性 discard 不批量化，仍一次确认一个 file/hunk/line。
 - hunk 与 changed-line 级 stage、unstage、discard；行操作使用当前 diff 重建零上下文 patch，执行 `git apply --check --unidiff-zero` 后写入。
 - diff 模式支持 unified、side-by-side、word diff、忽略空白。
 - 二进制、重命名、submodule、mode change、大文件和不可解码文件明确降级。
-- commit 对话框支持 message、amend、signoff 和 GPG/SSH signing；当前 UI 通过独立开关控制后三项，默认不跳过 hooks。
+- commit 对话框支持多行 message 输入和 bracketed paste；`Enter` 追加换行，`Ctrl-Enter` 或 `Ctrl-S` 提交，amend/signoff/GPG signing 继续使用独立开关，默认不跳过 hooks。
 - 提交使用 project 级写锁并在锁内检查 `index.lock`；普通 commit 要求存在 staged 内容，amend 遵循 Git 当前 HEAD 语义。
-- commit 失败时合并 hook stdout/stderr，保留用户输入、选项和错误状态，允许修正后重试；成功后刷新 Changes 与 Workspace。
+- commit 失败时合并 hook stdout/stderr，保留多行输入、选项和错误状态，允许修正后重试；成功后刷新 Changes 与 Workspace。
 
 文件名按原始字节保存，显示层才做可逆转义或 lossy 展示。Git 数据读取尽量使用 `-z`，正确处理空格、制表符、换行及非 UTF-8 路径。
 

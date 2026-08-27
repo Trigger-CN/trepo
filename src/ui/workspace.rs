@@ -4,6 +4,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, Wrap};
 use ratatui::Frame;
 
+use super::change_tree::{change_tree_rows, ChangeTreeRow};
 use crate::app::state::App;
 use crate::domain::{HeadState, RepoProjectState, ScanState, WorkspaceKind};
 
@@ -215,19 +216,24 @@ fn render_inspector(frame: &mut Frame, app: &App, area: Rect) {
                         .fg(Color::Cyan)
                         .add_modifier(Modifier::BOLD),
                 ));
+                let tree_rows = change_tree_rows(&snapshot.changes);
                 let available_rows = area.height.saturating_sub(lines.len() as u16 + 2) as usize;
-                let file_budget = if snapshot.changes.len() > available_rows {
+                let row_budget = if tree_rows.len() > available_rows {
                     available_rows.saturating_sub(1)
                 } else {
                     available_rows
                 };
-                for change in snapshot.changes.iter().take(file_budget) {
-                    lines.push(change_line(change, area.width.saturating_sub(4) as usize));
+                for row in tree_rows.iter().take(row_budget) {
+                    lines.push(change_tree_line(
+                        row,
+                        &snapshot.changes,
+                        area.width.saturating_sub(4) as usize,
+                    ));
                 }
-                let remaining = snapshot.changes.len().saturating_sub(file_budget);
+                let remaining = tree_rows.len().saturating_sub(row_budget);
                 if remaining > 0 {
                     lines.push(Line::styled(
-                        format!("... {remaining} more files"),
+                        format!("... {remaining} more tree rows"),
                         Color::DarkGray,
                     ));
                 }
@@ -494,19 +500,31 @@ fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
     )
 }
 
-fn change_line(change: &crate::domain::ChangeEntry, width: usize) -> Line<'static> {
-    let status = change.status_label();
-    let path = change.path.to_string_lossy();
-    let text = format!("{status}  {path}");
-    let text = truncate_text(&text, width);
-    let color = if change.conflicted {
-        Color::LightRed
-    } else if change.untracked {
-        Color::Yellow
-    } else {
-        Color::Cyan
-    };
-    Line::styled(text, color)
+fn change_tree_line(
+    row: &ChangeTreeRow,
+    changes: &[crate::domain::ChangeEntry],
+    width: usize,
+) -> Line<'static> {
+    match row {
+        ChangeTreeRow::Directory { .. } => {
+            Line::styled(truncate_text(&row.display(), width), Color::DarkGray)
+        }
+        ChangeTreeRow::File { entry_index, .. } => {
+            let change = &changes[*entry_index];
+            let text = truncate_text(
+                &format!("{}  {}", change.status_label(), row.display()),
+                width,
+            );
+            let color = if change.conflicted {
+                Color::LightRed
+            } else if change.untracked {
+                Color::Yellow
+            } else {
+                Color::Cyan
+            };
+            Line::styled(text, color)
+        }
+    }
 }
 
 fn truncate_text(text: &str, width: usize) -> String {

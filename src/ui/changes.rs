@@ -4,6 +4,7 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, Wrap};
 use ratatui::Frame;
 
+use super::change_tree::{change_tree_rows, ChangeTreeRow};
 use crate::app::state::{App, ChangesMode, ChangesState};
 use crate::domain::OperationTarget;
 
@@ -83,47 +84,57 @@ fn render_files(frame: &mut Frame, changes: &ChangesState, area: Rect) {
         );
         return;
     }
-    let visible = area.height.saturating_sub(3) as usize;
-    let start = viewport_start(changes.selected, visible, changes.entries.len());
-    let rows = changes
-        .entries
+    let tree_rows = change_tree_rows(&changes.entries);
+    let selected_row = tree_rows
         .iter()
-        .enumerate()
+        .position(|row| matches!(row, ChangeTreeRow::File { entry_index, .. } if *entry_index == changes.selected))
+        .unwrap_or(0);
+    let visible = area.height.saturating_sub(3) as usize;
+    let start = viewport_start(selected_row, visible, tree_rows.len());
+    let rows = tree_rows
+        .into_iter()
         .skip(start)
         .take(visible)
-        .map(|(index, entry)| {
-            let style = if index == changes.selected {
-                Style::default()
-                    .bg(Color::DarkGray)
-                    .add_modifier(Modifier::BOLD)
-            } else if entry.conflicted {
-                Style::default().fg(Color::LightRed)
-            } else if entry.untracked {
-                Style::default().fg(Color::Yellow)
-            } else {
-                Style::default()
-            };
-            let path = entry.original_path.as_ref().map_or_else(
-                || entry.path.to_string_lossy().into_owned(),
-                |original| {
-                    format!(
-                        "{} -> {}",
-                        original.to_string_lossy(),
-                        entry.path.to_string_lossy()
-                    )
-                },
-            );
-            Row::new(vec![
-                Cell::from(if index == changes.selected { ">" } else { " " }),
-                Cell::from(entry.status_label()),
-                Cell::from(path),
+        .map(|row| match row {
+            ChangeTreeRow::Directory { .. } => Row::new(vec![
+                Cell::from(" "),
+                Cell::from(" "),
+                Cell::from(" "),
+                Cell::from(row.display()),
             ])
-            .style(style)
+            .style(Style::default().fg(Color::DarkGray)),
+            ChangeTreeRow::File { entry_index, .. } => {
+                let entry = &changes.entries[entry_index];
+                let selected = entry_index == changes.selected;
+                let checked = changes.selected_files.contains(&entry.path);
+                let style = if selected {
+                    Style::default()
+                        .bg(Color::DarkGray)
+                        .add_modifier(Modifier::BOLD)
+                } else if entry.conflicted {
+                    Style::default().fg(Color::LightRed)
+                } else if entry.untracked {
+                    Style::default().fg(Color::Yellow)
+                } else {
+                    Style::default()
+                };
+                Row::new(vec![
+                    Cell::from(if selected { ">" } else { " " }),
+                    Cell::from(if checked { "[x]" } else { "[ ]" }),
+                    Cell::from(entry.status_label()),
+                    Cell::from(row.display()),
+                ])
+                .style(style)
+            }
         });
     let title = if changes.loading {
         " Files (loading) ".to_owned()
     } else {
-        format!(" Files ({}) ", changes.entries.len())
+        format!(
+            " Files ({}; {} selected) ",
+            changes.entries.len(),
+            changes.selected_files.len()
+        )
     };
     let border_style = if changes.mode == ChangesMode::File {
         Style::default().fg(Color::Cyan)
@@ -135,11 +146,12 @@ fn render_files(frame: &mut Frame, changes: &ChangesState, area: Rect) {
         [
             Constraint::Length(2),
             Constraint::Length(3),
+            Constraint::Length(3),
             Constraint::Min(12),
         ],
     )
     .header(
-        Row::new(["", "XY", "Path"]).style(
+        Row::new(["", "Sel", "XY", "Tree"]).style(
             Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
@@ -280,7 +292,9 @@ fn render_footer(frame: &mut Frame, changes: &ChangesState, area: Rect) {
             Style::default().fg(if *is_error { Color::Red } else { Color::Green }),
         )
     } else {
-        Span::raw("s Stage   u Unstage   d Discard   m Commit   PgUp/PgDn Diff")
+        Span::raw(
+            "Space Select   A All   s Stage   u Unstage   d Discard   m Commit   PgUp/PgDn Diff",
+        )
     };
     let mode = match changes.mode {
         ChangesMode::File => "FILE",
@@ -358,23 +372,30 @@ fn render_commit_dialog(frame: &mut Frame, changes: &ChangesState) {
         if changes.commit_signoff { "on" } else { "off" },
         if changes.commit_signing { "on" } else { "off" },
     );
-    let text = vec![
-        Line::styled(
-            "Commit message:",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Line::raw(if changes.commit_message.is_empty() {
-            "_".to_owned()
-        } else {
-            changes.commit_message.clone()
-        }),
+    let mut text = vec![Line::styled(
+        "Commit message:",
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    )];
+    if changes.commit_message.is_empty() {
+        text.push(Line::raw("_"));
+    } else {
+        let mut lines = changes.commit_message.split('\n').peekable();
+        while let Some(line) = lines.next() {
+            text.push(Line::raw(if lines.peek().is_none() {
+                format!("{line}_")
+            } else {
+                line.to_owned()
+            }));
+        }
+    }
+    text.extend([
         Line::raw(""),
         Line::raw(options),
         Line::raw(""),
-        Line::raw("Enter commit   Esc cancel"),
-    ];
+        Line::raw("Enter newline   Ctrl-Enter/Ctrl-S commit   Esc cancel"),
+    ]);
     frame.render_widget(
         Paragraph::new(text)
             .block(Block::default().title(title).borders(Borders::ALL))

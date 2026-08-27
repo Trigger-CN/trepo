@@ -1,3 +1,4 @@
+mod change_tree;
 mod changes;
 mod graph;
 mod repository;
@@ -34,14 +35,14 @@ fn render_help(frame: &mut Frame) {
         Line::raw(""),
         Line::raw("j/k or arrows  Move selection / scroll active Repo task"),
         Line::raw("g/G            First / last"),
-        Line::raw("Enter          Open graph / select active overlay item"),
-        Line::raw("Space / A      Select project / all filtered projects"),
-        Line::raw("d              Toggle changed-project filter in Workspace"),
+        Line::raw("Enter          Open graph / newline in commit message"),
+        Line::raw("Space / A      Select current / all projects or Changed files"),
+        Line::raw("d              Toggle changed projects / discard one Changes scope"),
         Line::raw("a              Open Workspace Repo or Repository actions"),
         Line::raw("f, /, x        Graph filter / query / clear; retry failed Repo task"),
         Line::raw("Tab            Toggle Changes mode or active form field"),
-        Line::raw("s/u/d          Stage / unstage / discard selection"),
-        Line::raw("m              Commit staged changes; Ctrl-A/U/G toggle options"),
+        Line::raw("s/u            Stage / unstage selected Changes files or active scope"),
+        Line::raw("m              Commit; Ctrl-Enter/S submit, Ctrl-A/U/G options"),
         Line::raw("r              Refresh current page"),
         Line::raw("Esc / q / ?    Back / quit Workspace / toggle help"),
         Line::raw(""),
@@ -174,9 +175,11 @@ mod tests {
         let text = draw_text(&app, 120, 40);
         assert!(text.contains("Changed only"));
         assert!(text.contains("Changed files (24)"));
-        assert!(text.contains("M.  src/dirty-0.rs"));
+        assert!(text.contains("src/"));
+        assert!(text.contains("M.  "));
+        assert!(text.contains("dirty-0.rs"));
         assert!(text.contains("... "));
-        assert!(text.contains("more files"));
+        assert!(text.contains("more tree rows"));
         draw(&app, 80, 24);
     }
 
@@ -459,7 +462,8 @@ mod tests {
             return_screen: Screen::Workspace,
             entries: vec![entry.clone()],
             selected: 0,
-            mode: ChangesMode::Hunk,
+            selected_files: std::iter::once(entry.path.clone()).collect(),
+            mode: ChangesMode::File,
             selected_hunk: 0,
             selected_hunk_identity: Some((HunkSource::Worktree, 7)),
             selected_line: 0,
@@ -491,23 +495,40 @@ mod tests {
             preview_scroll: 0,
             operation_running: false,
             operation_generation: 0,
-            confirmation: Some(PendingOperation {
-                kind: OperationKind::RestoreWorktree,
-                change: entry,
-                target: OperationTarget::Hunk {
-                    source: HunkSource::Worktree,
-                    fingerprint: 7,
-                },
-                expected_token: 42,
-            }),
+            confirmation: None,
             message: None,
-            commit_message: String::new(),
-            commit_editing: true,
+            commit_message: "subject\n\nbody".into(),
+            commit_editing: false,
             commit_amend: false,
             commit_signoff: false,
             commit_signing: false,
             commit_running: false,
             commit_generation: 0,
+        });
+        for (width, height) in [(80, 24), (120, 40)] {
+            let text = draw_text(&app, width, height);
+            assert!(text.contains("src/"));
+            assert!(text.contains("main.rs"));
+            assert!(text.contains("1 selected"));
+            assert!(text.contains("[x]"));
+        }
+        app.changes.as_mut().unwrap().commit_editing = true;
+        for (width, height) in [(80, 24), (120, 40)] {
+            let text = draw_text(&app, width, height);
+            assert!(text.contains("subject"));
+            assert!(text.contains("body_"));
+            assert!(text.contains("Ctrl-Enter/Ctrl-S commit"));
+        }
+        let changes = app.changes.as_mut().unwrap();
+        changes.commit_editing = false;
+        changes.confirmation = Some(PendingOperation {
+            kind: OperationKind::RestoreWorktree,
+            change: changes.entries[0].clone(),
+            target: OperationTarget::Hunk {
+                source: HunkSource::Worktree,
+                fingerprint: 7,
+            },
+            expected_token: 42,
         });
         draw(&app, 80, 24);
         draw(&app, 120, 40);
