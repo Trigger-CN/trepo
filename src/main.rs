@@ -398,6 +398,13 @@ fn handle_key(app: &mut App, key: KeyEvent) {
             KeyCode::Backspace => {
                 app.edit_commit_message(repo_tui::app::state::CommitInput::Backspace)
             }
+            KeyCode::Delete => app.edit_commit_message(repo_tui::app::state::CommitInput::Delete),
+            KeyCode::Left => app.edit_commit_message(repo_tui::app::state::CommitInput::MoveLeft),
+            KeyCode::Right => app.edit_commit_message(repo_tui::app::state::CommitInput::MoveRight),
+            KeyCode::Up => app.edit_commit_message(repo_tui::app::state::CommitInput::MoveUp),
+            KeyCode::Down => app.edit_commit_message(repo_tui::app::state::CommitInput::MoveDown),
+            KeyCode::Home => app.edit_commit_message(repo_tui::app::state::CommitInput::MoveHome),
+            KeyCode::End => app.edit_commit_message(repo_tui::app::state::CommitInput::MoveEnd),
             KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 app.edit_commit_message(repo_tui::app::state::CommitInput::ToggleAmend)
             }

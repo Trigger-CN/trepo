@@ -250,9 +250,11 @@ Changes 页面分为文件树、hunk 列表、diff 检查器和提交对话框�
 - hunk 与 changed-line 级 stage、unstage、discard；行操作使用当前 diff 重建零上下文 patch，执行 `git apply --check --unidiff-zero` 后写入。
 - diff 模式支持 unified、side-by-side、word diff、忽略空白。
 - 二进制、重命名、submodule、mode change、大文件和不可解码文件明确降级。
-- commit 对话框支持多行 message 输入和 bracketed paste；`Enter` 追加换行，`Ctrl-Enter` 或 `Ctrl-S` 提交，amend/signoff/GPG signing 继续使用独立开关，默认不跳过 hooks。
+- commit 对话框使用独立 bordered message editor、options 区和带顶部分隔线的快捷键区；提示文本不与消息内容共用连续文本区域。
+- message 光标保存为 UTF-8 字符边界上的 byte offset；普通输入、换行和 bracketed paste 在光标处插入，`Left/Right` 按字符移动，`Up/Down` 尽量保持字符列，`Home/End` 跳到当前逻辑行首尾，`Backspace/Delete` 分别删除光标前/后的字符。
+- editor 根据光标逻辑行和显示宽度进行垂直、水平滚动，并使用 Ratatui 真实终端光标；`Enter` 插入换行，`Ctrl-Enter` 或 `Ctrl-S` 提交，amend/signoff/GPG signing 使用独立开关，默认不跳过 hooks。
 - 提交使用 project 级写锁并在锁内检查 `index.lock`；普通 commit 要求存在 staged 内容，amend 遵循 Git 当前 HEAD 语义。
-- commit 失败时合并 hook stdout/stderr，保留多行输入、选项和错误状态，允许修正后重试；成功后刷新 Changes 与 Workspace。
+- commit 失败时合并 hook stdout/stderr，保留多行输入、光标、选项和错误状态，允许修正后重试；成功后刷新 Changes 与 Workspace。
 
 文件名按原始字节保存，显示层才做可逆转义或 lossy 展示。Git 数据读取尽量使用 `-z`，正确处理空格、制表符、换行及非 UTF-8 路径。
 

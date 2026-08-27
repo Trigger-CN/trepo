@@ -228,7 +228,7 @@ cargo run -- doctor .
 
 - Workspace Inspector 与 Changes 共享展开式文件树，目录连接符不改变稳定文件身份。
 - Changes 文件多选和批量 stage/unstage；文件、hunk、changed-line 单目标 stage/unstage/discard。
-- 多行 commit/amend 输入与粘贴、signoff/signing、hook 输出和 message 恢复。
+- 多行 commit/amend 编辑器支持光标导航、当前位置输入与粘贴、signoff/signing、hook 输出和 message/cursor 恢复。
 - stash list/show/push/apply/pop/drop。
 - operation state、冲突列表、ours/theirs/mark-resolved 和 continue/skip/abort。
 
@@ -239,8 +239,9 @@ cargo run -- doctor .
 - diff token、hunk/line fingerprint 和 `git apply --check --unidiff-zero` 拒绝陈旧目标。
 - destructive file/hunk/line discard 确认；失败保留选择与错误，成功自动刷新。
 - 批量 stage/unstage 使用稳定 `PathBuf` 集合，在单次 project lock 内先验证全部 diff token；陈旧批次不产生部分写入。
-- bracketed paste 保留提交正文换行，80x24/120x40 TestBackend 覆盖文件树、多选计数和多行提交弹窗。
-- commit hook 失败保留 message/选项；stash 和 conflict 操作均有真实临时仓库测试。
+- bracketed paste 保留提交正文换行；Unicode 光标移动、中间插入/删除、行首尾和跨行移动有状态测试覆盖。
+- 80x24/120x40 TestBackend 验证独立 Message 边框、Options/Keys 分隔区和真实 cursor 位于消息编辑区域。
+- commit hook 失败保留 message/cursor/选项；stash 和 conflict 操作均有真实临时仓库测试。
 - merge conflict 下 ours/theirs、mark-resolved、continue/abort，以及 cherry-pick skip 已验证。
 
 关键基础设施：
@@ -385,7 +386,7 @@ cargo run -- doctor .
 | M1 工作区发现 | Done | 单 Git + fake Repo client 端到端通过 |
 | M1 状态扫描 | Done | porcelain fixture + 真实 Git + 缺失项目隔离通过 |
 | M1 Workspace UI | Done | 80x24/120x40 渲染和真实导航通过 |
-| M2 Changes/commit | Done | 文件树、多选批量 stage/unstage、多行 paste、file/hunk/line、stale/index lock 和真实 Git 通过 |
+| M2 Changes/commit | Done | 文件树、批量 stage/unstage、可导航多行 editor、file/hunk/line、stale/index lock 和真实 Git 通过 |
 | M2 stash/conflict | Done | stash 全流程、ours/theirs/resolved、continue/skip/abort 通过 |
 | M3 refs/integration | Done | branch/tag、merge/rebase/cherry-pick/revert 真实矩阵通过 |
 | M3 remotes | Done | bare remote fetch/pull/push/upstream/prune 与 remote 管理通过 |
@@ -406,7 +407,7 @@ cargo build
 
 - Graph 加载所有本地分支、远端分支、tag、HEAD 和每条 stash 的完整可达历史；大型仓库流式虚拟化仍是后续优化。
 - Graph 的 Branch/Query/Author/Since/Until 过滤在内存中组合执行，保留完整 all-refs topology，并按稳定 OID 维护选择和对象操作。
-- Workspace Inspector 与 Changes 共享稳定路径文件树；Changes 批量 stage/unstage 全量预检 token 后写入，多行提交输入支持 bracketed paste。
+- Workspace Inspector 与 Changes 共享稳定路径文件树；Changes 批量 stage/unstage 全量预检 token 后写入，多行提交编辑器支持 bracketed paste、Unicode 光标导航和清晰分区。
 - Git 与 Repo 写操作协调 workspace/project 锁、实时前置检查、确认和 generation。
 - Repo 批处理保留凭据脱敏后的逐行日志和逐项目结果，取消不承诺回滚并通过复扫恢复事实状态。
 - 当前无任意命令面板或 PTY takeover；交互认证、外部 editor/mergetool 明确依赖 M5。

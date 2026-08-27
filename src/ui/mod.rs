@@ -129,6 +129,26 @@ mod tests {
         text
     }
 
+    fn draw_text_and_cursor(
+        app: &App,
+        width: u16,
+        height: u16,
+    ) -> (String, ratatui::layout::Position) {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render(frame, app)).unwrap();
+        let cursor = terminal.get_cursor_position().unwrap();
+        let buffer = terminal.backend().buffer();
+        let mut text = String::new();
+        for y in 0..height {
+            for x in 0..width {
+                text.push_str(buffer[(x, y)].symbol());
+            }
+            text.push('\n');
+        }
+        (text, cursor)
+    }
+
     #[test]
     fn workspace_sync_confirmation_shows_scope_and_exact_command() {
         let mut app = app();
@@ -498,6 +518,7 @@ mod tests {
             confirmation: None,
             message: None,
             commit_message: "subject\n\nbody".into(),
+            commit_cursor: "subject\n\nbody".len(),
             commit_editing: false,
             commit_amend: false,
             commit_signoff: false,
@@ -514,10 +535,31 @@ mod tests {
         }
         app.changes.as_mut().unwrap().commit_editing = true;
         for (width, height) in [(80, 24), (120, 40)] {
-            let text = draw_text(&app, width, height);
+            let (text, cursor) = draw_text_and_cursor(&app, width, height);
+            assert!(text.contains(" Message "));
             assert!(text.contains("subject"));
-            assert!(text.contains("body_"));
+            assert!(text.contains("body"));
+            assert!(text.contains(" Options "));
+            assert!(text.contains(" Keys "));
+            assert!(text.contains("Arrows move"));
             assert!(text.contains("Ctrl-Enter/Ctrl-S commit"));
+            let lines = text.lines().collect::<Vec<_>>();
+            let message_y = lines
+                .iter()
+                .position(|line| line.contains(" Message "))
+                .unwrap();
+            let options_y = lines
+                .iter()
+                .position(|line| line.contains(" Options "))
+                .unwrap();
+            let keys_y = lines
+                .iter()
+                .position(|line| line.contains(" Keys "))
+                .unwrap();
+            assert!(message_y < usize::from(cursor.y));
+            assert!(usize::from(cursor.y) < options_y);
+            assert!(options_y < keys_y);
+            assert!(cursor.x < width);
         }
         let changes = app.changes.as_mut().unwrap();
         changes.commit_editing = false;
