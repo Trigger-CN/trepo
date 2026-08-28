@@ -5,10 +5,14 @@
 ## 1. 启动
 
 ```bash
-cargo run -- /path/to/repo-client
-cargo run -- /path/to/git-repository
+cargo run -- /path/to/repo-client        # 默认英文
+cargo run -- -zh /path/to/repo-client    # 中文界面
+cargo run -- -en /path/to/git-repository # 显式英文
+cargo run -- --zh /path/to/repo-client   # 也支持标准长参数
 cargo run -- doctor /path/to/workspace
 ```
+
+`-zh`/`--zh` 选择中文，`-en`/`--en` 选择英文；未指定时默认英文，中文和英文参数不能同时使用。语言保存在当前 App 实例中，不影响其他并行实例或测试。
 
 从 Repo 或 Git 工作区的任意子目录启动均可。发现 `.repo` 时进入 Repo 多仓库模式；否则打开所在的单 Git 仓库。
 
@@ -17,12 +21,13 @@ cargo run -- doctor /path/to/workspace
 ## 2. 最快上手
 
 1. 在 Workspace 用 `j/k` 选择仓库，用 `Space`/`A` 冻结一个或多个仓库。
-2. 对所选仓库按 `Z` 批量 Stash，或按 `D` 批量 Discard；检查每仓库统计后按 `y` 确认。
-3. 按 `Enter` 查看完整提交图，按 `c` 查看和处理文件改动，按 `o` 管理 stash、分支、标签和远端。
-4. 在 Changes 用 `Space`/`A` 多选文件，按 `z/s/u/d` 执行 Stash/Stage/Unstage/Discard；`Tab` 切换 file/hunk/line 单目标作用域。
-5. 暂存完成后按 `m` 输入提交信息，按 `Ctrl-Enter` 或 `Ctrl-S` 提交。
-6. 需要推送时按 `o`，切换到 Remotes，按 `a` 选择 Push；也可在 Graph 选中本地分支对象后推送。
-7. 出现确认框时，仔细检查冻结目标和参数，按 `y` 执行，按 `n` 或 `Esc` 取消。
+2. 按 `d` 可在“全部仓库 → 仅改动仓库 → 改动仓库及文件树”三种主页视图间循环。
+3. 对所选仓库按 `Z` 批量 Stash，或按 `D` 批量 Discard；检查每仓库统计后按 `y` 确认。
+4. 按 `Enter` 查看完整提交图，按 `c` 查看和处理文件改动，按 `o` 管理 stash、分支、标签和远端。
+5. 在 Changes 用 `Space`/`A` 多选文件，按 `z/s/u/d` 执行 Stash/Stage/Unstage/Discard；`Tab` 切换 file/hunk/line 单目标作用域。
+6. 暂存完成后按 `m` 输入提交信息，按 `Ctrl-Enter` 或 `Ctrl-S` 提交。
+7. 需要推送时按 `o`，切换到 Remotes，按 `a` 选择 Push；也可在 Graph 选中本地分支对象后推送。
+8. 出现确认框时，仔细检查冻结目标和参数，按 `y` 执行，按 `n` 或 `Esc` 取消。
 
 ## 3. 通用交互规则
 
@@ -69,7 +74,7 @@ flowchart TD
 
 ## 5. Workspace 多仓库主页
 
-Workspace 展示仓库状态、HEAD、ahead/behind；宽屏右侧 Inspector 还会展示选中仓库的修改文件树。
+Workspace 展示仓库状态、HEAD、ahead/behind。`d` 的第三态会直接在左侧主列表中展开 dirty 仓库的修改文件树；宽屏右侧 Inspector 仍展示选中仓库详情。文件视觉行不成为独立选择项，导航、批处理和 Enter/c/o 始终作用于对应仓库。
 
 ### 操作
 
@@ -77,7 +82,7 @@ Workspace 展示仓库状态、HEAD、ahead/behind；宽屏右侧 Inspector 还�
 | --- | --- |
 | `j/k` | 选择仓库 |
 | `/` | 输入 project name/path 搜索，`Enter` 或 `Esc` 结束输入 |
-| `d` | 只显示有改动的仓库/恢复全部 |
+| `d` | 循环切换：全部仓库 → 仅改动仓库 → 改动仓库及其文件树 → 全部仓库 |
 | `Space` | 选择或取消当前仓库，供 Workspace Git 和 Repo 批任务使用 |
 | `A` | 选择或取消当前过滤结果中的所有仓库 |
 | `Z` | Stash 所选仓库的完整 dirty 状态，包含 untracked；必须确认 |
@@ -86,6 +91,8 @@ Workspace 展示仓库状态、HEAD、ahead/behind；宽屏右侧 Inspector 还�
 | `c` | 打开选中仓库的 Changes |
 | `o` | 打开选中仓库的 Repository 管理 |
 | `a` | 打开 Repo 批任务，仅 Android Repo 工作区有效 |
+
+搜索会与两个改动视图按 AND 组合；切换视图前后会按稳定 `ProjectId` 恢复当前仓库，文件树行不改变仓库选择或操作目标。
 
 ### Workspace Git 批任务流程
 
@@ -150,6 +157,8 @@ Graph 使用纯拓扑顺序加载所有本地分支、远端分支、tag、HEAD 
 
 拓扑使用实心 `─│├┤┬┴┼┌┐└┘` 连接；`◆` 是多 parent merge，`◉` 表示 parent 不在当前已加载历史中。紧凑 Graph 最多直接绘制 10 条 lane，`~N` 表示右侧还有 N 条 lane 未投影，避免把截断后的线误认为真实拓扑。窄屏会先隐藏 Age 和 Author，再隐藏 Date，Subject 始终保留最低可读宽度。
 
+长 Subject 会按 Subject 列的终端显示宽度换行，每个提交行使用实际视觉高度；移动选择和 viewport 仍绑定原始 commit OID。宽屏 Inspector 中的完整 body 按原始换行拆分并保留空行。
+
 ### 浏览与过滤
 
 | 按键 | 操作 |
@@ -210,6 +219,8 @@ flowchart TD
 - Graph 本地分支的强推始终为 `--force-with-lease`，不提供裸 `--force`。
 
 ## 7. Changes 文件改动页
+
+Diff 的每个源行固定占一个终端渲染行，超宽部分在面板内截断，不自动折回终端最左侧。路径、提交文本和外部 Git 输出按终端显示列宽处理，中文双宽字符不会被切半；控制字符会转成可见文本，不能改变终端布局。
 
 ### 作用域与操作流程
 

@@ -1,6 +1,7 @@
 use anyhow::{bail, Result};
 
 use crate::domain::{RepositoryAction, RepositorySnapshot};
+use crate::i18n::Language;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RepositoryTab {
@@ -144,6 +145,14 @@ pub fn choices(tab: RepositoryTab) -> &'static [RepositoryChoice] {
 }
 
 pub fn action_preview(action: &RepositoryAction, snapshot: &RepositorySnapshot) -> Vec<String> {
+    action_preview_with_language(Language::En, action, snapshot)
+}
+
+pub fn action_preview_with_language(
+    language: Language,
+    action: &RepositoryAction,
+    snapshot: &RepositorySnapshot,
+) -> Vec<String> {
     match action {
         RepositoryAction::Push {
             remote,
@@ -159,15 +168,27 @@ pub fn action_preview(action: &RepositoryAction, snapshot: &RepositorySnapshot) 
                 .find(|entry| entry.name == remote_name);
             let range = match (remote_branch, local) {
                 (Some(remote), Some(local)) => format!("{}..{}", remote.oid, local.oid),
-                (None, Some(local)) => format!("new branch -> {}", local.oid),
-                _ => "unresolved until execution".to_owned(),
+                (None, Some(local)) => {
+                    format!("{} -> {}", language.text("new branch", "新分支"), local.oid)
+                }
+                _ => language
+                    .text("unresolved until execution", "执行时解析")
+                    .to_owned(),
             };
             vec![
-                format!("Remote: {remote}"),
-                format!("Refspec: {branch}:{branch}"),
-                format!("Commit range: {range}"),
-                format!("Set upstream: {}", on_off(*set_upstream)),
-                format!("Force with lease: {}", on_off(*force_with_lease)),
+                format!("{}: {remote}", language.label("Remote")),
+                format!("{}: {branch}:{branch}", language.label("Refspec")),
+                format!("{}: {range}", language.label("Commit range")),
+                format!(
+                    "{}: {}",
+                    language.label("Set upstream"),
+                    language.label(on_off(*set_upstream))
+                ),
+                format!(
+                    "{}: {}",
+                    language.label("Force with lease"),
+                    language.label(on_off(*force_with_lease))
+                ),
             ]
         }
         RepositoryAction::StashPush {
@@ -176,9 +197,21 @@ pub fn action_preview(action: &RepositoryAction, snapshot: &RepositorySnapshot) 
             staged_only,
             ..
         } => vec![
-            format!("Include untracked: {}", on_off(*include_untracked)),
-            format!("Keep index: {}", on_off(*keep_index)),
-            format!("Staged only: {}", on_off(*staged_only)),
+            format!(
+                "{}: {}",
+                language.label("Include untracked"),
+                language.label(on_off(*include_untracked))
+            ),
+            format!(
+                "{}: {}",
+                language.label("Keep index"),
+                language.label(on_off(*keep_index))
+            ),
+            format!(
+                "{}: {}",
+                language.label("Staged only"),
+                language.label(on_off(*staged_only))
+            ),
         ],
         RepositoryAction::StashApply {
             selector,
@@ -188,38 +221,56 @@ pub fn action_preview(action: &RepositoryAction, snapshot: &RepositorySnapshot) 
             selector,
             restore_index,
         } => vec![
-            format!("Stash: {selector}"),
-            format!("Restore index: {}", on_off(*restore_index)),
+            format!("{}: {selector}", language.label("Stash")),
+            format!(
+                "{}: {}",
+                language.label("Restore index"),
+                language.label(on_off(*restore_index))
+            ),
         ],
-        RepositoryAction::StashBranch { name, selector } => {
-            vec![format!("Branch: {name}"), format!("Stash: {selector}")]
-        }
-        RepositoryAction::StashClear => {
-            vec![format!("Stashes to remove: {}", snapshot.stashes.len())]
-        }
+        RepositoryAction::StashBranch { name, selector } => vec![
+            format!("{}: {name}", language.label("Branch")),
+            format!("{}: {selector}", language.label("Stash")),
+        ],
+        RepositoryAction::StashClear => vec![format!(
+            "{}: {}",
+            language.label("Stashes to remove"),
+            snapshot.stashes.len()
+        )],
         RepositoryAction::RemoteAdd { name, url }
         | RepositoryAction::RemoteSetUrl { name, url } => vec![
-            format!("Remote: {name}"),
-            format!("URL: {}", redact_url(url)),
+            format!("{}: {name}", language.label("Remote")),
+            format!("{}: {}", language.label("URL"), redact_url(url)),
         ],
         RepositoryAction::Pull {
             remote,
             branch,
             rebase,
         } => vec![
-            format!("Remote: {remote}"),
-            format!("Branch: {branch}"),
-            format!("Rebase: {}", on_off(*rebase)),
+            format!("{}: {remote}", language.label("Remote")),
+            format!("{}: {branch}", language.label("Branch")),
+            format!(
+                "{}: {}",
+                language.label("Rebase"),
+                language.label(on_off(*rebase))
+            ),
         ],
         RepositoryAction::Fetch { remote, prune } => vec![
-            format!("Remote: {remote}"),
-            format!("Prune: {}", on_off(*prune)),
+            format!("{}: {remote}", language.label("Remote")),
+            format!(
+                "{}: {}",
+                language.label("Prune"),
+                language.label(on_off(*prune))
+            ),
         ],
         RepositoryAction::RemotePrune { remote }
-        | RepositoryAction::RemoteRemove { name: remote } => vec![format!("Remote: {remote}")],
-        RepositoryAction::SetUpstream { branch, upstream } => {
-            vec![format!("Branch: {branch}"), format!("Upstream: {upstream}")]
+        | RepositoryAction::RemoteRemove { name: remote } => {
+            vec![format!("{}: {remote}", language.label("Remote"))]
         }
+        RepositoryAction::SetUpstream { branch, upstream } => vec![
+            format!("{}: {branch}", language.label("Branch")),
+            format!("{}: {upstream}", language.label("Upstream")),
+        ],
         _ => Vec::new(),
     }
 }

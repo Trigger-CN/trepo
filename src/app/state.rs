@@ -15,6 +15,7 @@ use crate::domain::{
     RepositorySnapshot, RiskLevel, Workspace, WorkspaceGitAction, WorkspaceGitSpec, WorkspaceKind,
     WorkspaceSummary,
 };
+use crate::i18n::Language;
 use crate::services::operations::OperationRunner;
 use crate::services::repo_batch::{self, RepoBatchEvent, RepoBatchEventKind, RepoBatchHandle};
 use crate::services::scanner::{self, ScanResult};
@@ -28,6 +29,32 @@ pub enum Screen {
     Graph,
     Changes,
     Repository,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WorkspaceView {
+    #[default]
+    All,
+    Changed,
+    ChangedWithFiles,
+}
+
+impl WorkspaceView {
+    pub fn next(self) -> Self {
+        match self {
+            Self::All => Self::Changed,
+            Self::Changed => Self::ChangedWithFiles,
+            Self::ChangedWithFiles => Self::All,
+        }
+    }
+
+    pub fn filters_changed(self) -> bool {
+        self != Self::All
+    }
+
+    pub fn expands_files(self) -> bool {
+        self == Self::ChangedWithFiles
+    }
 }
 
 #[derive(Debug)]
@@ -908,7 +935,8 @@ pub struct App {
     pub selected: usize,
     pub search: String,
     pub search_mode: bool,
-    pub changed_only: bool,
+    pub workspace_view: WorkspaceView,
+    pub language: Language,
     pub help: bool,
     pub generation: u64,
     pub scanning: usize,
@@ -954,6 +982,10 @@ pub struct App {
 }
 impl App {
     pub fn new(workspace: Workspace, concurrency: usize) -> Self {
+        Self::new_with_language(workspace, concurrency, Language::En)
+    }
+
+    pub fn new_with_language(workspace: Workspace, concurrency: usize, language: Language) -> Self {
         let (scan_tx, scan_rx) = mpsc::unbounded_channel();
         let (graph_tx, graph_rx) = mpsc::unbounded_channel();
         let (changes_tx, changes_rx) = mpsc::unbounded_channel();
@@ -980,7 +1012,8 @@ impl App {
             selected: 0,
             search: String::new(),
             search_mode: false,
-            changed_only: false,
+            workspace_view: WorkspaceView::All,
+            language,
             help: false,
             generation: 0,
             scanning: 0,
@@ -1070,7 +1103,7 @@ impl App {
             .iter()
             .enumerate()
             .filter(|(_, snapshot)| {
-                (!self.changed_only || snapshot.worktree.is_dirty())
+                (!self.workspace_view.filters_changed() || snapshot.worktree.is_dirty())
                     && (query.is_empty()
                         || snapshot.project.name.to_lowercase().contains(&query)
                         || snapshot
@@ -1085,11 +1118,11 @@ impl App {
             .collect()
     }
 
-    pub fn toggle_changed_only(&mut self) {
+    pub fn cycle_workspace_view(&mut self) {
         let selected_id = self
             .selected_project()
             .map(|snapshot| snapshot.project.id.clone());
-        self.changed_only = !self.changed_only;
+        self.workspace_view = self.workspace_view.next();
         self.restore_workspace_selection(selected_id.as_ref());
     }
 
@@ -3486,7 +3519,7 @@ mod tests {
     }
 
     #[test]
-    fn changed_only_combines_with_search_and_preserves_project_identity() {
+    fn workspace_view_cycles_with_search_and_preserves_project_identity() {
         let workspace = Workspace {
             root: PathBuf::from("/tmp"),
             kind: WorkspaceKind::Repo,
@@ -3504,22 +3537,30 @@ mod tests {
         app.projects[3].worktree.untracked = 1;
         app.projects[4].worktree.conflicted = 1;
         app.selected = 2;
-        app.toggle_changed_only();
+
+        app.cycle_workspace_view();
+        assert_eq!(app.workspace_view, WorkspaceView::Changed);
         assert_eq!(app.filtered_indices(), vec![1, 2, 3, 4]);
         assert_eq!(app.selected_project().unwrap().project.name, "modified");
+
         app.search = "untracked".into();
         app.move_selection(0);
-        assert_eq!(app.filtered_indices(), vec![3]);
-        assert_eq!(app.selected_project().unwrap().project.name, "untracked");
-        let untracked_id = app.projects[3].project.id.clone();
+        let untracked_id = app.selected_project().unwrap().project.id.clone();
         app.search.clear();
         app.restore_workspace_selection(Some(&untracked_id));
-        app.toggle_changed_only();
+        app.cycle_workspace_view();
+        assert_eq!(app.workspace_view, WorkspaceView::ChangedWithFiles);
         assert_eq!(app.selected_project().unwrap().project.name, "untracked");
-        app.toggle_changed_only();
+
+        app.cycle_workspace_view();
+        assert_eq!(app.workspace_view, WorkspaceView::All);
         assert_eq!(app.selected_project().unwrap().project.name, "untracked");
+
         app.search = "clean".into();
         app.restore_workspace_selection(Some(&untracked_id));
+        assert!(app.selected_project().is_some());
+        assert_eq!(app.selected_project().unwrap().project.name, "clean");
+        app.cycle_workspace_view();
         assert!(app.selected_project().is_none());
         assert_eq!(app.selected, 0);
     }

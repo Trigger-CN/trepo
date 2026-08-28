@@ -15,7 +15,9 @@ See [the user guide and operation flowcharts](docs/USER_GUIDE.md), [the design](
 
 ```bash
 cargo build --release
-cargo run -- /path/to/repo-client
+cargo run -- /path/to/repo-client          # English (default)
+cargo run -- -zh /path/to/repo-client      # Chinese
+cargo run -- --en /path/to/repo-client     # explicit English
 cargo run -- doctor /path/to/workspace
 ```
 
@@ -42,7 +44,7 @@ Starting from a subdirectory is supported. If no `.repo` directory is found, rep
 | `Tab` | Cycle file / hunk / line mode in Changes; switch tabs or form fields |
 | `z` | Changes: confirm stashing the selected files, including untracked files |
 | `s` / `u` | Stage / unstage selected Changes files, or the active file, hunk, or line when no file selection exists |
-| `d` | Workspace: toggle changed-project filter; Changes: confirm complete Discard for selected files or discard the active file/hunk/line |
+| `d` | Workspace: cycle all projects → changed projects → changed projects with file trees; Changes: confirm complete Discard for selected files or discard the active file/hunk/line |
 | `m` | Open the bordered multiline commit editor from Changes; typing and multiline paste insert at the cursor |
 | `Ctrl-A` / `Ctrl-U` / `Ctrl-G` | Toggle amend / sign-off / signing in Changes commit dialog |
 | `o` | Open Repository management from Workspace, Graph, or Changes |
@@ -61,10 +63,10 @@ Implemented:
 - Repo and single-Git workspace discovery
 - Concurrent porcelain v2 status scanning
 - staged, unstaged, untracked, conflict, HEAD, ahead/behind summary, and file-level porcelain status captured from the same scan
-- searchable responsive Workspace page with an optional changed-project-only filter and a wide-screen Inspector change tree
+- searchable responsive Workspace page where `d` cycles all projects, changed projects, and changed projects expanded with their file trees; repository selection remains bound to stable project identity
 - complete all-refs commit graph covering local branches, remote branches, tags, HEAD, and every stash entry, ordered with pure topological order and showing UTC calendar dates
 - compact pipe-based topology lanes with left-shifting continuations, solid split/merge connectors, explicit `~N` hidden-lane markers, and `◉` missing-parent boundaries
-- responsive Graph columns preserve topology, subject, and important refs first; the main list folds dense remote/tag badges into `R:+N`/`T:+N` while the Inspector and object menu retain every ref
+- responsive Graph columns preserve topology, wrapped subject text, and important refs first; rows use their real visual height, commit body keeps original line breaks, and dense remote/tag badges fold into `R:+N`/`T:+N` while Inspector/object menus retain every ref
 - in-memory Graph filtering by local/remote branch history, commit OID/subject/body/ref text, author, and inclusive UTC date range; conditions combine with AND while selection remains bound to commit OID
 - Graph two-level object menu: select a commit node, choose its commit/HEAD/local branch/remote branch/tag/stash object, then choose a fixed contextual action
 - Graph contextual commit/amend, advanced stash creation, branch/tag creation, merge, rebase, cherry-pick, revert, stash actions, and local-branch Push/Force Push
@@ -77,7 +79,7 @@ Implemented:
 - workspace or per-project pending/running/success/failure/cancelled display with bounded, credential-redacted stdout/stderr logs; aggregated Sync uses only its command exit status for the participating scope
 - process-group cancellation without rollback claims, automatic real-state rescan, and retry-failed-scope
 - background upload uses the explicitly reviewed `--current-branch --yes` mode; interactive authentication and advanced upload parameters wait for M5 PTY takeover
-- shared directory-tree rendering for changed files in Workspace Inspector and Changes, while operations remain bound to exact file paths
+- shared directory-tree rendering for changed files in Workspace main-list expansion, Workspace Inspector, and Changes, while operations remain bound to exact repository/file identities
 - stable Changes file multi-selection with all-token-preflight batch Stage/Unstage, confirmed selected-path Stash, and confirmed complete Discard of tracked index/worktree plus untracked paths
 - guarded file-, hunk-, and changed-line stage, unstage, and discard with lock-time patch reconstruction
 - `git apply --check`, stale token/fingerprint rejection, destructive confirmation, and failure-state preservation
@@ -87,5 +89,7 @@ Implemented:
 - separate Push and Force Push entries in Repository and Graph; force updates always use `--force-with-lease`, with exact refspec/OID-range preview and explicit remote-history warning
 - project locks, worktree-aware index-lock checks, snapshot tokens, generation checks, and automatic scoped refresh
 - `doctor` diagnostics and parser/real Git/TestBackend-focused tests
+- English UI by default, with instance-scoped Chinese/English selection through exact `-zh`/`-en` compatibility flags or standard `--zh`/`--en` flags
+- terminal-column-aware sanitization, wrapping, and truncation for Git output and paths; control characters are rendered visibly and long diff source lines never auto-wrap across panel borders
 
 Planned next: command palette and PTY takeover (M5), including interactive authentication and external mergetool/editor handoff.

@@ -6,22 +6,32 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Cell, Clear, List, ListItem, Paragraph, Row, Table, Wrap};
 use ratatui::Frame;
 
-use crate::app::repository::{action_preview, FormField};
-use crate::app::state::{graph_actions, graph_object_label, App, GraphState};
+use crate::app::repository::{action_preview_with_language, FormField};
+use crate::app::state::{graph_actions, App, GraphObjectKind, GraphState};
 use crate::domain::{CommitRef, CommitRefKind, RiskLevel};
 
 pub fn render(frame: &mut Frame, app: &App) {
     let area = frame.area();
     if area.width < 60 || area.height < 12 {
         frame.render_widget(
-            Paragraph::new("Terminal too small. Resize to at least 60x12. Press Esc to return.")
-                .block(Block::default().title(" Graph ").borders(Borders::ALL)),
+            Paragraph::new(app.language.text(
+                "Terminal too small. Resize to at least 60x12. Press Esc to return.",
+                "终端太小，请调整到至少 60x12，按 Esc 返回。",
+            ))
+            .block(
+                Block::default()
+                    .title(app.language.text(" Graph ", " 提交图 "))
+                    .borders(Borders::ALL),
+            ),
             area,
         );
         return;
     }
     let Some(graph) = &app.graph else {
-        frame.render_widget(Paragraph::new("No repository selected"), area);
+        frame.render_widget(
+            Paragraph::new(app.language.text("No repository selected", "未选择仓库")),
+            area,
+        );
         return;
     };
 
@@ -43,8 +53,9 @@ pub fn render(frame: &mut Frame, app: &App) {
                     .add_modifier(Modifier::BOLD),
             ),
             Span::raw(format!(
-                "  {}  /  Graph{}",
+                "  {}  /  {}{}",
                 graph.project.name,
+                app.language.text("Graph", "提交图"),
                 if graph.filter.is_active() {
                     format!("  [{}]", graph.filter.summary())
                 } else {
@@ -61,21 +72,25 @@ pub fn render(frame: &mut Frame, app: &App) {
             .direction(Direction::Horizontal)
             .constraints([Constraint::Percentage(78), Constraint::Percentage(22)])
             .split(vertical[1]);
-        render_commits(frame, graph, body[0]);
-        render_detail(frame, graph, body[1]);
+        render_commits(frame, app, graph, body[0]);
+        render_detail(frame, app, graph, body[1]);
     } else {
-        render_commits(frame, graph, vertical[1]);
+        render_commits(frame, app, graph, vertical[1]);
     }
 
     let footer = if graph.loading {
-        Span::styled("Loading commits...", Style::default().fg(Color::Yellow))
+        Span::styled(
+            app.language.text("Loading commits...", "正在加载提交..."),
+            Style::default().fg(Color::Yellow),
+        )
     } else if app
         .repository
         .as_ref()
         .is_some_and(|state| state.action_running)
     {
         Span::styled(
-            "Running Git operation...",
+            app.language
+                .text("Running Git operation...", "正在执行 Git 操作..."),
             Style::default().fg(Color::Yellow),
         )
     } else if let Some((error, message)) = &graph.message {
@@ -84,20 +99,23 @@ pub fn render(frame: &mut Frame, app: &App) {
             Style::default().fg(if *error { Color::Red } else { Color::Green }),
         )
     } else {
-        Span::raw("Enter Objects  j/k Move  f Filter  / Search  x Clear  r Reload  Esc Back")
+        Span::raw(app.language.text(
+            "Enter Objects  j/k Move  f Filter  / Search  x Clear  r Reload  Esc Back",
+            "Enter 对象  j/k 移动  f 过滤  / 搜索  x 清除  r 重载  Esc 返回",
+        ))
     };
     frame.render_widget(Paragraph::new(Line::from(footer)), vertical[2]);
     if graph.object_menu {
         render_object_menu(frame, app, graph);
     }
     if graph.action_menu {
-        render_action_menu(frame, graph);
+        render_action_menu(frame, app, graph);
     }
     if graph.form.is_some() {
-        render_graph_form(frame, graph);
+        render_graph_form(frame, app, graph);
     }
     if graph.filter_form.is_some() {
-        render_filter_form(frame, graph);
+        render_filter_form(frame, app, graph);
     }
     if app
         .repository
@@ -108,7 +126,7 @@ pub fn render(frame: &mut Frame, app: &App) {
     }
 }
 
-fn render_filter_form(frame: &mut Frame, graph: &GraphState) {
+fn render_filter_form(frame: &mut Frame, app: &App, graph: &GraphState) {
     let Some(form) = graph.filter_form.as_ref() else {
         return;
     };
@@ -122,8 +140,9 @@ fn render_filter_form(frame: &mut Frame, graph: &GraphState) {
             let suffix = if index == form.selected { "_" } else { "" };
             Line::styled(
                 format!(
-                    "{} {label}: {value}{suffix}",
-                    if index == form.selected { ">" } else { " " }
+                    "{} {}: {value}{suffix}",
+                    if index == form.selected { ">" } else { " " },
+                    app.language.label(label)
                 ),
                 if index == form.selected {
                     Style::default().fg(Color::Cyan)
@@ -135,18 +154,24 @@ fn render_filter_form(frame: &mut Frame, graph: &GraphState) {
         .collect::<Vec<_>>();
     lines.push(Line::raw(""));
     lines.push(Line::styled(
-        "Branch matches local/remote refs. Dates use YYYY-MM-DD UTC.",
+        app.language.text(
+            "Branch matches local/remote refs. Dates use YYYY-MM-DD UTC.",
+            "分支匹配本地/远程引用，日期使用 UTC 的 YYYY-MM-DD。",
+        ),
         Color::DarkGray,
     ));
     if let Some(error) = &graph.filter_error {
         lines.push(Line::styled(error.clone(), Color::LightRed));
     }
-    lines.push(Line::raw("Tab/Up/Down Field   Enter Apply   Esc Cancel"));
+    lines.push(Line::raw(app.language.text(
+        "Tab/Up/Down Field   Enter Apply   Esc Cancel",
+        "Tab/上/下 字段   Enter 应用   Esc 取消",
+    )));
     frame.render_widget(
         Paragraph::new(lines)
             .block(
                 Block::default()
-                    .title(" Graph filters ")
+                    .title(app.language.text(" Graph filters ", " 提交图过滤 "))
                     .borders(Borders::ALL),
             )
             .wrap(Wrap { trim: false }),
@@ -159,19 +184,23 @@ fn render_object_menu(frame: &mut Frame, app: &App, graph: &GraphState) {
     frame.render_widget(Clear, area);
     let objects = app.graph_objects();
     let items = objects.iter().enumerate().map(|(index, object)| {
-        ListItem::new(graph_object_label(object)).style(menu_style(index == graph.object_selected))
+        ListItem::new(localized_graph_object_label(app, object))
+            .style(menu_style(index == graph.object_selected))
     });
     frame.render_widget(
         List::new(items).block(
             Block::default()
-                .title(" Objects on selected node ")
+                .title(
+                    app.language
+                        .text(" Objects on selected node ", " 所选节点上的对象 "),
+                )
                 .borders(Borders::ALL),
         ),
         area,
     );
 }
 
-fn render_action_menu(frame: &mut Frame, graph: &GraphState) {
+fn render_action_menu(frame: &mut Frame, app: &App, graph: &GraphState) {
     let Some(object) = graph.selected_object.as_ref() else {
         return;
     };
@@ -181,19 +210,24 @@ fn render_action_menu(frame: &mut Frame, graph: &GraphState) {
         .iter()
         .enumerate()
         .map(|(index, choice)| {
-            ListItem::new(choice.label()).style(menu_style(index == graph.action_selected))
+            ListItem::new(app.language.action(choice.label()))
+                .style(menu_style(index == graph.action_selected))
         });
     frame.render_widget(
         List::new(items).block(
             Block::default()
-                .title(format!(" Actions for {} ", graph_object_label(object)))
+                .title(format!(
+                    " {}: {} ",
+                    app.language.text("Actions for", "对象操作"),
+                    localized_graph_object_label(app, object)
+                ))
                 .borders(Borders::ALL),
         ),
         area,
     );
 }
 
-fn render_graph_form(frame: &mut Frame, graph: &GraphState) {
+fn render_graph_form(frame: &mut Frame, app: &App, graph: &GraphState) {
     let Some(form) = graph.form.as_ref() else {
         return;
     };
@@ -210,11 +244,11 @@ fn render_graph_form(frame: &mut Frame, graph: &GraphState) {
             } else {
                 ""
             };
+            let value = localized_field_value(app, field);
             Line::styled(
                 format!(
-                    "{prefix} {}: {}{hint}",
-                    field.label(),
-                    field.display_value()
+                    "{prefix} {}: {value}{hint}",
+                    app.language.label(field.label())
                 ),
                 if index == form.selected {
                     Style::default().fg(Color::Cyan)
@@ -232,12 +266,15 @@ fn render_graph_form(frame: &mut Frame, graph: &GraphState) {
         ));
     }
     lines.push(Line::raw(""));
-    lines.push(Line::raw("Enter execute   Esc cancel"));
+    lines.push(Line::raw(
+        app.language
+            .text("Enter execute   Esc cancel", "Enter 执行   Esc 取消"),
+    ));
     frame.render_widget(
         Paragraph::new(lines)
             .block(
                 Block::default()
-                    .title(format!(" {} ", form.choice.label()))
+                    .title(format!(" {} ", app.language.action(form.choice.label())))
                     .borders(Borders::ALL),
             )
             .wrap(Wrap { trim: false }),
@@ -255,9 +292,17 @@ fn render_confirmation(frame: &mut Frame, app: &App) {
     let area = centered_rect(70, 46, frame.area());
     frame.render_widget(Clear, area);
     let risk = match action.risk() {
-        RiskLevel::RemoteWrite => "This action writes to a remote repository.",
-        RiskLevel::Destructive => "This action can discard local or reference state.",
-        _ => "Confirm this repository operation.",
+        RiskLevel::RemoteWrite => app.language.text(
+            "This action writes to a remote repository.",
+            "此操作会写入远程仓库。",
+        ),
+        RiskLevel::Destructive => app.language.text(
+            "This action can discard local or reference state.",
+            "此操作可能丢弃本地改动或引用状态。",
+        ),
+        _ => app
+            .language
+            .text("Confirm this repository operation.", "请确认此仓库操作。"),
     };
     let mut lines = vec![
         Line::styled(
@@ -265,25 +310,48 @@ fn render_confirmation(frame: &mut Frame, app: &App) {
             Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
         ),
         Line::raw(""),
-        Line::raw(format!("Action: {}", action.label())),
+        Line::raw(format!(
+            "{}: {}",
+            app.language.text("Action", "操作"),
+            app.language.action(action.label())
+        )),
     ];
     if let Some(snapshot) = state.snapshot.as_ref() {
-        lines.extend(action_preview(action, snapshot).into_iter().map(Line::raw));
+        lines.extend(
+            action_preview_with_language(app.language, action, snapshot)
+                .into_iter()
+                .map(Line::raw),
+        );
     }
     lines.extend([
         Line::raw(""),
-        Line::raw("Press y to continue or n/Esc to cancel."),
+        Line::raw(app.language.text(
+            "Press y to continue or n/Esc to cancel.",
+            "按 y 继续，按 n/Esc 取消。",
+        )),
     ]);
     frame.render_widget(
         Paragraph::new(lines)
             .block(
                 Block::default()
-                    .title(" Confirm operation ")
+                    .title(app.language.text(" Confirm operation ", " 确认操作 "))
                     .borders(Borders::ALL),
             )
             .wrap(Wrap { trim: false }),
         area,
     );
+}
+
+fn localized_graph_object_label(app: &App, object: &crate::app::state::GraphObject) -> String {
+    let kind = match object.kind {
+        GraphObjectKind::Commit => "Commit",
+        GraphObjectKind::Head => "HEAD",
+        GraphObjectKind::LocalBranch => "Local branch",
+        GraphObjectKind::RemoteBranch => "Remote branch",
+        GraphObjectKind::Tag => "Tag",
+        GraphObjectKind::Stash => "Stash",
+    };
+    format!("{}: {}", app.language.label(kind), object.name)
 }
 
 fn menu_style(selected: bool) -> Style {
@@ -357,14 +425,14 @@ fn commit_table_layout(width: u16, desired_graph_width: u16) -> CommitTableLayou
     }
 }
 
-fn render_commits(frame: &mut Frame, graph: &crate::app::state::GraphState, area: Rect) {
+fn render_commits(frame: &mut Frame, app: &App, graph: &crate::app::state::GraphState, area: Rect) {
     if let Some(error) = &graph.error {
         frame.render_widget(
             Paragraph::new(error.clone())
                 .style(Style::default().fg(Color::Red))
                 .block(
                     Block::default()
-                        .title(" Commit graph ")
+                        .title(app.language.text(" Commit graph ", " 提交图 "))
                         .borders(Borders::ALL),
                 )
                 .wrap(Wrap { trim: false }),
@@ -378,8 +446,7 @@ fn render_commits(frame: &mut Frame, graph: &crate::app::state::GraphState, area
         .iter()
         .position(|index| *index == graph.selected)
         .unwrap_or(0);
-    let visible = area.height.saturating_sub(3) as usize;
-    let start = viewport_start(selected_visible, visible, indices.len());
+    let row_budget = area.height.saturating_sub(3) as usize;
     let topology = super::graph_layout::topology_rows(&graph.commits, 10);
     let desired_graph_width = topology
         .iter()
@@ -388,12 +455,30 @@ fn render_commits(frame: &mut Frame, graph: &crate::app::state::GraphState, area
         .unwrap_or(2)
         .max(7) as u16;
     let table_layout = commit_table_layout(area.width, desired_graph_width);
+    let subject_width = subject_column_width(area.width, table_layout);
+    let row_heights = indices
+        .iter()
+        .map(|index| {
+            graph.commits.get(*index).map_or(1, |commit| {
+                subject_lines(&commit.subject, subject_width).len()
+            })
+        })
+        .collect::<Vec<_>>();
+    let start = variable_viewport_start(selected_visible, row_budget, &row_heights);
+    let mut used_rows = 0;
     let rows = indices
         .iter()
         .copied()
+        .zip(row_heights.iter().copied())
         .skip(start)
-        .take(visible)
-        .filter_map(|index| {
+        .take_while(|(_, height)| {
+            let fits = used_rows == 0 || used_rows + height <= row_budget;
+            if fits {
+                used_rows += height;
+            }
+            fits
+        })
+        .filter_map(|(index, row_height)| {
             let commit = graph.commits.get(index)?;
             let style = if index == graph.selected {
                 Style::default().bg(Color::DarkGray)
@@ -426,10 +511,11 @@ fn render_commits(frame: &mut Frame, graph: &crate::app::state::GraphState, area
                     Style::default().fg(Color::LightBlue),
                 )));
             }
-            cells.push(Cell::from(Line::styled(
-                commit.subject.clone(),
-                subject_style,
-            )));
+            let subject = subject_lines(&commit.subject, subject_width)
+                .into_iter()
+                .map(|line| Line::styled(line, subject_style))
+                .collect::<Vec<_>>();
+            cells.push(Cell::from(subject));
             cells.push(Cell::from(main_refs_line(&commit.refs)));
             if table_layout.show_date {
                 cells.push(Cell::from(Line::styled(
@@ -449,32 +535,36 @@ fn render_commits(frame: &mut Frame, graph: &crate::app::state::GraphState, area
                     Style::default().fg(Color::DarkGray),
                 )));
             }
-            Some(Row::new(cells).style(style))
+            Some(
+                Row::new(cells)
+                    .height(u16::try_from(row_height).unwrap_or(u16::MAX))
+                    .style(style),
+            )
         });
     let mut constraints = vec![
         Constraint::Length(2),
         Constraint::Length(table_layout.graph_width),
     ];
-    let mut headers = vec!["", "Graph"];
+    let mut headers = vec!["", app.language.label("Graph")];
     if table_layout.show_oid {
         constraints.push(Constraint::Length(9));
-        headers.push("Commit");
+        headers.push(app.language.label("Commit"));
     }
     constraints.push(Constraint::Min(18));
-    headers.push("Subject");
+    headers.push(app.language.label("Subject"));
     constraints.push(Constraint::Length(table_layout.refs_width));
-    headers.push("Refs");
+    headers.push(app.language.label("Refs"));
     if table_layout.show_date {
         constraints.push(Constraint::Length(10));
-        headers.push("Date");
+        headers.push(app.language.label("Date"));
     }
     if table_layout.show_author {
         constraints.push(Constraint::Length(10));
-        headers.push("Author");
+        headers.push(app.language.label("Author"));
     }
     if table_layout.show_age {
         constraints.push(Constraint::Length(5));
-        headers.push("Age");
+        headers.push(app.language.label("Age"));
     }
     let table = Table::new(rows, constraints)
         .header(
@@ -488,7 +578,8 @@ fn render_commits(frame: &mut Frame, graph: &crate::app::state::GraphState, area
         .block(
             Block::default()
                 .title(format!(
-                    " All refs commit graph ({}/{}) ",
+                    " {} ({}/{}) ",
+                    app.language.text("All refs commit graph", "全部引用提交图"),
                     indices.len(),
                     graph.commits.len()
                 ))
@@ -533,7 +624,7 @@ fn relative_age(timestamp: i64) -> String {
     }
 }
 
-fn render_detail(frame: &mut Frame, graph: &crate::app::state::GraphState, area: Rect) {
+fn render_detail(frame: &mut Frame, app: &App, graph: &crate::app::state::GraphState, area: Rect) {
     let selected = graph
         .filtered_indices()
         .contains(&graph.selected)
@@ -542,11 +633,11 @@ fn render_detail(frame: &mut Frame, graph: &crate::app::state::GraphState, area:
     let lines = selected.map_or_else(
         || {
             vec![Line::raw(if graph.loading {
-                "Loading..."
+                app.language.text("Loading...", "正在加载...")
             } else if graph.filter.is_active() {
-                "No matching commits"
+                app.language.text("No matching commits", "没有匹配的提交")
             } else {
-                "No commits"
+                app.language.text("No commits", "没有提交")
             })]
         },
         |commit| {
@@ -558,12 +649,28 @@ fn render_detail(frame: &mut Frame, graph: &crate::app::state::GraphState, area:
                         .add_modifier(Modifier::BOLD),
                 ),
                 Line::raw(""),
-                detail_line("Commit", commit.oid.clone(), Color::LightBlue),
-                detail_line("Author", commit.author.clone(), Color::Gray),
-                detail_line("Date", calendar_date(commit.timestamp), Color::Gray),
-                detail_line("Age", relative_age(commit.timestamp), Color::DarkGray),
                 detail_line(
-                    "Parents",
+                    app.language.label("Commit"),
+                    commit.oid.clone(),
+                    Color::LightBlue,
+                ),
+                detail_line(
+                    app.language.label("Author"),
+                    commit.author.clone(),
+                    Color::Gray,
+                ),
+                detail_line(
+                    app.language.label("Date"),
+                    calendar_date(commit.timestamp),
+                    Color::Gray,
+                ),
+                detail_line(
+                    app.language.label("Age"),
+                    relative_age(commit.timestamp),
+                    Color::DarkGray,
+                ),
+                detail_line(
+                    app.language.label("Parents"),
                     if commit.parents.is_empty() {
                         "-".to_owned()
                     } else {
@@ -572,9 +679,18 @@ fn render_detail(frame: &mut Frame, graph: &crate::app::state::GraphState, area:
                     Color::LightBlue,
                 ),
             ];
-            lines.extend(ref_detail_lines(&commit.refs));
+            lines.extend(ref_detail_lines(app.language, &commit.refs));
             lines.push(Line::raw(""));
-            lines.push(Line::raw(commit.body.clone()));
+            for source_line in commit.body.split('\n') {
+                lines.extend(
+                    super::text::wrap(
+                        source_line.trim_end_matches('\r'),
+                        area.width.saturating_sub(2) as usize,
+                    )
+                    .into_iter()
+                    .map(Line::raw),
+                );
+            }
             lines
         },
     );
@@ -582,7 +698,7 @@ fn render_detail(frame: &mut Frame, graph: &crate::app::state::GraphState, area:
         Paragraph::new(lines)
             .block(
                 Block::default()
-                    .title(" Commit detail ")
+                    .title(app.language.text(" Commit detail ", " 提交详情 "))
                     .borders(Borders::ALL),
             )
             .wrap(Wrap { trim: false }),
@@ -659,9 +775,9 @@ fn main_refs_line(refs: &[CommitRef]) -> Line<'static> {
     Line::from(spans)
 }
 
-fn ref_detail_lines(refs: &[CommitRef]) -> Vec<Line<'static>> {
+fn ref_detail_lines(language: crate::i18n::Language, refs: &[CommitRef]) -> Vec<Line<'static>> {
     let mut lines = vec![Line::styled(
-        format!("Refs ({})", refs.len()),
+        format!("{} ({})", language.label("Refs"), refs.len()),
         Style::default().fg(Color::DarkGray),
     )];
     if refs.is_empty() {
@@ -683,7 +799,7 @@ fn ref_detail_lines(refs: &[CommitRef]) -> Vec<Line<'static>> {
             continue;
         }
         lines.push(Line::styled(
-            format!("{label} ({})", matching.len()),
+            format!("{} ({})", language.label(label), matching.len()),
             Style::default().fg(Color::DarkGray),
         ));
         lines.extend(
@@ -731,6 +847,16 @@ fn ref_style(kind: CommitRefKind) -> Style {
     }
 }
 
+fn localized_field_value(app: &App, field: &FormField) -> String {
+    match field {
+        FormField::Toggle { value, .. } => app
+            .language
+            .label(if *value { "on" } else { "off" })
+            .to_owned(),
+        FormField::Text { value, .. } => value.clone(),
+    }
+}
+
 fn detail_line(label: &str, value: String, color: Color) -> Line<'static> {
     Line::from(vec![
         Span::styled(format!("{label}: "), Style::default().fg(Color::DarkGray)),
@@ -738,12 +864,40 @@ fn detail_line(label: &str, value: String, color: Color) -> Line<'static> {
     ])
 }
 
-fn viewport_start(selected: usize, visible: usize, total: usize) -> usize {
-    if visible == 0 || total <= visible {
-        0
-    } else {
-        selected.saturating_sub(visible / 2).min(total - visible)
+fn subject_column_width(width: u16, layout: CommitTableLayout) -> usize {
+    let column_count = 4
+        + usize::from(layout.show_oid)
+        + usize::from(layout.show_date)
+        + usize::from(layout.show_author)
+        + usize::from(layout.show_age);
+    let fixed = 2u16
+        .saturating_add(layout.graph_width)
+        .saturating_add(layout.refs_width)
+        .saturating_add(if layout.show_oid { 9 } else { 0 })
+        .saturating_add(if layout.show_date { 10 } else { 0 })
+        .saturating_add(if layout.show_author { 10 } else { 0 })
+        .saturating_add(if layout.show_age { 5 } else { 0 })
+        .saturating_add(column_count.saturating_sub(1) as u16)
+        .saturating_add(2);
+    width.saturating_sub(fixed).max(1) as usize
+}
+
+fn subject_lines(subject: &str, width: usize) -> Vec<String> {
+    super::text::wrap(subject, width)
+}
+
+fn variable_viewport_start(selected: usize, budget: usize, heights: &[usize]) -> usize {
+    if budget == 0 || heights.is_empty() {
+        return 0;
     }
+    let selected = selected.min(heights.len() - 1);
+    let mut start = selected;
+    let mut used = heights[selected].min(budget);
+    while start > 0 && used + heights[start - 1] <= budget {
+        start -= 1;
+        used += heights[start];
+    }
+    start
 }
 
 #[cfg(test)]
@@ -888,7 +1042,7 @@ mod tests {
         assert!(!summary.contains("T:v2"));
         assert!(!summary.contains("T:v3"));
 
-        let detail = ref_detail_lines(&refs)
+        let detail = ref_detail_lines(crate::i18n::Language::En, &refs)
             .iter()
             .map(line_text)
             .collect::<Vec<_>>()
@@ -935,5 +1089,13 @@ mod tests {
         let very_wide = commit_table_layout(140, 30);
         assert!(very_wide.show_author);
         assert!(very_wide.show_age);
+    }
+
+    #[test]
+    fn wraps_subjects_by_display_width_and_tracks_variable_rows() {
+        assert_eq!(subject_lines("甲乙丙丁", 5), vec!["甲乙", "丙丁"]);
+        assert_eq!(subject_lines("abcdefghij", 4), vec!["abcd", "efgh", "ij"]);
+        assert_eq!(variable_viewport_start(2, 5, &[3, 1, 4, 1]), 1);
+        assert_eq!(variable_viewport_start(3, 5, &[3, 1, 4, 1]), 2);
     }
 }
