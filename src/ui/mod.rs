@@ -3,6 +3,7 @@ mod changes;
 mod graph;
 mod graph_layout;
 mod repository;
+mod text;
 mod workspace;
 
 use ratatui::layout::{Alignment, Rect};
@@ -21,40 +22,73 @@ pub fn render(frame: &mut Frame, app: &App) {
         Screen::Repository => repository::render(frame, app),
     }
     if app.help {
-        render_help(frame);
+        render_help(frame, app);
     }
 }
 
-fn render_help(frame: &mut Frame) {
+fn render_help(frame: &mut Frame, app: &App) {
     let area = centered_rect(70, 70, frame.area());
     frame.render_widget(Clear, area);
-    let text = Text::from(vec![
-        Line::styled(
-            "repo-tui keys",
-            Style::default().add_modifier(Modifier::BOLD),
-        ),
-        Line::raw(""),
-        Line::raw("j/k or arrows  Move selection / scroll active task"),
-        Line::raw("g/G            First / last"),
-        Line::raw("Enter          Open graph / newline in commit message"),
-        Line::raw("Space / A      Select current / all repositories or Changed files"),
-        Line::raw("Z/D            Workspace selected repositories: Stash / Discard"),
-        Line::raw("d              Toggle changed projects / discard Changes scope"),
-        Line::raw("a              Open Workspace Repo or Repository actions"),
-        Line::raw("f, /, x        Graph filter / query / clear; retry failed Repo task"),
-        Line::raw("Tab            Toggle Changes mode or active form field"),
-        Line::raw("z/s/u          Stash files / Stage / Unstage in Changes"),
-        Line::raw("m              Commit; Ctrl-Enter/S submit, Ctrl-A/U/G options"),
-        Line::raw("r              Refresh current page"),
-        Line::raw("Esc / q / ?    Back / quit Workspace / toggle help"),
-        Line::raw(""),
-        Line::styled(
-            "Write operations show scope and revalidate state under the applicable locks.",
-            Color::Yellow,
-        ),
-    ]);
+    let language = app.language;
+    let text = if language.is_zh() {
+        Text::from(vec![
+            Line::styled(
+                "repo-tui 按键",
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            Line::raw(""),
+            Line::raw("j/k 或方向键    移动选择 / 滚动当前任务"),
+            Line::raw("g/G             首项 / 末项"),
+            Line::raw("Enter           打开提交图 / 提交信息中换行"),
+            Line::raw("Space / A       选择当前 / 全部仓库或改动文件"),
+            Line::raw("Z/D             对所选仓库执行暂存 / 丢弃"),
+            Line::raw("d               全部 / 仅改动 / 改动与文件 三态循环"),
+            Line::raw("a               打开 Repo 或仓库操作"),
+            Line::raw("f, /, x         提交图过滤 / 搜索 / 清除"),
+            Line::raw("Tab             切换改动模式或表单字段"),
+            Line::raw("z/s/u           暂存文件 / 暂存 / 取消暂存"),
+            Line::raw("m               提交；Ctrl-Enter/S 确认"),
+            Line::raw("r               刷新当前页面"),
+            Line::raw("Esc / q / ?     返回 / 退出 / 切换帮助"),
+            Line::raw(""),
+            Line::styled(
+                "写操作会显示作用域，并在适用锁下重新校验状态。",
+                Color::Yellow,
+            ),
+        ])
+    } else {
+        Text::from(vec![
+            Line::styled(
+                "repo-tui keys",
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            Line::raw(""),
+            Line::raw("j/k or arrows  Move selection / scroll active task"),
+            Line::raw("g/G            First / last"),
+            Line::raw("Enter          Open graph / newline in commit message"),
+            Line::raw("Space / A      Select current / all repositories or Changed files"),
+            Line::raw("Z/D            Workspace selected repositories: Stash / Discard"),
+            Line::raw("d              Cycle all / changed / changed with files"),
+            Line::raw("a              Open Workspace Repo or Repository actions"),
+            Line::raw("f, /, x        Graph filter / query / clear; retry failed Repo task"),
+            Line::raw("Tab            Toggle Changes mode or active form field"),
+            Line::raw("z/s/u          Stash files / Stage / Unstage in Changes"),
+            Line::raw("m              Commit; Ctrl-Enter/S submit, Ctrl-A/U/G options"),
+            Line::raw("r              Refresh current page"),
+            Line::raw("Esc / q / ?    Back / quit Workspace / toggle help"),
+            Line::raw(""),
+            Line::styled(
+                "Write operations show scope and revalidate state under the applicable locks.",
+                Color::Yellow,
+            ),
+        ])
+    };
     let widget = Paragraph::new(text)
-        .block(Block::default().title(" Help ").borders(Borders::ALL))
+        .block(
+            Block::default()
+                .title(language.text(" Help ", " 帮助 "))
+                .borders(Borders::ALL),
+        )
         .alignment(Alignment::Left)
         .wrap(Wrap { trim: false });
     frame.render_widget(widget, area);
@@ -121,6 +155,24 @@ mod tests {
         let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.draw(|frame| render(frame, app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let mut text = String::new();
+        for y in 0..height {
+            for x in 0..width {
+                text.push_str(buffer[(x, y)].symbol());
+            }
+            text.push('\n');
+        }
+        text
+    }
+
+    fn compact_text(text: &str) -> String {
+        text.chars()
+            .filter(|value| !value.is_whitespace())
+            .collect()
+    }
+
+    fn buffer_text(terminal: &Terminal<TestBackend>, width: u16, height: u16) -> String {
         let buffer = terminal.backend().buffer();
         let mut text = String::new();
         for y in 0..height {
@@ -215,6 +267,15 @@ mod tests {
             assert!(text.contains("Frozen repositories: 1"));
             assert!(text.contains("demo  S1 M1 ?0 !0"));
         }
+        app.language = crate::i18n::Language::Zh;
+        for (width, height) in [(80, 24), (120, 40)] {
+            let text = compact_text(&draw_text(&app, width, height));
+            assert!(text.contains("确认WorkspaceGit操作"));
+            assert!(text.contains("已冻结仓库:1"));
+            assert!(text.contains("丢弃所选仓库改动"));
+            assert!(text.contains("现在执行"));
+        }
+        app.language = crate::i18n::Language::En;
         app.workspace_git.pending = None;
         app.workspace_git.task = Some(WorkspaceGitTask {
             spec,
@@ -232,10 +293,20 @@ mod tests {
             assert!(text.contains("No repositories were changed"));
             assert!(text.contains("not transactional"));
         }
+        app.language = crate::i18n::Language::Zh;
+        for (width, height) in [(80, 24), (120, 40)] {
+            let raw = draw_text(&app, width, height);
+            let text = compact_text(&raw);
+            assert!(text.contains("WorkspaceGit任务"));
+            assert!(text.contains("等待0"));
+            assert!(text.contains("失败1"));
+            assert!(text.contains("跨仓库操作不具备事务性"));
+            assert!(raw.contains("No repositories were changed"));
+        }
     }
 
     #[test]
-    fn workspace_changed_only_shows_scanned_file_entries_on_wide_terminals() {
+    fn workspace_changed_files_view_expands_files_in_main_list() {
         let mut app = app();
         app.projects[0].worktree.staged = 1;
         app.projects[0].changes = (0..24)
@@ -248,16 +319,30 @@ mod tests {
                 conflicted: false,
             })
             .collect();
-        app.toggle_changed_only();
-        let text = draw_text(&app, 120, 40);
-        assert!(text.contains("Changed only"));
-        assert!(text.contains("Changed files (24)"));
-        assert!(text.contains("src/"));
-        assert!(text.contains("M.  "));
-        assert!(text.contains("dirty-0.rs"));
-        assert!(text.contains("... "));
-        assert!(text.contains("more tree rows"));
+
+        app.cycle_workspace_view();
+        assert_eq!(
+            app.workspace_view,
+            crate::app::state::WorkspaceView::Changed
+        );
+        let changed = draw_text(&app, 120, 40);
+        assert!(changed.contains("Changed only"));
+
+        app.cycle_workspace_view();
+        assert_eq!(
+            app.workspace_view,
+            crate::app::state::WorkspaceView::ChangedWithFiles
+        );
+        let expanded = draw_text(&app, 120, 40);
+        assert!(expanded.contains("Changed + files"));
+        assert!(expanded.contains("src/"));
+        assert!(expanded.contains("M.  "));
+        assert!(expanded.contains("dirty-0.rs"));
+        assert!(expanded.contains("more tree rows"));
         draw(&app, 80, 24);
+
+        app.cycle_workspace_view();
+        assert_eq!(app.workspace_view, crate::app::state::WorkspaceView::All);
     }
 
     #[test]
@@ -308,6 +393,16 @@ mod tests {
         });
         draw(&app, 80, 24);
         draw(&app, 120, 40);
+        app.language = crate::i18n::Language::Zh;
+        for (width, height) in [(80, 24), (120, 40)] {
+            let raw = draw_text(&app, width, height);
+            let text = compact_text(&raw);
+            assert!(text.contains("Repo任务"));
+            assert!(text.contains("参数:无"));
+            assert!(text.contains("失败1"));
+            assert!(text.contains("日志"));
+            assert!(raw.contains("[demo] raw repo output"));
+        }
     }
 
     #[test]
@@ -418,6 +513,75 @@ mod tests {
         assert!(wide.contains("T:v1"));
         assert!(wide.contains("T:v2"));
         assert!(wide.contains("T:v3"));
+    }
+
+    #[test]
+    fn graph_wraps_long_subject_and_preserves_body_lines() {
+        let mut app = app();
+        let project = app.workspace.projects[0].clone();
+        app.screen = Screen::Graph;
+        app.graph = Some(GraphState {
+            project,
+            commits: vec![Commit {
+                oid: "aaaaaaaa".into(),
+                parents: vec![],
+                refs: vec![],
+                author: "Ada".into(),
+                timestamp: 1_700_000_000,
+                subject: "alpha beta gamma delta epsilon zeta eta theta".into(),
+                body: "body first\n\nbody third".into(),
+            }],
+            selected: 0,
+            loading: false,
+            error: None,
+            generation: 1,
+            object_menu: false,
+            object_selected: 0,
+            action_menu: false,
+            action_selected: 0,
+            selected_object: None,
+            form: None,
+            message: None,
+            selected_oid: None,
+            filter: crate::app::state::GraphFilter::default(),
+            filter_form: None,
+            filter_error: None,
+            commit_message: String::new(),
+            commit_amend: false,
+            commit_running: false,
+            commit_generation: 0,
+        });
+
+        let narrow = draw_text(&app, 80, 24);
+        assert!(narrow.contains("alpha beta gamma"));
+        assert!(narrow.contains("delta epsilon"));
+        let wide = draw_text(&app, 120, 40);
+        let lines = wide.lines().collect::<Vec<_>>();
+        let first = lines
+            .iter()
+            .position(|line| line.contains("body first"))
+            .unwrap();
+        let third = lines
+            .iter()
+            .position(|line| line.contains("body third"))
+            .unwrap();
+        assert_eq!(third, first + 2);
+        app.language = crate::i18n::Language::Zh;
+        for (width, height) in [(80, 24), (120, 40)] {
+            let raw = draw_text(&app, width, height);
+            let text = compact_text(&raw);
+            assert!(text.contains("全部引用提交图"));
+            assert!(text.contains("主题"));
+            assert!(text.contains("引用"));
+            assert!(!raw.contains("Subject"));
+            assert!(!raw.contains("Refs ("));
+            if width == 120 {
+                assert!(text.contains("提交:aaaaaaaa"));
+                assert!(text.contains("作者:Ada"));
+                assert!(text.contains("日期:2023-11-14"));
+                assert!(text.contains("父提交:-"));
+            }
+        }
     }
 
     #[test]
@@ -567,6 +731,23 @@ mod tests {
             assert!(text.contains("Push branch"));
             assert!(text.contains("Force push with lease"));
         }
+        {
+            let graph = app.graph.as_mut().unwrap();
+            graph.action_menu = false;
+            graph.object_menu = true;
+        }
+        app.language = crate::i18n::Language::Zh;
+        for (width, height) in [(80, 24), (120, 40)] {
+            let text = compact_text(&draw_text(&app, width, height));
+            assert!(text.contains("提交:commitaaaaaaaa"));
+            assert!(text.contains("HEAD:HEAD"));
+            assert!(text.contains("本地分支:feature/x"));
+            assert!(text.contains("远程分支:origin/feature/x"));
+            assert!(text.contains("标签:v1"));
+            assert!(text.contains("暂存:stash@{0}"));
+            assert!(!text.contains("Remotebranch:"));
+        }
+        app.language = crate::i18n::Language::En;
         app.graph.as_mut().unwrap().action_menu = false;
         app.graph.as_mut().unwrap().form = Some(GraphForm {
             choice: GraphActionChoice::Commit,
@@ -687,6 +868,19 @@ mod tests {
             assert!(options_y < keys_y);
             assert!(cursor.x < width);
         }
+        app.language = crate::i18n::Language::Zh;
+        for (width, height) in [(80, 24), (120, 40)] {
+            let (raw, cursor) = draw_text_and_cursor(&app, width, height);
+            let text = compact_text(&raw);
+            assert!(text.contains("提交信息"));
+            assert!(text.contains("选项"));
+            assert!(text.contains("按键"));
+            assert!(text.contains("Ctrl-A修订:关"));
+            assert!(text.contains("方向键移动"));
+            assert!(text.contains("Ctrl-Enter/Ctrl-S提交"));
+            assert!(cursor.x < width);
+        }
+        app.language = crate::i18n::Language::En;
         let changes = app.changes.as_mut().unwrap();
         changes.commit_editing = false;
         changes.confirmation = Some(PendingOperation::Single {
@@ -717,6 +911,87 @@ mod tests {
             assert!(text.contains("src/main.rs"));
             assert!(text.contains("including untracked files"));
         }
+        app.language = crate::i18n::Language::Zh;
+        for (width, height) in [(80, 24), (120, 40)] {
+            let raw = draw_text(&app, width, height);
+            let text = compact_text(&raw);
+            assert!(text.contains("确认批量暂存"));
+            assert!(text.contains("仓库:demo"));
+            assert!(text.contains("文件:1"));
+            assert!(text.contains("包括未跟踪文件"));
+            assert!(raw.contains("src/main.rs"));
+        }
+    }
+
+    #[test]
+    fn changes_long_lines_are_clipped_sanitized_and_cleared_on_redraw() {
+        let mut app = app();
+        let project = app.workspace.projects[0].clone();
+        let long_tail = "LONG_TAIL_MARKER";
+        let entry = ChangeEntry {
+            path: PathBuf::from(format!("目录/{}-{long_tail}.rs", "很长".repeat(40))),
+            original_path: None,
+            index: Some(ChangeCode::Modified),
+            worktree: Some(ChangeCode::Modified),
+            untracked: false,
+            conflicted: false,
+        };
+        app.screen = Screen::Changes;
+        app.changes = Some(ChangesState {
+            project,
+            return_screen: Screen::Workspace,
+            entries: vec![entry.clone()],
+            selected: 0,
+            selected_files: Default::default(),
+            mode: ChangesMode::File,
+            selected_hunk: 0,
+            selected_hunk_identity: None,
+            selected_line: 0,
+            selected_line_identity: None,
+            loading: false,
+            error: None,
+            generation: 1,
+            preview: Some(ChangePreview {
+                text: format!("+{}\u{1b}[2J{long_tail}\n+short", "x".repeat(400)),
+                token: 1,
+                truncated: false,
+                hunks: vec![],
+                lines: vec![],
+            }),
+            preview_path: Some(entry.path.clone()),
+            preview_loading: false,
+            preview_generation: 1,
+            preview_scroll: 0,
+            operation_running: false,
+            operation_generation: 0,
+            confirmation: None,
+            message: None,
+            commit_message: String::new(),
+            commit_cursor: 0,
+            commit_editing: false,
+            commit_amend: false,
+            commit_signoff: false,
+            commit_signing: false,
+            commit_running: false,
+            commit_generation: 0,
+        });
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+        let first = buffer_text(&terminal, 80, 24);
+        assert!(!first.contains('\u{1b}'));
+        assert!(!first.contains(long_tail));
+
+        let changes = app.changes.as_mut().unwrap();
+        changes.entries[0].path = PathBuf::from("short.rs");
+        changes.preview_path = Some(PathBuf::from("short.rs"));
+        changes.preview.as_mut().unwrap().text = "+short".into();
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+        let second = buffer_text(&terminal, 80, 24);
+        assert!(second.contains("short.rs"));
+        assert!(!second.contains(long_tail));
+        assert!(!second.contains("xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"));
     }
 
     fn repository_snapshot() -> RepositorySnapshot {
@@ -854,6 +1129,16 @@ mod tests {
             assert!(text.contains("Commit range: aaaaaaaa..bbbbbbbb"));
             assert!(text.contains("Force with lease: on"));
         }
+        app.language = crate::i18n::Language::Zh;
+        for (width, height) in [(80, 24), (120, 40)] {
+            let raw = draw_text(&app, width, height);
+            let text = compact_text(&raw);
+            assert!(text.contains("可能重写远程分支历史"));
+            assert!(text.contains("引用规格:main:main"));
+            assert!(text.contains("提交范围:aaaaaaaa..bbbbbbbb"));
+            assert!(text.contains("租约强制:开"));
+            assert!(!raw.contains("Force with lease: on"));
+        }
 
         {
             let state = app.repository.as_mut().unwrap();
@@ -870,5 +1155,29 @@ mod tests {
         draw(&app, 120, 40);
         app.repository.as_mut().unwrap().error = None;
         draw(&app, 80, 24);
+    }
+
+    #[test]
+    fn renders_primary_pages_in_chinese_at_supported_sizes() {
+        let mut app = app();
+        app.language = crate::i18n::Language::Zh;
+        app.help = true;
+        for (width, height) in [(80, 24), (120, 40)] {
+            let text = draw_text(&app, width, height);
+            assert!(text.contains("repo-tui"));
+            assert!(text.contains('按'));
+            assert!(text.contains('态'));
+        }
+
+        app.help = false;
+        app.screen = Screen::Repository;
+        app.repository = Some(repository_state(&app));
+        app.repository.as_mut().unwrap().action_menu = true;
+        for (width, height) in [(80, 24), (120, 40)] {
+            let text = draw_text(&app, width, height);
+            assert!(text.contains('仓'));
+            assert!(text.contains('操'));
+            assert!(text.contains('我'));
+        }
     }
 }

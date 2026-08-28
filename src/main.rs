@@ -18,6 +18,7 @@ use tracing_subscriber::EnvFilter;
 
 use repo_tui::adapters::repo;
 use repo_tui::app::state::{App, Screen};
+use repo_tui::i18n::Language;
 use repo_tui::services::discovery;
 
 #[derive(Debug, Parser)]
@@ -31,6 +32,12 @@ struct Cli {
 
     #[arg(long)]
     log_file: Option<PathBuf>,
+
+    #[arg(long, conflicts_with = "en")]
+    zh: bool,
+
+    #[arg(long, conflicts_with = "zh")]
+    en: bool,
 
     #[command(subcommand)]
     command: Option<Commands>,
@@ -47,7 +54,7 @@ enum Commands {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let cli = Cli::parse();
+    let cli = Cli::parse_from(normalize_language_args(std::env::args_os()));
     init_logging(cli.log_file.as_deref())?;
 
     if let Some(Commands::Doctor { path }) = cli.command {
@@ -60,9 +67,22 @@ async fn main() -> Result<()> {
     }
 
     let workspace = discovery::discover(&cli.path).await?;
-    let mut app = App::new(workspace, cli.scan_concurrency);
+    let language = if cli.zh { Language::Zh } else { Language::En };
+    let mut app = App::new_with_language(workspace, cli.scan_concurrency, language);
     app.refresh();
     run_tui(&mut app).await
+}
+
+fn normalize_language_args(
+    args: impl IntoIterator<Item = std::ffi::OsString>,
+) -> Vec<std::ffi::OsString> {
+    args.into_iter()
+        .map(|arg| match arg.to_str() {
+            Some("-zh") => std::ffi::OsString::from("--zh"),
+            Some("-en") => std::ffi::OsString::from("--en"),
+            _ => arg,
+        })
+        .collect()
 }
 
 fn init_logging(log_file: Option<&Path>) -> Result<()> {
@@ -489,7 +509,7 @@ fn handle_key(app: &mut App, key: KeyEvent) {
             KeyCode::Char('D') => {
                 app.begin_workspace_git(repo_tui::domain::WorkspaceGitAction::Discard)
             }
-            KeyCode::Char('d') => app.toggle_changed_only(),
+            KeyCode::Char('d') => app.cycle_workspace_view(),
             KeyCode::Char('r') => app.refresh(),
             KeyCode::Char('c') => app.open_changes(),
             KeyCode::Char('o') => app.open_repository(),
@@ -557,4 +577,35 @@ fn default_concurrency() -> usize {
     std::thread::available_parallelism()
         .map(|value| value.get().clamp(2, 16))
         .unwrap_or(4)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(args: &[&str]) -> Result<Cli, clap::Error> {
+        Cli::try_parse_from(normalize_language_args(
+            args.iter().map(std::ffi::OsString::from),
+        ))
+    }
+
+    #[test]
+    fn language_defaults_to_english() {
+        let cli = parse(&["repo-tui"]).unwrap();
+        assert!(!cli.zh);
+        assert!(!cli.en);
+    }
+
+    #[test]
+    fn accepts_compatibility_and_long_language_flags() {
+        assert!(parse(&["repo-tui", "-zh"]).unwrap().zh);
+        assert!(parse(&["repo-tui", "--zh"]).unwrap().zh);
+        assert!(parse(&["repo-tui", "-en"]).unwrap().en);
+        assert!(parse(&["repo-tui", "--en"]).unwrap().en);
+    }
+
+    #[test]
+    fn rejects_conflicting_language_flags() {
+        assert!(parse(&["repo-tui", "-zh", "--en"]).is_err());
+    }
 }

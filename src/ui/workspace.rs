@@ -5,7 +5,7 @@ use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, Wrap}
 use ratatui::Frame;
 
 use super::change_tree::{change_tree_rows, ChangeTreeRow};
-use crate::app::state::App;
+use crate::app::state::{App, WorkspaceView};
 use crate::domain::{HeadState, RepoProjectState, ScanState, WorkspaceGitAction, WorkspaceKind};
 
 pub fn render(frame: &mut Frame, app: &App) {
@@ -62,19 +62,35 @@ fn render_header(frame: &mut Frame, app: &App, area: Rect) {
         Span::raw(format!("  {} ({kind})", app.workspace_label())),
     ]);
     let status = if app.search_mode {
-        format!("Search: {}_", app.search)
+        format!("{}: {}_", app.language.text("Search", "搜索"), app.search)
     } else {
-        let filter = if app.changed_only {
-            "  Changed only"
-        } else {
-            ""
+        let filter = match (app.language.is_zh(), app.workspace_view) {
+            (_, WorkspaceView::All) => "",
+            (false, WorkspaceView::Changed) => "  Changed only",
+            (false, WorkspaceView::ChangedWithFiles) => "  Changed + files",
+            (true, WorkspaceView::Changed) => "  仅改动",
+            (true, WorkspaceView::ChangedWithFiles) => "  改动与文件",
         };
         if !app.search.is_empty() {
             format!(
-                "Filter: {}{}  Selected: {}",
+                "{}: {}{}  {}: {}",
+                app.language.text("Filter", "过滤"),
                 app.search,
                 filter,
+                app.language.text("Selected", "已选"),
                 app.selected_project_count()
+            )
+        } else if app.language.is_zh() {
+            format!(
+                "{} 个仓库{}  已选 {}  改动 {}  冲突 {}  领先 {}  落后 {}  错误 {}",
+                summary.total,
+                filter,
+                app.selected_project_count(),
+                summary.dirty,
+                summary.conflicted,
+                summary.ahead,
+                summary.behind,
+                summary.errors
             )
         } else {
             format!(
@@ -99,14 +115,31 @@ fn render_header(frame: &mut Frame, app: &App, area: Rect) {
 
 fn render_table(frame: &mut Frame, app: &App, area: Rect) {
     let indices = app.filtered_indices();
-    let visible = area.height.saturating_sub(3) as usize;
-    let start = viewport_start(app.selected, visible, indices.len());
+    let row_budget = area.height.saturating_sub(3) as usize;
+    let project_width = area.width.saturating_sub(49).max(20) as usize;
+    let row_heights = indices
+        .iter()
+        .map(|project_index| {
+            app.projects.get(*project_index).map_or(1, |snapshot| {
+                workspace_row_height(snapshot, app.workspace_view, row_budget)
+            })
+        })
+        .collect::<Vec<_>>();
+    let start = variable_viewport_start(app.selected, row_budget, &row_heights);
+    let mut used_rows = 0;
     let rows = indices
         .iter()
         .enumerate()
+        .zip(row_heights.iter().copied())
         .skip(start)
-        .take(visible)
-        .filter_map(|(visible_index, project_index)| {
+        .take_while(|(_, height)| {
+            let fits = used_rows == 0 || used_rows + height <= row_budget;
+            if fits {
+                used_rows += height;
+            }
+            fits
+        })
+        .filter_map(|((visible_index, project_index), row_height)| {
             let snapshot = app.projects.get(*project_index)?;
             let selected = visible_index == app.selected;
             let style = row_style(snapshot, selected);
@@ -115,8 +148,8 @@ fn render_table(frame: &mut Frame, app: &App, area: Rect) {
                 |value| format!("+{} -{}", value.ahead, value.behind),
             );
             let status = match &snapshot.scan {
-                ScanState::Pending => "scanning".to_owned(),
-                ScanState::Error(_) => "error".to_owned(),
+                ScanState::Pending => app.language.text("scanning", "扫描中").to_owned(),
+                ScanState::Error(_) => app.language.text("error", "错误").to_owned(),
                 ScanState::Ready => snapshot.worktree.status_label(),
             };
             Some(
@@ -131,16 +164,16 @@ fn render_table(frame: &mut Frame, app: &App, area: Rect) {
                         }
                     )),
                     Cell::from(status),
-                    Cell::from(
-                        snapshot
-                            .project
-                            .relative_path
-                            .to_string_lossy()
-                            .into_owned(),
-                    ),
+                    Cell::from(workspace_project_lines(
+                        snapshot,
+                        app.workspace_view,
+                        project_width,
+                        row_budget,
+                    )),
                     Cell::from(head_label(&snapshot.head)),
                     Cell::from(upstream),
                 ])
+                .height(u16::try_from(row_height).unwrap_or(u16::MAX))
                 .style(style),
             )
         });
@@ -154,7 +187,14 @@ fn render_table(frame: &mut Frame, app: &App, area: Rect) {
     ];
     let table = Table::new(rows, widths)
         .header(
-            Row::new(["", "Status", "Project / path", "HEAD", "Upstream"]).style(
+            Row::new([
+                "",
+                app.language.text("Status", "状态"),
+                app.language.text("Project / path", "仓库 / 路径"),
+                "HEAD",
+                app.language.text("Upstream", "上游"),
+            ])
+            .style(
                 Style::default()
                     .fg(Color::Cyan)
                     .add_modifier(Modifier::BOLD),
@@ -164,13 +204,16 @@ fn render_table(frame: &mut Frame, app: &App, area: Rect) {
         .block(
             Block::default()
                 .title(format!(
-                    " Projects ({}/{}){} ",
+                    " {} ({}/{}){} ",
+                    app.language.text("Projects", "仓库"),
                     indices.len(),
                     app.projects.len(),
-                    if app.changed_only {
-                        " changed only"
-                    } else {
-                        ""
+                    match (app.language.is_zh(), app.workspace_view) {
+                        (_, WorkspaceView::All) => "",
+                        (false, WorkspaceView::Changed) => " changed only",
+                        (false, WorkspaceView::ChangedWithFiles) => " changed + files",
+                        (true, WorkspaceView::Changed) => " 仅改动",
+                        (true, WorkspaceView::ChangedWithFiles) => " 改动与文件",
                     }
                 ))
                 .borders(Borders::ALL),
@@ -189,11 +232,31 @@ fn render_inspector(frame: &mut Frame, app: &App, area: Rect) {
                 Line::raw(snapshot.project.path.display().to_string()),
                 Line::raw(""),
                 Line::raw(format!("HEAD: {}", head_label(&snapshot.head))),
-                Line::raw(format!("Status: {}", snapshot.worktree.status_label())),
-                Line::raw(format!("Staged: {}", snapshot.worktree.staged)),
-                Line::raw(format!("Modified: {}", snapshot.worktree.unstaged)),
-                Line::raw(format!("Untracked: {}", snapshot.worktree.untracked)),
-                Line::raw(format!("Conflicts: {}", snapshot.worktree.conflicted)),
+                Line::raw(format!(
+                    "{}: {}",
+                    app.language.text("Status", "状态"),
+                    snapshot.worktree.status_label()
+                )),
+                Line::raw(format!(
+                    "{}: {}",
+                    app.language.text("Staged", "已暂存"),
+                    snapshot.worktree.staged
+                )),
+                Line::raw(format!(
+                    "{}: {}",
+                    app.language.text("Modified", "已修改"),
+                    snapshot.worktree.unstaged
+                )),
+                Line::raw(format!(
+                    "{}: {}",
+                    app.language.text("Untracked", "未跟踪"),
+                    snapshot.worktree.untracked
+                )),
+                Line::raw(format!(
+                    "{}: {}",
+                    app.language.text("Conflicts", "冲突"),
+                    snapshot.worktree.conflicted
+                )),
             ];
             if let Some(upstream) = &snapshot.upstream {
                 lines.push(Line::raw(""));
@@ -208,11 +271,17 @@ fn render_inspector(frame: &mut Frame, app: &App, area: Rect) {
                 lines.push(Line::styled(error.clone(), Color::Red));
             } else if snapshot.changes.is_empty() {
                 lines.push(Line::raw(""));
-                lines.push(Line::raw("Changed files: none"));
+                lines.push(Line::raw(
+                    app.language.text("Changed files: none", "改动文件：无"),
+                ));
             } else {
                 lines.push(Line::raw(""));
                 lines.push(Line::styled(
-                    format!("Changed files ({})", snapshot.changes.len()),
+                    format!(
+                        "{} ({})",
+                        app.language.text("Changed files", "改动文件"),
+                        snapshot.changes.len()
+                    ),
                     Style::default()
                         .fg(Color::Cyan)
                         .add_modifier(Modifier::BOLD),
@@ -241,36 +310,43 @@ fn render_inspector(frame: &mut Frame, app: &App, area: Rect) {
             }
             lines
         }
-        None => vec![Line::raw("No matching project")],
+        None => vec![Line::raw(
+            app.language.text("No matching project", "没有匹配的仓库"),
+        )],
     };
     frame.render_widget(
         Paragraph::new(lines)
-            .block(Block::default().title(" Inspector ").borders(Borders::ALL))
+            .block(
+                Block::default()
+                    .title(app.language.text(" Inspector ", " 检查器 "))
+                    .borders(Borders::ALL),
+            )
             .wrap(Wrap { trim: false }),
         area,
     );
 }
 
 fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
-    let task = if let Some(task) = &app.workspace_git.task {
-        if task.running {
-            format!("{} running", task.spec.action.label())
-        } else {
-            format!("{} finished", task.spec.action.label())
-        }
-    } else if app.workspace_git.preparing {
-        "Preparing Workspace Git confirmation".to_owned()
-    } else if let Some(task) = &app.repo_batch.task {
-        if task.running {
-            format!("{} running", task.spec.action.label())
-        } else {
-            format!("{} finished", task.spec.action.label())
-        }
+    let task = if app.workspace_git.preparing {
+        app.language
+            .text(
+                "Preparing Workspace Git confirmation",
+                "正在准备工作区 Git 确认",
+            )
+            .to_owned()
     } else if app.scanning > 0 {
-        format!("Scanning {}", app.scanning)
+        format!(
+            "{} {}",
+            app.language.text("Scanning", "扫描中"),
+            app.scanning
+        )
     } else {
-        "Ready".to_owned()
+        app.language.text("Ready", "就绪").to_owned()
     };
+    let keys = app.language.text(
+        "   Space Select   Z Stash   D Discard   d View cycle   a Repo actions   / Search",
+        "   Space 选择   Z 暂存   D 丢弃   d 视图循环   a Repo 操作   / 搜索",
+    );
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled(
@@ -281,9 +357,7 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
                     Color::Green
                 }),
             ),
-            Span::raw(
-                "   Space Select   Z Stash   D Discard   d Changed only   a Repo actions   / Search",
-            ),
+            Span::raw(keys),
         ])),
         area,
     );
@@ -295,17 +369,24 @@ fn render_workspace_git_overlay(frame: &mut Frame, app: &App) {
         render_overlay(
             frame,
             area,
-            " Workspace Git ",
+            app.language.text(" Workspace Git ", " Workspace Git "),
             vec![
-                Line::styled("Freezing repository state...", Color::Yellow),
-                Line::raw("All repositories are read before confirmation."),
+                Line::styled(
+                    app.language
+                        .text("Freezing repository state...", "正在冻结仓库状态..."),
+                    Color::Yellow,
+                ),
+                Line::raw(app.language.text(
+                    "All repositories are read before confirmation.",
+                    "确认前会读取全部仓库状态。",
+                )),
             ],
         );
     } else if let Some(spec) = &app.workspace_git.pending {
         let area = centered_rect(82, 76, frame.area());
         let mut lines = vec![
             Line::styled(
-                spec.action.label(),
+                app.language.action(spec.action.label()),
                 Style::default()
                     .fg(if spec.action == WorkspaceGitAction::Discard {
                         Color::LightRed
@@ -314,11 +395,21 @@ fn render_workspace_git_overlay(frame: &mut Frame, app: &App) {
                     })
                     .add_modifier(Modifier::BOLD),
             ),
-            Line::raw(format!("Frozen repositories: {}", spec.targets.len())),
+            Line::raw(format!(
+                "{}: {}",
+                app.language.text("Frozen repositories", "已冻结仓库"),
+                spec.targets.len()
+            )),
             Line::raw(if spec.action == WorkspaceGitAction::Stash {
-                "Each stash includes tracked, staged, and untracked changes."
+                app.language.text(
+                    "Each stash includes tracked, staged, and untracked changes.",
+                    "每个暂存都包含已跟踪、已暂存和未跟踪改动。",
+                )
             } else {
-                "Tracked index/worktree and untracked files will be permanently cleared."
+                app.language.text(
+                    "Tracked index/worktree and untracked files will be permanently cleared.",
+                    "已跟踪的暂存区/工作区改动及未跟踪文件将被永久清除。",
+                )
             }),
             Line::raw(""),
         ];
@@ -342,14 +433,23 @@ fn render_workspace_git_overlay(frame: &mut Frame, app: &App) {
         lines.extend(detail.into_iter().skip(scroll).take(budget));
         lines.push(Line::raw(""));
         lines.push(Line::styled(
-            "Run now? y Yes   n/Esc No",
+            app.language
+                .text("Run now? y Yes   n/Esc No", "现在执行？y 是   n/Esc 否"),
             if spec.action == WorkspaceGitAction::Discard {
                 Color::LightRed
             } else {
                 Color::Yellow
             },
         ));
-        render_overlay(frame, area, " Confirm Workspace Git operation ", lines);
+        render_overlay(
+            frame,
+            area,
+            app.language.text(
+                " Confirm Workspace Git operation ",
+                " 确认 Workspace Git 操作 ",
+            ),
+            lines,
+        );
     } else if let Some(task) = &app.workspace_git.task {
         let area = centered_rect(84, 76, frame.area());
         let counts = task.results.iter().fold([0usize; 4], |mut counts, result| {
@@ -366,16 +466,27 @@ fn render_workspace_git_overlay(frame: &mut Frame, app: &App) {
             Line::styled(
                 format!(
                     "{}  {}",
-                    task.spec.action.label(),
-                    if task.running { "running" } else { "complete" }
+                    app.language.action(task.spec.action.label()),
+                    app.language
+                        .label(if task.running { "running" } else { "complete" })
                 ),
                 Style::default().add_modifier(Modifier::BOLD),
             ),
             Line::raw(format!(
-                "pending {}  running {}  success {}  failure {}",
-                counts[0], counts[1], counts[2], counts[3]
+                "{} {}  {} {}  {} {}  {} {}",
+                app.language.label("pending"),
+                counts[0],
+                app.language.label("running"),
+                counts[1],
+                app.language.label("success"),
+                counts[2],
+                app.language.label("failure"),
+                counts[3]
             )),
-            Line::raw("Cross-repository operations are not transactional; completed work is not rolled back."),
+            Line::raw(app.language.text(
+                "Cross-repository operations are not transactional; completed work is not rolled back.",
+                "跨仓库操作不具备事务性；已完成的操作不会回滚。",
+            )),
             Line::raw(""),
         ];
         let detail = task
@@ -383,6 +494,7 @@ fn render_workspace_git_overlay(frame: &mut Frame, app: &App) {
             .iter()
             .map(|result| {
                 result_line(
+                    app,
                     &result.project.relative_path.display().to_string(),
                     result.state,
                     &result.message,
@@ -395,19 +507,26 @@ fn render_workspace_git_overlay(frame: &mut Frame, app: &App) {
         lines.extend(detail.into_iter().skip(scroll).take(budget));
         lines.push(Line::styled(
             if task.running {
-                "j/k Scroll"
+                app.language.text("j/k Scroll", "j/k 滚动")
             } else {
-                "j/k Scroll   Esc Close"
+                app.language
+                    .text("j/k Scroll   Esc Close", "j/k 滚动   Esc 关闭")
             },
             Color::DarkGray,
         ));
-        render_overlay(frame, area, " Workspace Git task ", lines);
+        render_overlay(
+            frame,
+            area,
+            app.language
+                .text(" Workspace Git task ", " Workspace Git 任务 "),
+            lines,
+        );
     } else if let Some((error, message)) = &app.workspace_git.message {
         let area = centered_rect(64, 24, frame.area());
         render_overlay(
             frame,
             area,
-            " Workspace Git ",
+            app.language.text(" Workspace Git ", " Workspace Git "),
             vec![Line::styled(
                 message.clone(),
                 if *error {
@@ -434,42 +553,64 @@ fn render_repo_batch_overlay(frame: &mut Frame, app: &App) {
                 } else {
                     Style::default()
                 };
-                Line::styled(format!(" {}", action.label()), style)
+                Line::styled(format!(" {}", app.language.action(action.label())), style)
             })
             .collect::<Vec<_>>();
-        render_overlay(frame, area, " Repo batch actions ", lines);
-    } else if let Some(form) = &app.repo_batch.form {
-        let area = centered_rect(60, 34, frame.area());
-        let label = form.action.input_label().unwrap_or("Value");
         render_overlay(
             frame,
             area,
-            form.action.label(),
+            app.language.text(" Repo batch actions ", " Repo 批量操作 "),
+            lines,
+        );
+    } else if let Some(form) = &app.repo_batch.form {
+        let area = centered_rect(60, 34, frame.area());
+        let label = app
+            .language
+            .label(form.action.input_label().unwrap_or("Value"));
+        render_overlay(
+            frame,
+            area,
+            app.language.action(form.action.label()),
             vec![
                 Line::raw(format!("{label}: {}_", form.value)),
                 Line::raw(""),
-                Line::styled("Enter Review   Esc Cancel", Color::DarkGray),
+                Line::styled(
+                    app.language
+                        .text("Enter Review   Esc Cancel", "Enter 检查   Esc 取消"),
+                    Color::DarkGray,
+                ),
             ],
         );
     } else if let Some((spec, targets)) = &app.repo_batch.pending {
         let area = centered_rect(72, 70, frame.area());
         let mut lines = vec![
             Line::styled(
-                spec.action.label(),
+                app.language.action(spec.action.label()),
                 Style::default().add_modifier(Modifier::BOLD),
             ),
             Line::raw(format!(
-                "Scope: {}",
+                "{}: {}",
+                app.language.label("Scope"),
                 if spec.action.is_workspace_action()
                     || (spec.action == crate::domain::RepoBatchAction::Sync && targets.is_empty())
                 {
-                    "Entire Repo workspace".to_owned()
+                    app.language
+                        .text("Entire Repo workspace", "整个 Repo 工作区")
+                        .to_owned()
                 } else {
-                    format!("{} selected project(s)", targets.len())
+                    format!(
+                        "{} {}",
+                        targets.len(),
+                        app.language.text("selected project(s)", "个所选仓库")
+                    )
                 }
             )),
-            Line::raw(format!("Parameters: {}", batch_parameter(spec))),
-            Line::raw("Commands:"),
+            Line::raw(format!(
+                "{}: {}",
+                app.language.label("Parameters"),
+                batch_parameter(app, spec)
+            )),
+            Line::raw(format!("{}:", app.language.label("Commands"))),
         ];
         let mut detail = Vec::new();
         detail.extend(
@@ -502,14 +643,21 @@ fn render_repo_batch_overlay(frame: &mut Frame, app: &App) {
         lines.extend(detail.into_iter().skip(scroll).take(budget));
         lines.push(Line::raw(""));
         lines.push(Line::styled(
-            "Run now? y Yes   n No",
+            app.language
+                .text("Run now? y Yes   n No", "现在执行？y 是   n 否"),
             if spec.action.is_destructive() {
                 Color::LightRed
             } else {
                 Color::Yellow
             },
         ));
-        render_overlay(frame, area, " Confirm Repo operation ", lines);
+        render_overlay(
+            frame,
+            area,
+            app.language
+                .text(" Confirm Repo operation ", " 确认 Repo 操作 "),
+            lines,
+        );
     } else if let Some(task) = &app.repo_batch.task {
         let area = centered_rect(86, 82, frame.area());
         let counts = task.results.iter().fold([0usize; 5], |mut counts, result| {
@@ -527,8 +675,8 @@ fn render_repo_batch_overlay(frame: &mut Frame, app: &App) {
             Line::styled(
                 format!(
                     "{}  {}",
-                    task.spec.action.label(),
-                    if task.running {
+                    app.language.action(task.spec.action.label()),
+                    app.language.label(if task.running {
                         if task.cancelling {
                             "cancelling"
                         } else {
@@ -538,30 +686,51 @@ fn render_repo_batch_overlay(frame: &mut Frame, app: &App) {
                         "cancelled"
                     } else {
                         "complete"
-                    }
+                    })
                 ),
                 Style::default().add_modifier(Modifier::BOLD),
             ),
             Line::raw(format!(
-                "pending {}  running {}  success {}  failed {}  cancelled {}",
-                counts[0], counts[1], counts[2], counts[3], counts[4]
+                "{} {}  {} {}  {} {}  {} {}  {} {}",
+                app.language.label("pending"),
+                counts[0],
+                app.language.label("running"),
+                counts[1],
+                app.language.label("success"),
+                counts[2],
+                app.language.label("failed"),
+                counts[3],
+                app.language.label("cancelled"),
+                counts[4]
             )),
-            Line::raw(format!("Parameters: {}", batch_parameter(&task.spec))),
-            Line::raw(format!("Commands started: {}", task.args.len())),
+            Line::raw(format!(
+                "{}: {}",
+                app.language.label("Parameters"),
+                batch_parameter(app, &task.spec)
+            )),
+            Line::raw(format!(
+                "{}: {}",
+                app.language.label("Commands started"),
+                task.args.len()
+            )),
         ];
         let mut detail = Vec::new();
         if let Some((state, message)) = &task.workspace_result {
-            detail.push(result_line("workspace", *state, message));
+            detail.push(result_line(app, "workspace", *state, message));
         }
         detail.extend(task.results.iter().map(|result| {
             result_line(
+                app,
                 &result.project.relative_path.display().to_string(),
                 result.state,
                 &result.message,
             )
         }));
         detail.push(Line::raw(""));
-        detail.push(Line::styled("Log", Style::default().fg(Color::Cyan)));
+        detail.push(Line::styled(
+            app.language.label("Log"),
+            Style::default().fg(Color::Cyan),
+        ));
         detail.extend(task.logs.iter().map(|line| Line::raw(line.clone())));
         let budget = area.height.saturating_sub(8) as usize;
         let max_scroll = detail.len().saturating_sub(budget);
@@ -569,19 +738,30 @@ fn render_repo_batch_overlay(frame: &mut Frame, app: &App) {
         lines.extend(detail.into_iter().skip(scroll).take(budget));
         lines.push(Line::styled(
             if task.running {
-                "j/k Scroll   c Cancel (no rollback)"
+                app.language.text(
+                    "j/k Scroll   c Cancel (no rollback)",
+                    "j/k 滚动   c 取消（不回滚）",
+                )
             } else {
-                "j/k Scroll   f Retry failed   Esc Close"
+                app.language.text(
+                    "j/k Scroll   f Retry failed   Esc Close",
+                    "j/k 滚动   f 重试失败项   Esc 关闭",
+                )
             },
             Color::DarkGray,
         ));
-        render_overlay(frame, area, " Repo task ", lines);
+        render_overlay(
+            frame,
+            area,
+            app.language.text(" Repo task ", " Repo 任务 "),
+            lines,
+        );
     } else if let Some((error, message)) = &app.repo_batch.message {
         let area = centered_rect(60, 24, frame.area());
         render_overlay(
             frame,
             area,
-            " Repo action ",
+            app.language.text(" Repo action ", " Repo 操作 "),
             vec![Line::styled(
                 message.clone(),
                 if *error {
@@ -594,7 +774,7 @@ fn render_repo_batch_overlay(frame: &mut Frame, app: &App) {
     }
 }
 
-fn batch_parameter(spec: &crate::domain::RepoBatchSpec) -> String {
+fn batch_parameter(app: &App, spec: &crate::domain::RepoBatchSpec) -> String {
     spec.branch
         .as_deref()
         .or(spec.change.as_deref())
@@ -604,10 +784,10 @@ fn batch_parameter(spec: &crate::domain::RepoBatchSpec) -> String {
                 .as_ref()
                 .map(|value| value.display().to_string())
         })
-        .unwrap_or_else(|| "(none)".to_owned())
+        .unwrap_or_else(|| app.language.label("none").to_owned())
 }
 
-fn result_line(label: &str, state: RepoProjectState, message: &str) -> Line<'static> {
+fn result_line(app: &App, label: &str, state: RepoProjectState, message: &str) -> Line<'static> {
     let color = match state {
         RepoProjectState::Succeeded => Color::Green,
         RepoProjectState::Failed => Color::LightRed,
@@ -616,7 +796,7 @@ fn result_line(label: &str, state: RepoProjectState, message: &str) -> Line<'sta
         RepoProjectState::Pending => Color::Gray,
     };
     Line::from(vec![
-        Span::styled(format!("{:<9}", state.label()), color),
+        Span::styled(format!("{:<9}", app.language.label(state.label())), color),
         Span::raw(format!(" {label}: {message}")),
     ])
 }
@@ -648,12 +828,13 @@ fn change_tree_line(
     width: usize,
 ) -> Line<'static> {
     match row {
-        ChangeTreeRow::Directory { .. } => {
-            Line::styled(truncate_text(&row.display(), width), Color::DarkGray)
-        }
+        ChangeTreeRow::Directory { .. } => Line::styled(
+            super::text::truncate(&row.display(), width),
+            Color::DarkGray,
+        ),
         ChangeTreeRow::File { entry_index, .. } => {
             let change = &changes[*entry_index];
-            let text = truncate_text(
+            let text = super::text::truncate(
                 &format!("{}  {}", change.status_label(), row.display()),
                 width,
             );
@@ -667,18 +848,6 @@ fn change_tree_line(
             Line::styled(text, color)
         }
     }
-}
-
-fn truncate_text(text: &str, width: usize) -> String {
-    if text.chars().count() <= width {
-        return text.to_owned();
-    }
-    if width <= 3 {
-        return ".".repeat(width);
-    }
-    let mut truncated = text.chars().take(width - 3).collect::<String>();
-    truncated.push_str("...");
-    truncated
 }
 
 fn row_style(snapshot: &crate::domain::ProjectSnapshot, selected: bool) -> Style {
@@ -706,12 +875,68 @@ fn head_label(head: &HeadState) -> String {
     }
 }
 
-fn viewport_start(selected: usize, visible: usize, total: usize) -> usize {
-    if visible == 0 || total <= visible {
-        0
-    } else {
-        selected.saturating_sub(visible / 2).min(total - visible)
+fn workspace_row_height(
+    snapshot: &crate::domain::ProjectSnapshot,
+    view: WorkspaceView,
+    row_budget: usize,
+) -> usize {
+    if !view.expands_files() || snapshot.changes.is_empty() {
+        return 1;
     }
+    let tree_rows = change_tree_rows(&snapshot.changes);
+    let tree_budget = row_budget.saturating_sub(1).min(6);
+    1 + tree_rows.len().min(tree_budget)
+}
+
+fn workspace_project_lines(
+    snapshot: &crate::domain::ProjectSnapshot,
+    view: WorkspaceView,
+    width: usize,
+    row_budget: usize,
+) -> Vec<Line<'static>> {
+    let mut lines = vec![Line::raw(super::text::truncate(
+        &snapshot.project.relative_path.to_string_lossy(),
+        width,
+    ))];
+    if !view.expands_files() || snapshot.changes.is_empty() {
+        return lines;
+    }
+
+    let tree_rows = change_tree_rows(&snapshot.changes);
+    let tree_budget = row_budget.saturating_sub(1).min(6);
+    let visible_tree_rows = if tree_rows.len() > tree_budget {
+        tree_budget.saturating_sub(1)
+    } else {
+        tree_budget
+    };
+    lines.extend(
+        tree_rows
+            .iter()
+            .take(visible_tree_rows)
+            .map(|row| change_tree_line(row, &snapshot.changes, width)),
+    );
+    let remaining = tree_rows.len().saturating_sub(visible_tree_rows);
+    if remaining > 0 && tree_budget > 0 {
+        lines.push(Line::styled(
+            super::text::truncate(&format!("... {remaining} more tree rows"), width),
+            Color::DarkGray,
+        ));
+    }
+    lines
+}
+
+fn variable_viewport_start(selected: usize, budget: usize, heights: &[usize]) -> usize {
+    if budget == 0 || heights.is_empty() {
+        return 0;
+    }
+    let selected = selected.min(heights.len() - 1);
+    let mut start = selected;
+    let mut used = heights[selected].min(budget);
+    while start > 0 && used + heights[start - 1] <= budget {
+        start -= 1;
+        used += heights[start];
+    }
+    start
 }
 
 #[cfg(test)]
@@ -719,9 +944,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn keeps_selection_in_view() {
-        assert_eq!(viewport_start(0, 10, 100), 0);
-        assert_eq!(viewport_start(50, 10, 100), 45);
-        assert_eq!(viewport_start(99, 10, 100), 90);
+    fn keeps_selection_in_variable_height_view() {
+        assert_eq!(variable_viewport_start(0, 10, &[1; 100]), 0);
+        assert_eq!(variable_viewport_start(3, 5, &[1, 3, 1, 4]), 2);
+        assert_eq!(variable_viewport_start(2, 6, &[1, 3, 2, 4]), 0);
     }
 }

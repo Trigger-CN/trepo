@@ -12,14 +12,24 @@ pub fn render(frame: &mut Frame, app: &App) {
     let area = frame.area();
     if area.width < 60 || area.height < 14 {
         frame.render_widget(
-            Paragraph::new("Terminal too small. Resize to at least 60x14. Press Esc to return.")
-                .block(Block::default().title(" Changes ").borders(Borders::ALL)),
+            Paragraph::new(app.language.text(
+                "Terminal too small. Resize to at least 60x14. Press Esc to return.",
+                "终端太小，请调整到至少 60x14，按 Esc 返回。",
+            ))
+            .block(
+                Block::default()
+                    .title(app.language.text(" Changes ", " 改动 "))
+                    .borders(Borders::ALL),
+            ),
             area,
         );
         return;
     }
     let Some(changes) = &app.changes else {
-        frame.render_widget(Paragraph::new("No repository selected"), area);
+        frame.render_widget(
+            Paragraph::new(app.language.text("No repository selected", "未选择仓库")),
+            area,
+        );
         return;
     };
 
@@ -31,32 +41,32 @@ pub fn render(frame: &mut Frame, app: &App) {
             Constraint::Length(2),
         ])
         .split(area);
-    render_header(frame, changes, vertical[0]);
+    render_header(frame, app, changes, vertical[0]);
     if area.width >= 100 {
         let body = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Percentage(38), Constraint::Percentage(62)])
             .split(vertical[1]);
-        render_files(frame, changes, body[0]);
-        render_preview(frame, changes, body[1]);
+        render_files(frame, app, changes, body[0]);
+        render_preview(frame, app, changes, body[1]);
     } else {
         let body = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Percentage(38), Constraint::Percentage(62)])
             .split(vertical[1]);
-        render_files(frame, changes, body[0]);
-        render_preview(frame, changes, body[1]);
+        render_files(frame, app, changes, body[0]);
+        render_preview(frame, app, changes, body[1]);
     }
-    render_footer(frame, changes, vertical[2]);
+    render_footer(frame, app, changes, vertical[2]);
     if changes.confirmation.is_some() {
-        render_confirmation(frame, changes);
+        render_confirmation(frame, app, changes);
     }
     if changes.commit_editing {
-        render_commit_dialog(frame, changes);
+        render_commit_dialog(frame, app, changes);
     }
 }
 
-fn render_header(frame: &mut Frame, changes: &ChangesState, area: Rect) {
+fn render_header(frame: &mut Frame, app: &App, changes: &ChangesState, area: Rect) {
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled(
@@ -66,19 +76,28 @@ fn render_header(frame: &mut Frame, changes: &ChangesState, area: Rect) {
                     .bg(Color::Cyan)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::raw(format!("  {}  /  Changes", changes.project.name)),
+            Span::raw(format!(
+                "  {}  /  {}",
+                changes.project.name,
+                app.language.text("Changes", "改动")
+            )),
         ]))
         .block(Block::default().borders(Borders::BOTTOM)),
         area,
     );
 }
 
-fn render_files(frame: &mut Frame, changes: &ChangesState, area: Rect) {
+fn render_files(frame: &mut Frame, app: &App, changes: &ChangesState, area: Rect) {
+    let tree_width = area.width.saturating_sub(13) as usize;
     if let Some(error) = &changes.error {
         frame.render_widget(
             Paragraph::new(error.clone())
                 .style(Style::default().fg(Color::Red))
-                .block(Block::default().title(" Files ").borders(Borders::ALL))
+                .block(
+                    Block::default()
+                        .title(app.language.text(" Files ", " 文件 "))
+                        .borders(Borders::ALL),
+                )
                 .wrap(Wrap { trim: false }),
             area,
         );
@@ -100,7 +119,7 @@ fn render_files(frame: &mut Frame, changes: &ChangesState, area: Rect) {
                 Cell::from(" "),
                 Cell::from(" "),
                 Cell::from(" "),
-                Cell::from(row.display()),
+                Cell::from(super::text::truncate(&row.display(), tree_width)),
             ])
             .style(Style::default().fg(Color::DarkGray)),
             ChangeTreeRow::File { entry_index, .. } => {
@@ -122,18 +141,22 @@ fn render_files(frame: &mut Frame, changes: &ChangesState, area: Rect) {
                     Cell::from(if selected { ">" } else { " " }),
                     Cell::from(if checked { "[x]" } else { "[ ]" }),
                     Cell::from(entry.status_label()),
-                    Cell::from(row.display()),
+                    Cell::from(super::text::truncate(&row.display(), tree_width)),
                 ])
                 .style(style)
             }
         });
     let title = if changes.loading {
-        " Files (loading) ".to_owned()
+        app.language
+            .text(" Files (loading) ", " 文件（加载中） ")
+            .to_owned()
     } else {
         format!(
-            " Files ({}; {} selected) ",
+            " {} ({}; {} {}) ",
+            app.language.text("Files", "文件"),
             changes.entries.len(),
-            changes.selected_files.len()
+            changes.selected_files.len(),
+            app.language.text("selected", "已选")
         )
     };
     let border_style = if changes.mode == ChangesMode::File {
@@ -151,7 +174,13 @@ fn render_files(frame: &mut Frame, changes: &ChangesState, area: Rect) {
         ],
     )
     .header(
-        Row::new(["", "Sel", "XY", "Tree"]).style(
+        Row::new([
+            "",
+            app.language.text("Sel", "选"),
+            "XY",
+            app.language.text("Tree", "树"),
+        ])
+        .style(
             Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
@@ -167,26 +196,35 @@ fn render_files(frame: &mut Frame, changes: &ChangesState, area: Rect) {
     frame.render_widget(table, area);
 }
 
-fn render_preview(frame: &mut Frame, changes: &ChangesState, area: Rect) {
+fn render_preview(frame: &mut Frame, app: &App, changes: &ChangesState, area: Rect) {
     let title = changes.preview_path.as_ref().map_or_else(
-        || " Diff ".to_owned(),
+        || format!(" {} ", app.language.label("Diff")),
         |path| match changes.mode {
             ChangesMode::Hunk => changes
                 .preview
                 .as_ref()
                 .and_then(|preview| preview.hunks.get(changes.selected_hunk))
                 .map_or_else(
-                    || format!(" Diff: {} [hunk] ", path.display()),
+                    || {
+                        format!(
+                            " {}: {} [{}] ",
+                            app.language.label("Diff"),
+                            path.display(),
+                            app.language.label("hunk")
+                        )
+                    },
                     |hunk| {
                         format!(
-                            " Diff: {} [hunk {}/{} {}] ",
+                            " {}: {} [{} {}/{} {}] ",
+                            app.language.label("Diff"),
                             path.display(),
+                            app.language.label("hunk"),
                             changes.selected_hunk + 1,
                             changes
                                 .preview
                                 .as_ref()
                                 .map_or(0, |preview| preview.hunks.len()),
-                            hunk.source.label()
+                            app.language.label(hunk.source.label())
                         )
                     },
                 ),
@@ -195,21 +233,35 @@ fn render_preview(frame: &mut Frame, changes: &ChangesState, area: Rect) {
                 .as_ref()
                 .and_then(|preview| preview.lines.get(changes.selected_line))
                 .map_or_else(
-                    || format!(" Diff: {} [line] ", path.display()),
+                    || {
+                        format!(
+                            " {}: {} [{}] ",
+                            app.language.label("Diff"),
+                            path.display(),
+                            app.language.label("line")
+                        )
+                    },
                     |line| {
                         format!(
-                            " Diff: {} [line {}/{} {}] ",
+                            " {}: {} [{} {}/{} {}] ",
+                            app.language.label("Diff"),
                             path.display(),
+                            app.language.label("line"),
                             changes.selected_line + 1,
                             changes
                                 .preview
                                 .as_ref()
                                 .map_or(0, |preview| preview.lines.len()),
-                            line.source.label()
+                            app.language.label(line.source.label())
                         )
                     },
                 ),
-            ChangesMode::File => format!(" Diff: {} [file] ", path.display()),
+            ChangesMode::File => format!(
+                " {}: {} [{}] ",
+                app.language.label("Diff"),
+                path.display(),
+                app.language.label("file")
+            ),
         },
     );
     let border_style = if changes.mode != ChangesMode::File {
@@ -218,19 +270,27 @@ fn render_preview(frame: &mut Frame, changes: &ChangesState, area: Rect) {
         Style::default()
     };
     let block = Block::default()
-        .title(title)
+        .title(super::text::truncate(
+            &title,
+            area.width.saturating_sub(2) as usize,
+        ))
         .borders(Borders::ALL)
         .border_style(border_style);
     if changes.preview_loading {
-        frame.render_widget(Paragraph::new("Loading diff...").block(block), area);
+        frame.render_widget(
+            Paragraph::new(app.language.text("Loading diff...", "正在加载差异...")).block(block),
+            area,
+        );
         return;
     }
     let Some(preview) = &changes.preview else {
         frame.render_widget(
             Paragraph::new(if changes.entries.is_empty() {
-                "Working tree is clean."
+                app.language
+                    .text("Working tree is clean.", "工作区是干净的。")
             } else {
-                "No diff is available."
+                app.language
+                    .text("No diff is available.", "没有可用的差异。")
             })
             .block(block),
             area,
@@ -248,6 +308,7 @@ fn render_preview(frame: &mut Frame, changes: &ChangesState, area: Rect) {
             .map(|line| line.display_line..=line.display_line),
         ChangesMode::File => None,
     };
+    let line_width = area.width.saturating_sub(2) as usize;
     let lines = preview.text.lines().enumerate().map(|(index, line)| {
         let mut style = if line.starts_with("+++") || line.starts_with("---") {
             Style::default().fg(Color::Yellow)
@@ -269,48 +330,60 @@ fn render_preview(frame: &mut Frame, changes: &ChangesState, area: Rect) {
                 style = style.add_modifier(Modifier::BOLD);
             }
         }
-        Line::styled(line.to_owned(), style)
+        Line::styled(super::text::truncate(line, line_width), style)
     });
     let scroll = u16::try_from(changes.preview_scroll).unwrap_or(u16::MAX);
     frame.render_widget(
         Paragraph::new(Text::from_iter(lines))
             .block(block)
-            .scroll((scroll, 0))
-            .wrap(Wrap { trim: false }),
+            .scroll((scroll, 0)),
         area,
     );
 }
 
-fn render_footer(frame: &mut Frame, changes: &ChangesState, area: Rect) {
+fn render_footer(frame: &mut Frame, app: &App, changes: &ChangesState, area: Rect) {
     let first = if changes.commit_running {
-        Span::styled("Committing...", Style::default().fg(Color::Yellow))
+        Span::styled(
+            app.language.text("Committing...", "正在提交..."),
+            Style::default().fg(Color::Yellow),
+        )
     } else if changes.operation_running {
-        Span::styled("Writing...", Style::default().fg(Color::Yellow))
+        Span::styled(
+            app.language.text("Writing...", "正在写入..."),
+            Style::default().fg(Color::Yellow),
+        )
     } else if let Some((is_error, message)) = &changes.message {
         Span::styled(
             message.clone(),
             Style::default().fg(if *is_error { Color::Red } else { Color::Green }),
         )
     } else {
-        Span::raw("Space Select   A All   z Stash   s Stage   u Unstage   d Discard   m Commit")
+        Span::raw(app.language.text(
+            "Space Select   A All   z Stash   s Stage   u Unstage   d Discard   m Commit",
+            "Space 选择   A 全选   z 暂存   s 暂存文件   u 取消暂存   d 丢弃   m 提交",
+        ))
     };
     let mode = match changes.mode {
-        ChangesMode::File => "FILE",
-        ChangesMode::Hunk => "HUNK",
-        ChangesMode::Line => "LINE",
+        ChangesMode::File => app.language.label("file"),
+        ChangesMode::Hunk => app.language.label("hunk"),
+        ChangesMode::Line => app.language.label("line"),
     };
     frame.render_widget(
         Paragraph::new(vec![
             Line::from(first),
             Line::raw(format!(
-                "[{mode}] Tab Mode   j/k Move   g/G First/last   r Refresh   Esc Back   ? Help"
+                "[{mode}] {}",
+                app.language.text(
+                    "Tab Mode   j/k Move   g/G First/last   r Refresh   Esc Back   ? Help",
+                    "Tab 模式   j/k 移动   g/G 首/末   r 刷新   Esc 返回   ? 帮助",
+                )
             )),
         ]),
         area,
     );
 }
 
-fn render_confirmation(frame: &mut Frame, changes: &ChangesState) {
+fn render_confirmation(frame: &mut Frame, app: &App, changes: &ChangesState) {
     let Some(pending) = &changes.confirmation else {
         return;
     };
@@ -320,40 +393,70 @@ fn render_confirmation(frame: &mut Frame, changes: &ChangesState) {
         PendingOperation::Single { change, target, .. } => {
             lines.push(Line::styled(
                 match target {
-                    OperationTarget::File => {
-                        "This permanently discards all worktree changes in the file."
-                    }
-                    OperationTarget::Hunk { .. } => {
-                        "This permanently discards the selected worktree hunk."
-                    }
-                    OperationTarget::Line { .. } => {
-                        "This permanently discards the selected worktree line."
-                    }
+                    OperationTarget::File => app.language.text(
+                        "This permanently discards all worktree changes in the file.",
+                        "此操作会永久丢弃该文件的全部工作区改动。",
+                    ),
+                    OperationTarget::Hunk { .. } => app.language.text(
+                        "This permanently discards the selected worktree hunk.",
+                        "此操作会永久丢弃所选工作区域块。",
+                    ),
+                    OperationTarget::Line { .. } => app.language.text(
+                        "This permanently discards the selected worktree line.",
+                        "此操作会永久丢弃所选工作区行。",
+                    ),
                 },
                 Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
             ));
             lines.push(Line::raw(""));
-            lines.push(Line::raw(format!("File: {}", change.path.display())));
+            lines.push(Line::raw(super::text::truncate(
+                &format!(
+                    "{}: {}",
+                    app.language.text("File", "文件"),
+                    change.path.display()
+                ),
+                area.width.saturating_sub(2) as usize,
+            )));
             lines.push(Line::raw(match target {
-                OperationTarget::File => "Scope: entire file".to_owned(),
-                OperationTarget::Hunk { source, .. } => {
-                    format!("Scope: selected {} hunk", source.label())
-                }
-                OperationTarget::Line { source, .. } => {
-                    format!("Scope: selected {} line", source.label())
-                }
+                OperationTarget::File => format!(
+                    "{}: {}",
+                    app.language.label("Scope"),
+                    app.language.text("entire file", "整个文件")
+                ),
+                OperationTarget::Hunk { source, .. } => format!(
+                    "{}: {} {}",
+                    app.language.label("Scope"),
+                    app.language.text("selected", "所选"),
+                    app.language.label(source.label())
+                ),
+                OperationTarget::Line { source, .. } => format!(
+                    "{}: {} {}",
+                    app.language.label("Scope"),
+                    app.language.text("selected", "所选"),
+                    app.language.label(source.label())
+                ),
             }));
-            (" Confirm destructive operation ", "discard")
+            (
+                app.language
+                    .text(" Confirm destructive operation ", " 确认破坏性操作 "),
+                app.language.text("discard", "丢弃"),
+            )
         }
         PendingOperation::Batch(spec) => {
             let destructive = spec.kind == OperationKind::Discard;
             lines.push(Line::styled(
                 match spec.kind {
-                    OperationKind::Stash => "Stash frozen files, including untracked files.",
-                    OperationKind::Discard => {
-                        "Permanently discard staged, worktree, and untracked changes."
-                    }
-                    _ => "Run the frozen file batch.",
+                    OperationKind::Stash => app.language.text(
+                        "Stash frozen files, including untracked files.",
+                        "暂存已冻结的文件，包括未跟踪文件。",
+                    ),
+                    OperationKind::Discard => app.language.text(
+                        "Permanently discard staged, worktree, and untracked changes.",
+                        "永久丢弃已暂存、工作区和未跟踪改动。",
+                    ),
+                    _ => app
+                        .language
+                        .text("Run the frozen file batch.", "执行已冻结的文件批处理。"),
                 },
                 Style::default()
                     .fg(if destructive {
@@ -364,38 +467,52 @@ fn render_confirmation(frame: &mut Frame, changes: &ChangesState) {
                     .add_modifier(Modifier::BOLD),
             ));
             lines.push(Line::raw(format!(
-                "Repository: {}   Files: {}",
+                "{}: {}   {}: {}",
+                app.language.text("Repository", "仓库"),
                 spec.project.relative_path.display(),
+                app.language.label("Files"),
                 spec.items.len()
             )));
             lines.push(Line::raw(""));
             let budget = usize::from(area.height.saturating_sub(9));
             for item in spec.items.iter().take(budget) {
-                lines.push(Line::raw(format!(
-                    "  {}  {}",
-                    item.change.status_label(),
-                    item.change.path.display()
+                lines.push(Line::raw(super::text::truncate(
+                    &format!(
+                        "  {}  {}",
+                        item.change.status_label(),
+                        item.change.path.display()
+                    ),
+                    area.width.saturating_sub(2) as usize,
                 )));
             }
             if spec.items.len() > budget {
                 lines.push(Line::raw(format!(
-                    "  ... {} more files",
-                    spec.items.len() - budget
+                    "  ... {} {}",
+                    spec.items.len() - budget,
+                    app.language.text("more files", "个更多文件")
                 )));
             }
             (
                 if destructive {
-                    " Confirm batch discard "
+                    app.language
+                        .text(" Confirm batch discard ", " 确认批量丢弃 ")
                 } else {
-                    " Confirm batch stash "
+                    app.language.text(" Confirm batch stash ", " 确认批量暂存 ")
                 },
-                if destructive { "discard" } else { "stash" },
+                if destructive {
+                    app.language.text("discard", "丢弃")
+                } else {
+                    app.language.text("stash", "暂存")
+                },
             )
         }
     };
     lines.push(Line::raw(""));
     lines.push(Line::raw(format!(
-        "Press y to {action} or n/Esc to cancel."
+        "{} {action}{}",
+        app.language.text("Press y to", "按 y "),
+        app.language
+            .text(" or n/Esc to cancel.", "，按 n/Esc 取消。")
     )));
     frame.render_widget(Clear, area);
     frame.render_widget(
@@ -406,13 +523,13 @@ fn render_confirmation(frame: &mut Frame, changes: &ChangesState) {
     );
 }
 
-fn render_commit_dialog(frame: &mut Frame, changes: &ChangesState) {
+fn render_commit_dialog(frame: &mut Frame, app: &App, changes: &ChangesState) {
     let area = centered_rect(84, 75, frame.area());
     frame.render_widget(Clear, area);
     let title = if changes.commit_amend {
-        " Commit (amend) "
+        app.language.text(" Commit (amend) ", " 提交（修订） ")
     } else {
-        " Commit "
+        app.language.text(" Commit ", " 提交 ")
     };
     let outer = Block::default().title(title).borders(Borders::ALL);
     let inner = outer.inner(area);
@@ -427,7 +544,7 @@ fn render_commit_dialog(frame: &mut Frame, changes: &ChangesState) {
         .split(inner);
 
     let editor_block = Block::default()
-        .title(" Message ")
+        .title(format!(" {} ", app.language.label("Message")))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Cyan));
     let editor_inner = editor_block.inner(sections[0]);
@@ -453,28 +570,45 @@ fn render_commit_dialog(frame: &mut Frame, changes: &ChangesState) {
         sections[0],
     );
 
-    let enabled = |value| if value { "on" } else { "off" };
+    let enabled = |value| app.language.label(if value { "on" } else { "off" });
     frame.render_widget(
         Paragraph::new(vec![
             Line::raw(format!(
-                "Ctrl-A amend: {}   Ctrl-U sign-off: {}",
+                "{}: {}   {}: {}",
+                app.language.text("Ctrl-A amend", "Ctrl-A 修订"),
                 enabled(changes.commit_amend),
+                app.language.text("Ctrl-U sign-off", "Ctrl-U 作者签署"),
                 enabled(changes.commit_signoff)
             )),
             Line::raw(format!(
-                "Ctrl-G signing: {}",
+                "{}: {}",
+                app.language.text("Ctrl-G signing", "Ctrl-G 提交签名"),
                 enabled(changes.commit_signing)
             )),
         ])
-        .block(Block::default().title(" Options ").borders(Borders::TOP)),
+        .block(
+            Block::default()
+                .title(format!(" {} ", app.language.label("Options")))
+                .borders(Borders::TOP),
+        ),
         sections[1],
     );
     frame.render_widget(
         Paragraph::new(vec![
-            Line::raw("Arrows move   Home/End line   Backspace/Delete edit"),
-            Line::raw("Enter newline   Ctrl-Enter/Ctrl-S commit   Esc cancel"),
+            Line::raw(app.language.text(
+                "Arrows move   Home/End line   Backspace/Delete edit",
+                "方向键移动   Home/End 行首/行尾   Backspace/Delete 编辑",
+            )),
+            Line::raw(app.language.text(
+                "Enter newline   Ctrl-Enter/Ctrl-S commit   Esc cancel",
+                "Enter 换行   Ctrl-Enter/Ctrl-S 提交   Esc 取消",
+            )),
         ])
-        .block(Block::default().title(" Keys ").borders(Borders::TOP)),
+        .block(
+            Block::default()
+                .title(format!(" {} ", app.language.label("Keys")))
+                .borders(Borders::TOP),
+        ),
         sections[2],
     );
 

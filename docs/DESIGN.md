@@ -40,6 +40,7 @@
 6. 对数百到数千个项目保持响应；任何外部命令都不能阻塞输入和绘制循环。
 7. 尊重用户已有 Git 配置、凭据、hooks、签名、LFS、submodule 和 Repo 版本行为。
 
+8. 默认提供英文界面，并通过 `-zh`/`--zh` 或 `-en`/`--en` 为每个 App 实例选择语言；禁止依赖进程级可变语言状态。
 ### 2.2 “完整操作”的定义
 
 Git 与 Repo 的参数面很大，而且会随版本、插件和服务端扩展变化。`repo-tui` 采用两层覆盖模型：
@@ -89,6 +90,9 @@ Git 与 Repo 的参数面很大，而且会随版本、插件和服务端扩展�
 | Command Palette | 搜索页面、动作、仓库、引用，以及执行受控 Git/Repo 命令 |
 | Settings | 显示、快捷键、扫描并发、默认命令参数、确认策略和日志设置 |
 | Help | 当前上下文可用快捷键、版本和诊断信息 |
+
+- Workspace 的 `d` 使用显式三态：全部仓库、仅改动仓库、改动仓库及文件树。后两态共享 dirty 过滤，文件树只是仓库行的视觉展开，选择和操作仍绑定稳定 `ProjectId`。
+- 所有外部文本经过共享显示安全层：控制字符可视化、按终端列宽截断或换行、双宽字符不从中间切开；diff 源行不使用自动换行。
 
 ### 4.2 导航模型
 
@@ -197,8 +201,8 @@ Graph 是进入仓库后的默认页，由提交列表和详情检查器组成�
 提交行展示：
 
 - 实心 Unicode box-drawing topology、commit/merge/boundary 符号和有色连接。
-- 短 OID、subject 和有界 refs 摘要；HEAD、本地分支和 stash 始终优先，remote/tag 各显示一个代表项，多余数量使用 `R:+N`/`T:+N`。
-- Date 在空间允许时使用 UTC `YYYY-MM-DD`；Author 和 Age 仅在更宽布局显示，完整 OID、Author、Age、parents 和 body 始终保留在 Inspector。
+- 短 OID、按 Subject 列终端显示宽度换行的 subject 和有界 refs 摘要；每个 commit Row 使用真实视觉高度，HEAD、本地分支和 stash 始终优先，remote/tag 各显示一个代表项，多余数量使用 `R:+N`/`T:+N`。
+- Date 在空间允许时使用 UTC `YYYY-MM-DD`；Author 和 Age 仅在更宽布局显示，完整 OID、Author、Age、parents 和 body 始终保留在 Inspector。Inspector 显式按原始换行拆分 body，并保留空行。
 - Inspector 按 HEAD、Local branches、Remote branches、Tags、Stashes 分组并显示数量和全部 badge；主列表折叠不修改 `Commit.refs`，过滤和对象菜单仍能访问每个真实 ref。
 
 交互能力：
@@ -233,7 +237,7 @@ Git 提供提交及 parent 关系，`repo-tui` 的纯数据 `graph_layout` 模�
 3. 每行根据旧 lanes 和新 lanes 生成 `Pipe { from_lane, to_lane, Starts | Continues | Terminates }`；continuing pipe 优先复用 ancestry color，左侧 lane 终止后右侧 continuation 安全向左收缩。
 4. parent 优先占用当前节点释放的最左位置，first parent 继承当前颜色，其余 parent 分配稳定颜色；每个 cell 根据上、下、左、右连接位选择 `─`、`│`、`├`、`┤`、`┬`、`┴`、`┼`、`┌`、`┐`、`└`、`┘`。
 5. merge 节点使用 `◆`，普通节点使用 `●`；布局保留 starts/continues/terminates pipes，便于测试分叉来源、汇入方向和 crossing。
-6. 紧凑模式每个 commit 一行，最多投影 10 条 lane；更多 lane 不静默裁剪，而是在准确的左侧投影后显示 `~N` 隐藏数量。
+6. 紧凑 Graph 最多直接投影 10 条 lane；Subject 可使 commit 行增加视觉高度，viewport 按累计行高保持选中 OID 可见。更多 lane 不静默裁剪，而是在准确的左侧投影后显示 `~N` 隐藏数量。
 7. ref 变化后使当前 graph generation 失效并保留选中 OID；如果 OID 不再可达，给出提示而不是静默跳行。
 
 内部数据以完整 all-refs OID/parents DAG 为基础，不解析 `git log --graph` 的终端文本。过滤只控制可见 commit 行，布局仍对完整 commits 计算，确保隐藏中间节点不会破坏选择、ref 身份或 ancestry。fixture 覆盖直线、分叉、双亲/octopus merge、多 lane、lane 左移、missing parent 和 lane cap。
@@ -257,6 +261,8 @@ Changes 页面分为文件树、hunk 列表、diff 检查器和提交对话框�
 - 提交使用 project 级写锁并在锁内检查 `index.lock`；普通 commit 要求存在 staged 内容，amend 遵循 Git 当前 HEAD 语义。
 - commit 失败时合并 hook stdout/stderr，保留多行输入、光标、选项和错误状态，允许修正后重试；成功后刷新 Changes 与 Workspace。
 
+- diff 预览保持一个源行对应一个终端行，超宽文本在面板 inner width 内安全截断，禁止 Ratatui 自动 wrap 导致内容跨过边框或折回终端左侧。
+- 文件路径、diff、commit/ref 文本和外部命令消息先转义控制字符，再按 `unicode-width` 终端列宽处理；中文等双宽字符不会被截断到半个 cell。
 文件名按原始字节保存，显示层才做可逆转义或 lossy 展示。Git 数据读取尽量使用 `-z`，正确处理空格、制表符、换行及非 UTF-8 路径。
 
 ### 6.4 Conflict Resolver

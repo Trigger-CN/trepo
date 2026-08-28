@@ -52,11 +52,12 @@ M1 是所有后续里程碑的共同数据与交互基础。M4 可以在 M2 后�
 
 - 从任意子目录识别 Repo 工作区或单 Git 仓库，并并发扫描状态。
 - Workspace、完整 all-refs Graph、Changes 和 Repository 管理页面均已可用。
-- Workspace 支持稳定 ProjectId 多选、命名搜索、`d` 一键仅显示工作区有改动项目、宽屏 Inspector 文件状态树，以及 `Z`/`D` 对冻结仓库选择执行确认后的 Stash/Discard。
-- Graph 支持 commit/HEAD/local branch/remote branch/tag/stash 两级上下文操作及 typed form，本地分支直接提供普通 Push 与 Force push with lease。
+- Workspace 支持稳定 ProjectId 多选、命名搜索，以及 `d` 在全部、仅改动、改动仓库与文件树三态间循环；宽屏 Inspector 和 `Z`/`D` 冻结仓库 Stash/Discard 保持可用。
+- Graph 支持 commit/HEAD/local branch/remote branch/tag/stash 两级上下文操作及 typed form；Subject 按显示列宽多行渲染，Inspector 保留 body 原始换行，本地分支直接提供普通 Push 与 Force push with lease。
 - Changes 支持文件多选批量 Stage/Unstage、selected-path Stash 和完整 Discard；文件/hunk/changed-line、commit/stash/conflict、refs/integration 和 remotes 写操作受锁、token 和 generation 保护。
 - Repo `sync/start/checkout/abandon/prune/rebase/upload/download` 和 pinned manifest export 具有 workspace lock、逐项目结果、流式日志、取消后复扫与失败重试。
 - Graph、Changes、Workspace Git 与 Repo overlay、confirmation 和结果状态均覆盖 80x24 与 120x40 TestBackend 渲染。
+- UI 默认英文，`-zh`/`--zh` 与 `-en`/`--en` 以实例级语言状态覆盖主要页面；长路径、diff 和外部文本按终端列宽安全处理，控制字符不能污染终端布局。
 
 下一执行点是 M5 命令面板与终端接管；交互认证、外部 editor/mergetool 和任意受控命令不在 M4 后台任务中启动。
 
@@ -168,14 +169,14 @@ cargo run -- doctor .
 - 表格展示状态、project/path、HEAD、upstream 和错误。
 - Summary 展示总数、dirty、conflict、ahead、behind、error。
 - `j/k`、方向键、`g/G` 导航。
-- `/` 搜索 project/path/branch，`Esc` 清空搜索或退出；`d` 在 Workspace 切换仅显示 staged、unstaged、untracked 或 conflicted 项目，并与搜索按 AND 组合。
+- `/` 搜索 project/path/branch，`Esc` 清空搜索或退出；`d` 按“全部 → 仅改动 → 改动与文件树”循环，两个改动态与搜索按 AND 组合。
 - `r` 刷新，`Enter` 打开选中仓库，`?` 显示帮助。
-- 宽屏显示检查器和同次 porcelain 扫描解析出的文件状态码/路径列表，窄屏保持主列表可用。
+- 展开态在主列表仓库行内显示同次 porcelain 扫描解析出的文件状态树，文件行不可独立选择；宽屏 Inspector 继续显示完整仓库详情。
 
 验收：
 
-- selection 绑定 project identity，搜索、changed-only 切换和扫描增量后不会索引越界或跳到错误项目。
-- 80x24 与 120x40 TestBackend 渲染不 panic；宽屏可见 changed-only 状态与文件状态码。
+- selection 绑定 project identity，搜索、三态切换和扫描增量后不会索引越界或跳到错误项目。
+- 80x24 与 120x40 TestBackend 渲染不 panic；展开态可见仓库与文件状态树。
 - 扫描中、空列表和错误状态都有明确界面。
 
 ### M1.5 Commit graph 页面
@@ -184,7 +185,7 @@ cargo run -- doctor .
 
 - 使用显式 NUL 字段协议读取纯 `git log --topo-order --all` 的完整可达历史，禁止再叠加 date-order 打散平行开发线。
 - 独立解析本地分支、远端分支、annotated/lightweight tag、HEAD 和每条 stash reflog entry。
-- 展示多色 pipe topology、OID、subject 和响应式 metadata；Graph/Subject/重要 refs 优先于 Date、Author、Age。
+- 展示多色 pipe topology、OID、按 Subject 列显示宽度换行的 subject 和响应式 metadata；可变高度 viewport 保持选中 OID 可见，Graph/Subject/重要 refs 优先于 Date、Author、Age。
 - 主列表完整优先展示 HEAD/local/stash，remote/tag 使用有界 badge 和 `R:+N`/`T:+N`；Inspector 与对象菜单保留全部 refs。
 - `graph_layout` 将 Direct/Indirect/Missing edge、Starts/Continues/Terminates pipe 与 Ratatui 渲染分离，支持 continuing lane 向左压缩。
 - lane 超过紧凑模式上限时显示 `~N`，missing parent 使用 `◉`，不静默裁剪或伪造直接连接。
@@ -198,7 +199,7 @@ cargo run -- doctor .
 - 真实 Git 日期交错双分支 fixture 证明加载顺序等于纯 topo-order 且不同于 date-order。
 - Graph 加载不阻塞 event loop；进入/返回不丢失 Workspace selection 和搜索。
 - 过滤语义覆盖分支可达闭包、文本/作者/日期 AND、无效日期、稳定选择和零匹配安全状态。
-- 80x24 与 120x40 TestBackend 覆盖响应式列、Subject、refs 摘要、完整 Inspector 分组、过滤和零匹配详情。
+- 80x24 与 120x40 TestBackend 覆盖响应式列、Subject 多行、可变行高 viewport、refs 摘要、保留 body 空行的完整 Inspector、过滤和零匹配详情。
 
 ### M1.6 测试与文档
 
@@ -391,6 +392,7 @@ cargo run -- doctor .
 | M3 refs/integration | Done | branch/tag、merge/rebase/cherry-pick/revert 与 Graph 本地分支 Push/Force Push 矩阵通过 |
 | M3 remotes | Done | bare remote 普通 push、非快进拒绝、陈旧/当前 lease、fetch/pull/upstream/prune 与 remote 管理通过 |
 | M4 Repo/Workspace batch | Done | Repo batch 与 Workspace Git Stash/Discard 的 stable multi-select、全批预检、逐项结果和 80x24/120x40 通过 |
+| UI 文本/语言 | Done | 默认英文、-zh/-en 与长参数、三态 Workspace、显示列宽/控制字符/重绘回归及双语言 80x24/120x40 通过 |
 | M5-M7 | Planned | 下一步从 M5 命令面板与终端接管开始 |
 
 M0-M4 最终验证（Rust 1.98、Git 2.43.0、Repo launcher 2.54）：
@@ -413,6 +415,8 @@ cargo build
 - Repository 与 Graph 的普通 Push/Force Push 使用固定 `branch:branch` refspec；裸 `--force` 不可达，force-with-lease 并发推进场景由真实 peer/bare remote 覆盖。
 - Stash 高级模式、index 恢复、branch/clear，以及 selected-file/selected-repository Stash 的领域映射、范围确认和 80x24/120x40 可见性均有测试覆盖。
 - Repo 批处理保留凭据脱敏日志；Workspace Git 批任务保留逐仓库 pending/running/success/failure。两者均不承诺跨仓库回滚并在结束后复扫事实状态。
+- Graph Subject 和 Workspace 展开仓库使用真实视觉行高；Changes diff 每个源行固定一行，显示列宽安全层已覆盖中文宽字符、控制字符与长转短重绘残留。
+- Language 注入 App，默认 English；精确 `-zh`/`-en` 在 Clap 前规范化，标准 `--zh`/`--en` 同时受支持且互斥。
 - 当前无任意命令面板或 PTY takeover；交互认证、外部 editor/mergetool 明确依赖 M5。
 
 ## 15. 下一执行点
