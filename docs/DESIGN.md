@@ -1,7 +1,7 @@
-# repo-tui 设计文档
+# trepo 设计文档
 
 - 文档状态：Draft
-- 产品名称：`repo-tui`
+- 产品名称：`trepo`
 - 目标平台：Linux、macOS；Windows/WSL 后续评估
 - 主要技术栈：Rust、Ratatui、Crossterm、Tokio
 
@@ -16,7 +16,7 @@
 - 某仓库的提交拓扑、分支、标签和远端引用之间是什么关系？
 - 如何在不离开当前上下文的情况下完成 stage、commit、rebase、push 等 Git 操作？
 
-`repo-tui` 是一个面向终端的多仓库工作台。它以 Repo 工作区为顶层对象，以各 Git project 为主要管理单元，把状态观察、历史浏览、单仓库操作和跨仓库工作流统一到同一个 TUI 中。
+`trepo` 是一个面向终端的多仓库工作台。它以 Repo 工作区为顶层对象，以各 Git project 为主要管理单元，把状态观察、历史浏览、单仓库操作和跨仓库工作流统一到同一个 TUI 中。
 
 本文中：
 
@@ -26,7 +26,7 @@
 - **引用**：Git branch、tag、remote-tracking ref 等 ref。
 - **任务**：一个可观察、可取消并产生结构化结果的后台命令。
 
-如果启动目录不是 Repo 工作区，`repo-tui` 可以把它作为单个 Git 仓库打开；可选的普通目录扫描属于兼容模式，不取代 Repo 作为核心场景。
+如果启动目录不是 Repo 工作区，`trepo` 可以把它作为单个 Git 仓库打开；可选的普通目录扫描属于兼容模式，不取代 Repo 作为核心场景。
 
 ## 2. 产品目标与边界
 
@@ -43,7 +43,7 @@
 8. 默认提供英文界面，并通过 `-zh`/`--zh` 或 `-en`/`--en` 为每个 App 实例选择语言；禁止依赖进程级可变语言状态。
 ### 2.2 “完整操作”的定义
 
-Git 与 Repo 的参数面很大，而且会随版本、插件和服务端扩展变化。`repo-tui` 采用两层覆盖模型：
+Git 与 Repo 的参数面很大，而且会随版本、插件和服务端扩展变化。`trepo` 采用两层覆盖模型：
 
 - **一等工作流**：高频命令拥有专用页面或弹窗、参数校验、影响范围预览和结构化结果。
 - **受控命令面板**：所有其余 `git`/`repo` 子命令可通过 argv 形式执行；不会经 shell 拼接。需要编辑器、认证、交互式 rebase 或复杂 prompt 时，临时退出 alternate screen，将终端控制权交给子进程，结束后恢复 TUI 并刷新状态。
@@ -112,7 +112,7 @@ Git 与 Repo 的参数面很大，而且会随版本、插件和服务端扩展�
 宽终端采用“列表 + 检查器”，窄终端退化为单栏，并可打开详情抽屉。
 
 ```text
-┌ repo-tui  workspace: android-main  manifest: default.xml  436 projects ┐
+┌ trepo  workspace: android-main  manifest: default.xml  436 projects ┐
 │ Filter: dirty,conflict      Search: camera                 Tasks 2/1 ! │
 ├──┬ Status ┬ Project/Path             ┬ HEAD       ┬ Upstream   ┬ Age ─┤
 │  │ ● M?   │ platform/camera          │ feature/x  │ +2 -1      │ 2h  │
@@ -229,7 +229,7 @@ Graph 是仓库操作的首要发现入口。用户在提交树中选中节点�
 
 需要参数的动作进入 typed form；破坏性动作和远端写入沿用现有确认及精确预览。Graph 只负责上下文识别、导航和参数收集，实际 Git argv、项目锁、`index.lock` 检查、snapshot token、generation 校验和 OperationRunner 执行保持唯一实现。动作完成后 Graph 刷新 all-refs 历史，并尽可能按原 OID 恢复选择；失败保留真实 Git 错误。
 
-Git 提供提交及 parent 关系，`repo-tui` 的纯数据 `graph_layout` 模块负责布局，Ratatui 层只将 cell 投影为颜色和字符：
+Git 提供提交及 parent 关系，`trepo` 的纯数据 `graph_layout` 模块负责布局，Ratatui 层只将 cell 投影为颜色和字符：
 
 1. 只使用 `git log --topo-order --all` 获取提交，避免后置 date-order 让平行开发线按日期交错，同时保证父提交不会出现在子提交之前。
 2. 输入先转换为 `GraphNode { oid, edges }`，edge 显式区分 `Direct`、`Indirect` 和 `Missing`；缺失 parent 不伪装为普通直接连接，并用 `◉` 标记 boundary。
@@ -249,7 +249,7 @@ Workspace 仓库列表可先按稳定 `ProjectId` 多选，再直接执行整仓
 
 Changes 页面分为文件树、hunk 列表、diff 检查器和提交对话框：
 
-- Workspace Inspector 与 Changes 使用同一目录树投影，以 `├─`、`└─`、`│` 展示 staged、unstaged、untracked 和 conflicted 文件的路径层级；目录行只负责显示，文件操作始终绑定原始 `PathBuf`。
+- Workspace Inspector 与 Changes 使用同一目录树投影，以 `├─`、`└─`、`│` 展示 staged、unstaged、untracked 和 conflicted 文件的路径层级；目录行只负责显示，文件操作始终绑定原始 `PathBuf`。Changes 的 `XY` 与文件名使用固定状态色增强区分：仅 staged 为亮绿、仅 unstaged 为亮红、两者并存为亮紫、untracked 为黄、conflict 为加粗亮红；`XY` 字符仍是无颜色环境下的权威语义，光标行统一使用黑字亮青背景覆盖状态色。
 - Changes 文件模式用 `Space` 切换当前文件、`A` 全选/清空。存在文件选择时，Stage/Unstage、`z` Stash 和 `d` Discard 作用于该稳定路径集合；无文件选择时 Stage/Unstage/Discard 继续作用于当前 file/hunk/line，Stash 要求先选择文件。中文界面固定使用“暂存/取消暂存”表示 index Stage/Unstage，使用“储藏”表示 Stash。
 - 批量 Stage/Unstage 在同一 workspace/project lock 内重新读取所有条目，先验证全部文件的适用性与 diff token，再开始逐项写入；任一 token 陈旧时不写任何目标。
 - 批量 Stash/Discard 在显示确认框前异步冻结全部路径和内容 token；确认框列出动作、文件数、`XY` 状态和路径。确认后 Runner 在同一锁内复验冻结范围。Stash 固定包含 selected tracked/untracked 路径；Discard 恢复 tracked index/worktree、删除 staged-added/untracked，并正确处理 rename 的原路径与新路径，未选择路径不受影响。
@@ -326,7 +326,7 @@ interactive rebase、`git add -p`、外部 mergetool/difftool、credential promp
 
 启动顺序：
 
-1. 解析 `repo-tui [PATH]`，未提供时使用当前目录。
+1. 解析 `trepo [PATH]`，未提供时使用当前目录。
 2. 向上查找有效 Repo client 根目录，并验证 `repo` 命令可用。
 3. 通过 `repo list` 获取当前 manifest 生效的项目集合；不要只递归查找 `.git`。
 4. 读取 manifest 输出补充 project name、path、remote、revision、groups、upstream、dest-branch 等信息。
@@ -659,7 +659,7 @@ struct WorktreeSummary {
 - 危险操作确认等级。
 - 命令白名单和任务日志保留策略。
 
-诊断页显示 repo-tui、Git、Repo 版本，工作区根，终端能力，配置来源和最近 parser/process 错误。`repo-tui doctor` 提供非交互诊断，便于在 TUI 无法启动时排查。
+诊断页显示 trepo、Git、Repo 版本，工作区根，终端能力，配置来源和最近 parser/process 错误。`trepo doctor` 提供非交互诊断，便于在 TUI 无法启动时排查。
 
 首版不承诺动态插件 ABI。可扩展动作先使用配置化外部命令模板，但变量必须作为独立 argv 展开，并明确标注是否需要 shell。真正插件系统应在领域动作和安全模型稳定后另行设计。
 
@@ -749,7 +749,7 @@ Repo 集成测试使用小型本地 manifest 和本地 bare remotes，避免依�
 - 风险确认、实时前置检查、冲突状态与 continue/abort。
 - PTY takeover 支持编辑器、认证和交互式 rebase。
 
-完成标准：典型 edit-to-push 流程无需离开 repo-tui，失败时状态和用户输入可恢复。
+完成标准：典型 edit-to-push 流程无需离开 trepo，失败时状态和用户输入可恢复。
 
 ### Phase 3：Repo 一等工作流
 

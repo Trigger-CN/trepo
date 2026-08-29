@@ -47,10 +47,7 @@ fn render_help(frame: &mut Frame, app: &App) {
     let language = app.language;
     let text = if language.is_zh() {
         Text::from(vec![
-            Line::styled(
-                "repo-tui 按键",
-                Style::default().add_modifier(Modifier::BOLD),
-            ),
+            Line::styled("trepo 按键", Style::default().add_modifier(Modifier::BOLD)),
             Line::raw(""),
             Line::raw("j/k 或方向键    移动选择 / 滚动当前任务"),
             Line::raw("g/G             首项 / 末项"),
@@ -73,10 +70,7 @@ fn render_help(frame: &mut Frame, app: &App) {
         ])
     } else {
         Text::from(vec![
-            Line::styled(
-                "repo-tui keys",
-                Style::default().add_modifier(Modifier::BOLD),
-            ),
+            Line::styled("trepo keys", Style::default().add_modifier(Modifier::BOLD)),
             Line::raw(""),
             Line::raw("j/k or arrows  Move selection / scroll active task"),
             Line::raw("g/G            First / last"),
@@ -242,6 +236,29 @@ mod tests {
             "text {needle:?} was not rendered at {width}x{height}"
         );
         panic!("text {needle:?} had no {fg:?}/{bg:?}/bold rendering at {width}x{height}");
+    }
+
+    fn assert_text_foreground(app: &App, width: u16, height: u16, needle: &str, fg: Color) {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render(frame, app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let symbols = needle
+            .chars()
+            .map(|value| value.to_string())
+            .collect::<Vec<_>>();
+        let span_width = u16::try_from(symbols.len()).unwrap();
+        for y in 0..height {
+            for x in 0..=width.saturating_sub(span_width) {
+                let matches = symbols.iter().enumerate().all(|(offset, symbol)| {
+                    buffer[(x + u16::try_from(offset).unwrap(), y)].symbol() == symbol
+                });
+                if matches && (0..span_width).all(|offset| buffer[(x + offset, y)].fg == fg) {
+                    return;
+                }
+            }
+        }
+        panic!("text {needle:?} had no {fg:?} rendering at {width}x{height}");
     }
 
     fn assert_selected_text(app: &App, width: u16, height: u16, needle: &str) {
@@ -856,6 +873,22 @@ mod tests {
     fn renders_changes_and_destructive_confirmation() {
         let mut app = app();
         let project = app.workspace.projects[0].clone();
+        let staged = ChangeEntry {
+            path: PathBuf::from("staged.rs"),
+            original_path: None,
+            index: Some(ChangeCode::Modified),
+            worktree: None,
+            untracked: false,
+            conflicted: false,
+        };
+        let unstaged = ChangeEntry {
+            path: PathBuf::from("unstaged.rs"),
+            original_path: None,
+            index: None,
+            worktree: Some(ChangeCode::Modified),
+            untracked: false,
+            conflicted: false,
+        };
         let entry = ChangeEntry {
             path: PathBuf::from("src/main.rs"),
             original_path: None,
@@ -864,12 +897,43 @@ mod tests {
             untracked: false,
             conflicted: false,
         };
+        let mixed = ChangeEntry {
+            path: PathBuf::from("mixed.rs"),
+            original_path: None,
+            index: Some(ChangeCode::Modified),
+            worktree: Some(ChangeCode::Modified),
+            untracked: false,
+            conflicted: false,
+        };
+        let untracked = ChangeEntry {
+            path: PathBuf::from("untracked.rs"),
+            original_path: None,
+            index: None,
+            worktree: None,
+            untracked: true,
+            conflicted: false,
+        };
+        let conflicted = ChangeEntry {
+            path: PathBuf::from("conflicted.rs"),
+            original_path: None,
+            index: Some(ChangeCode::Updated),
+            worktree: Some(ChangeCode::Updated),
+            untracked: false,
+            conflicted: true,
+        };
         app.screen = Screen::Changes;
         app.changes = Some(ChangesState {
             project,
             return_screen: Screen::Workspace,
-            entries: vec![entry.clone()],
-            selected: 0,
+            entries: vec![
+                staged,
+                unstaged,
+                mixed,
+                entry.clone(),
+                untracked,
+                conflicted,
+            ],
+            selected: 3,
             selected_files: std::iter::once(entry.path.clone()).collect(),
             mode: ChangesMode::File,
             selected_hunk: 0,
@@ -921,6 +985,12 @@ mod tests {
             assert!(text.contains("1 selected"));
             assert!(text.contains("[x]"));
         }
+        assert_text_foreground(&app, 120, 40, "staged.rs", Color::LightGreen);
+        assert_text_foreground(&app, 120, 40, "unstaged.rs", Color::LightRed);
+        assert_text_foreground(&app, 120, 40, "mixed.rs", Color::LightMagenta);
+        assert_text_foreground(&app, 120, 40, "untracked.rs", Color::Yellow);
+        assert_text_foreground(&app, 120, 40, "conflicted.rs", Color::LightRed);
+        assert_selected_text(&app, 120, 40, "main.rs");
         app.changes.as_mut().unwrap().mode = ChangesMode::Hunk;
         for (width, height) in [(80, 24), (120, 40)] {
             assert_selected_text(&app, width, height, "main.rs");
@@ -973,7 +1043,7 @@ mod tests {
         changes.commit_editing = false;
         changes.confirmation = Some(PendingOperation::Single {
             kind: OperationKind::RestoreWorktree,
-            change: changes.entries[0].clone(),
+            change: changes.entries[3].clone(),
             target: OperationTarget::Hunk {
                 source: HunkSource::Worktree,
                 fingerprint: 7,
@@ -987,7 +1057,7 @@ mod tests {
         changes.confirmation = Some(PendingOperation::Batch(crate::domain::BatchOperationSpec {
             project: changes.project.clone(),
             items: vec![BatchOperationItem {
-                change: changes.entries[0].clone(),
+                change: changes.entries[3].clone(),
                 expected_token: 42,
             }],
             kind: OperationKind::Stash,
@@ -1255,7 +1325,7 @@ mod tests {
         app.help = true;
         for (width, height) in [(80, 24), (120, 40)] {
             let text = draw_text(&app, width, height);
-            assert!(text.contains("repo-tui"));
+            assert!(text.contains("trepo"));
             assert!(text.contains('按'));
             assert!(text.contains('态'));
         }

@@ -255,7 +255,7 @@ async fn execute_target(action: WorkspaceGitAction, target: &WorkspaceGitTarget)
     match action {
         WorkspaceGitAction::Stage => git::stage_all(&target.project.path).await,
         WorkspaceGitAction::Stash => {
-            git::stash_paths(&target.project.path, &changes, "repo-tui workspace batch").await
+            git::stash_paths(&target.project.path, &changes, "trepo workspace batch").await
         }
         WorkspaceGitAction::Discard => git::discard_paths(&target.project.path, &changes).await,
     }

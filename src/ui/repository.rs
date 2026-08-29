@@ -54,7 +54,7 @@ fn render_header(frame: &mut Frame, app: &App, state: &RepositoryState, area: Re
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled(
-                " repo-tui ",
+                " trepo ",
                 Style::default()
                     .fg(Color::Black)
                     .bg(Color::Magenta)

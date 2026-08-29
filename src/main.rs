@@ -16,13 +16,13 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 use tracing_subscriber::EnvFilter;
 
-use repo_tui::adapters::repo;
-use repo_tui::app::state::{App, Screen};
-use repo_tui::i18n::Language;
-use repo_tui::services::discovery;
+use trepo::adapters::repo;
+use trepo::app::state::{App, Screen};
+use trepo::i18n::Language;
+use trepo::services::discovery;
 
 #[derive(Debug, Parser)]
-#[command(name = "repo-tui", version, about)]
+#[command(name = "trepo", version, about)]
 struct Cli {
     #[arg(default_value = ".")]
     path: PathBuf,
@@ -61,9 +61,7 @@ async fn main() -> Result<()> {
         return doctor(&path).await;
     }
     if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
-        anyhow::bail!(
-            "repo-tui requires an interactive terminal; use `repo-tui doctor` for diagnostics"
-        );
+        anyhow::bail!("trepo requires an interactive terminal; use `trepo doctor` for diagnostics");
     }
 
     let workspace = discovery::discover(&cli.path).await?;
@@ -107,7 +105,7 @@ fn init_logging(log_file: Option<&Path>) -> Result<()> {
 }
 
 async fn doctor(path: &Path) -> Result<()> {
-    println!("repo-tui {}", env!("CARGO_PKG_VERSION"));
+    println!("trepo {}", env!("CARGO_PKG_VERSION"));
     println!("input: {}", path.display());
     println!(
         "terminal stdin/stdout: {}/{}",
@@ -200,7 +198,7 @@ async fn run_tui(app: &mut App) -> Result<()> {
     loop {
         terminal
             .terminal()
-            .draw(|frame| repo_tui::ui::render(frame, app))
+            .draw(|frame| trepo::ui::render(frame, app))
             .context("failed to draw terminal UI")?;
 
         drain_background_messages(app);
@@ -212,7 +210,7 @@ async fn run_tui(app: &mut App) -> Result<()> {
             match event::read().context("failed to read terminal input")? {
                 Event::Key(key) if key.kind == KeyEventKind::Press => handle_key(app, key),
                 Event::Paste(text) => {
-                    app.edit_commit_message(repo_tui::app::state::CommitInput::Text(text))
+                    app.edit_commit_message(trepo::app::state::CommitInput::Text(text))
                 }
                 Event::Resize(_, _) => {}
                 _ => {}
@@ -304,7 +302,7 @@ fn handle_key(app: &mut App, key: KeyEvent) {
             KeyCode::Enter if form => app.submit_repo_batch_form(),
             KeyCode::Enter if menu => app.select_repo_batch_action(),
             KeyCode::Backspace if form => {
-                app.edit_repo_batch_form(repo_tui::app::state::CommitInput::Backspace)
+                app.edit_repo_batch_form(trepo::app::state::CommitInput::Backspace)
             }
             KeyCode::Down | KeyCode::Char('j') if menu => app.move_repo_batch_selection(1),
             KeyCode::Up | KeyCode::Char('k') if menu => app.move_repo_batch_selection(-1),
@@ -315,7 +313,7 @@ fn handle_key(app: &mut App, key: KeyEvent) {
             KeyCode::Char('c') if running => app.cancel_repo_batch(),
             KeyCode::Char('f') if !running => app.retry_failed_repo_batch(),
             KeyCode::Char(character) if form => {
-                app.edit_repo_batch_form(repo_tui::app::state::CommitInput::Character(character))
+                app.edit_repo_batch_form(trepo::app::state::CommitInput::Character(character))
             }
             _ => {}
         }
@@ -329,13 +327,11 @@ fn handle_key(app: &mut App, key: KeyEvent) {
         match key.code {
             KeyCode::Esc => app.cancel_graph_filter(),
             KeyCode::Enter => app.submit_graph_filter(),
-            KeyCode::Backspace => {
-                app.edit_graph_filter(repo_tui::app::state::CommitInput::Backspace)
-            }
+            KeyCode::Backspace => app.edit_graph_filter(trepo::app::state::CommitInput::Backspace),
             KeyCode::Down | KeyCode::Tab => app.move_graph_filter_field(1),
             KeyCode::Up | KeyCode::BackTab => app.move_graph_filter_field(-1),
             KeyCode::Char(character) => {
-                app.edit_graph_filter(repo_tui::app::state::CommitInput::Character(character))
+                app.edit_graph_filter(trepo::app::state::CommitInput::Character(character))
             }
             _ => {}
         }
@@ -355,17 +351,17 @@ fn handle_key(app: &mut App, key: KeyEvent) {
             KeyCode::Enter if graph_action => app.select_graph_action(),
             KeyCode::Enter if graph_object => app.select_graph_object(),
             KeyCode::Backspace if graph_form => {
-                app.edit_graph_form(repo_tui::app::state::CommitInput::Backspace)
+                app.edit_graph_form(trepo::app::state::CommitInput::Backspace)
             }
             KeyCode::Char(' ') if graph_form => {
-                app.edit_graph_form(repo_tui::app::state::CommitInput::ToggleAmend)
+                app.edit_graph_form(trepo::app::state::CommitInput::ToggleAmend)
             }
             KeyCode::Down | KeyCode::Tab => app.move_graph_overlay_selection(1),
             KeyCode::Up | KeyCode::BackTab => app.move_graph_overlay_selection(-1),
             KeyCode::Char('j') if !graph_form => app.move_graph_overlay_selection(1),
             KeyCode::Char('k') if !graph_form => app.move_graph_overlay_selection(-1),
             KeyCode::Char(character) if graph_form => {
-                app.edit_graph_form(repo_tui::app::state::CommitInput::Character(character))
+                app.edit_graph_form(trepo::app::state::CommitInput::Character(character))
             }
             _ => {}
         }
@@ -394,15 +390,15 @@ fn handle_key(app: &mut App, key: KeyEvent) {
             KeyCode::Esc => app.cancel_repository_overlay(),
             KeyCode::Enter => app.submit_repository_form(),
             KeyCode::Backspace => {
-                app.edit_repository_form(repo_tui::app::state::CommitInput::Backspace)
+                app.edit_repository_form(trepo::app::state::CommitInput::Backspace)
             }
             KeyCode::Char(' ') => {
-                app.edit_repository_form(repo_tui::app::state::CommitInput::ToggleAmend)
+                app.edit_repository_form(trepo::app::state::CommitInput::ToggleAmend)
             }
             KeyCode::Down | KeyCode::Tab => app.move_repository_selection(1),
             KeyCode::Up | KeyCode::BackTab => app.move_repository_selection(-1),
             KeyCode::Char(character) => {
-                app.edit_repository_form(repo_tui::app::state::CommitInput::Character(character))
+                app.edit_repository_form(trepo::app::state::CommitInput::Character(character))
             }
             _ => {}
         }
@@ -445,28 +441,28 @@ fn handle_key(app: &mut App, key: KeyEvent) {
             KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 app.submit_commit()
             }
-            KeyCode::Enter => app.edit_commit_message(repo_tui::app::state::CommitInput::Newline),
+            KeyCode::Enter => app.edit_commit_message(trepo::app::state::CommitInput::Newline),
             KeyCode::Backspace => {
-                app.edit_commit_message(repo_tui::app::state::CommitInput::Backspace)
+                app.edit_commit_message(trepo::app::state::CommitInput::Backspace)
             }
-            KeyCode::Delete => app.edit_commit_message(repo_tui::app::state::CommitInput::Delete),
-            KeyCode::Left => app.edit_commit_message(repo_tui::app::state::CommitInput::MoveLeft),
-            KeyCode::Right => app.edit_commit_message(repo_tui::app::state::CommitInput::MoveRight),
-            KeyCode::Up => app.edit_commit_message(repo_tui::app::state::CommitInput::MoveUp),
-            KeyCode::Down => app.edit_commit_message(repo_tui::app::state::CommitInput::MoveDown),
-            KeyCode::Home => app.edit_commit_message(repo_tui::app::state::CommitInput::MoveHome),
-            KeyCode::End => app.edit_commit_message(repo_tui::app::state::CommitInput::MoveEnd),
+            KeyCode::Delete => app.edit_commit_message(trepo::app::state::CommitInput::Delete),
+            KeyCode::Left => app.edit_commit_message(trepo::app::state::CommitInput::MoveLeft),
+            KeyCode::Right => app.edit_commit_message(trepo::app::state::CommitInput::MoveRight),
+            KeyCode::Up => app.edit_commit_message(trepo::app::state::CommitInput::MoveUp),
+            KeyCode::Down => app.edit_commit_message(trepo::app::state::CommitInput::MoveDown),
+            KeyCode::Home => app.edit_commit_message(trepo::app::state::CommitInput::MoveHome),
+            KeyCode::End => app.edit_commit_message(trepo::app::state::CommitInput::MoveEnd),
             KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                app.edit_commit_message(repo_tui::app::state::CommitInput::ToggleAmend)
+                app.edit_commit_message(trepo::app::state::CommitInput::ToggleAmend)
             }
             KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                app.edit_commit_message(repo_tui::app::state::CommitInput::ToggleSignoff)
+                app.edit_commit_message(trepo::app::state::CommitInput::ToggleSignoff)
             }
             KeyCode::Char('g') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                app.edit_commit_message(repo_tui::app::state::CommitInput::ToggleSigning)
+                app.edit_commit_message(trepo::app::state::CommitInput::ToggleSigning)
             }
             KeyCode::Char(character) => {
-                app.edit_commit_message(repo_tui::app::state::CommitInput::Character(character))
+                app.edit_commit_message(trepo::app::state::CommitInput::Character(character))
             }
             _ => {}
         }
@@ -503,14 +499,10 @@ fn handle_key(app: &mut App, key: KeyEvent) {
             KeyCode::Char('a') => app.open_repo_batch_menu(),
             KeyCode::Char(' ') => app.toggle_project_selection(),
             KeyCode::Char('A') => app.toggle_filtered_selection(),
-            KeyCode::Char('S') => {
-                app.begin_workspace_git(repo_tui::domain::WorkspaceGitAction::Stage)
-            }
-            KeyCode::Char('Z') => {
-                app.begin_workspace_git(repo_tui::domain::WorkspaceGitAction::Stash)
-            }
+            KeyCode::Char('S') => app.begin_workspace_git(trepo::domain::WorkspaceGitAction::Stage),
+            KeyCode::Char('Z') => app.begin_workspace_git(trepo::domain::WorkspaceGitAction::Stash),
             KeyCode::Char('D') => {
-                app.begin_workspace_git(repo_tui::domain::WorkspaceGitAction::Discard)
+                app.begin_workspace_git(trepo::domain::WorkspaceGitAction::Discard)
             }
             KeyCode::Char('d') => app.cycle_workspace_view(),
             KeyCode::Char('r') => app.refresh(),
@@ -547,11 +539,11 @@ fn handle_key(app: &mut App, key: KeyEvent) {
             KeyCode::Char('o') => app.open_repository(),
             KeyCode::Char(' ') => app.toggle_change_selected(),
             KeyCode::Char('A') => app.toggle_all_changes_selected(),
-            KeyCode::Char('s') => app.begin_operation(repo_tui::domain::OperationKind::Stage),
-            KeyCode::Char('u') => app.begin_operation(repo_tui::domain::OperationKind::Unstage),
-            KeyCode::Char('z') => app.begin_operation(repo_tui::domain::OperationKind::Stash),
+            KeyCode::Char('s') => app.begin_operation(trepo::domain::OperationKind::Stage),
+            KeyCode::Char('u') => app.begin_operation(trepo::domain::OperationKind::Unstage),
+            KeyCode::Char('z') => app.begin_operation(trepo::domain::OperationKind::Stash),
             KeyCode::Char('d') => {
-                app.begin_operation(repo_tui::domain::OperationKind::RestoreWorktree)
+                app.begin_operation(trepo::domain::OperationKind::RestoreWorktree)
             }
             KeyCode::Down | KeyCode::Char('j') => app.move_change_selection(1),
             KeyCode::Up | KeyCode::Char('k') => app.move_change_selection(-1),
@@ -594,21 +586,21 @@ mod tests {
 
     #[test]
     fn language_defaults_to_english() {
-        let cli = parse(&["repo-tui"]).unwrap();
+        let cli = parse(&["trepo"]).unwrap();
         assert!(!cli.zh);
         assert!(!cli.en);
     }
 
     #[test]
     fn accepts_compatibility_and_long_language_flags() {
-        assert!(parse(&["repo-tui", "-zh"]).unwrap().zh);
-        assert!(parse(&["repo-tui", "--zh"]).unwrap().zh);
-        assert!(parse(&["repo-tui", "-en"]).unwrap().en);
-        assert!(parse(&["repo-tui", "--en"]).unwrap().en);
+        assert!(parse(&["trepo", "-zh"]).unwrap().zh);
+        assert!(parse(&["trepo", "--zh"]).unwrap().zh);
+        assert!(parse(&["trepo", "-en"]).unwrap().en);
+        assert!(parse(&["trepo", "--en"]).unwrap().en);
     }
 
     #[test]
     fn rejects_conflicting_language_flags() {
-        assert!(parse(&["repo-tui", "-zh", "--en"]).is_err());
+        assert!(parse(&["trepo", "-zh", "--en"]).is_err());
     }
 }

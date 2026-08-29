@@ -1,6 +1,6 @@
-# repo-tui
+# trepo
 
-`repo-tui` is a terminal workspace for Android Repo clients and Git repositories. It discovers projects, scans Git status concurrently, renders the complete all-refs commit graph, and provides guarded Git repository and Repo batch workflows.
+`trepo` is a terminal workspace for Android Repo clients and Git repositories. It discovers projects, scans Git status concurrently, renders the complete all-refs commit graph, and provides guarded Git repository and Repo batch workflows.
 
 See [the user guide and operation flowcharts](docs/USER_GUIDE.md), [the design](docs/DESIGN.md), [implementation roadmap](docs/ROADMAP.md), and [Agent guide](AGENTS.md).
 
@@ -21,7 +21,7 @@ cargo run -- --en /path/to/repo-client     # explicit English
 cargo run -- doctor /path/to/workspace
 ```
 
-Starting from a subdirectory is supported. If no `.repo` directory is found, repo-tui opens the containing Git repository.
+Starting from a subdirectory is supported. If no `.repo` directory is found, trepo opens the containing Git repository.
 
 ## Keys
 
@@ -79,7 +79,7 @@ Implemented:
 - workspace or per-project pending/running/success/failure/cancelled display with bounded, credential-redacted stdout/stderr logs; aggregated Sync uses only its command exit status for the participating scope
 - process-group cancellation without rollback claims, automatic real-state rescan, and retry-failed-scope
 - background upload uses the explicitly reviewed `--current-branch --yes` mode; interactive authentication and advanced upload parameters wait for M5 PTY takeover
-- shared directory-tree rendering for changed files in Workspace main-list expansion, Workspace Inspector, and Changes, while operations remain bound to exact repository/file identities
+- shared directory-tree rendering for changed files in Workspace main-list expansion, Workspace Inspector, and Changes, while operations remain bound to exact repository/file identities; Changes keeps `XY` visible and colors file names by staged, unstaged, mixed, untracked, or conflicted state
 - stable Changes file multi-selection with all-token-preflight batch Stage/Unstage, confirmed selected-path Stash, and confirmed complete Discard of tracked index/worktree plus untracked paths
 - guarded file-, hunk-, and changed-line stage, unstage, and discard with lock-time patch reconstruction
 - `git apply --check`, stale token/fingerprint rejection, destructive confirmation, and failure-state preservation

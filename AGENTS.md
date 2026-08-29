@@ -1,4 +1,4 @@
-# repo-tui Agent 指南
+# trepo Agent 指南
 
 本文档面向在本仓库中执行设计、实现、测试、审查和文档维护的开发 Agent。目标是让新 Agent 快速建立正确上下文，并在不破坏 Git 数据、异步状态或终端生命周期的前提下交付可验证改动。
 
@@ -16,7 +16,7 @@
 
 ## 2. 项目速览
 
-`repo-tui` 是用于管理 Android Repo 工作区及其 Git 仓库的 Rust TUI。Git 和 Repo 系统 CLI 是行为真相，程序负责安全地构造 argv、解析机器协议、调度异步任务并渲染状态。
+`trepo` 是用于管理 Android Repo 工作区及其 Git 仓库的 Rust TUI。Git 和 Repo 系统 CLI 是行为真相，程序负责安全地构造 argv、解析机器协议、调度异步任务并渲染状态。
 
 当前核心能力包括：
 
