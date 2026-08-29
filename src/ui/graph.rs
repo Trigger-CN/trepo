@@ -480,27 +480,28 @@ fn render_commits(frame: &mut Frame, app: &App, graph: &crate::app::state::Graph
         })
         .filter_map(|(index, row_height)| {
             let commit = graph.commits.get(index)?;
-            let style = if index == graph.selected {
-                Style::default().bg(Color::DarkGray)
+            let selected = index == graph.selected;
+            let style = if selected {
+                super::selection_style()
             } else {
                 Style::default()
             };
             let topology = topology
                 .get(index)
-                .map(topology_line)
+                .map(|row| topology_line(row, selected))
                 .unwrap_or_else(|| Line::raw(""));
-            let subject_style = if commit.refs.is_empty() {
-                Style::default().fg(Color::White)
-            } else {
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD)
-            };
+            let subject_style = Style::default()
+                .fg(super::selection_fg(selected, Color::White))
+                .add_modifier(if commit.refs.is_empty() {
+                    Modifier::empty()
+                } else {
+                    Modifier::BOLD
+                });
             let mut cells = vec![
                 Cell::from(Line::styled(
-                    if index == graph.selected { ">" } else { " " },
+                    if selected { ">" } else { " " },
                     Style::default()
-                        .fg(Color::Cyan)
+                        .fg(super::selection_fg(selected, Color::Cyan))
                         .add_modifier(Modifier::BOLD),
                 )),
                 Cell::from(topology),
@@ -508,7 +509,7 @@ fn render_commits(frame: &mut Frame, app: &App, graph: &crate::app::state::Graph
             if table_layout.show_oid {
                 cells.push(Cell::from(Line::styled(
                     commit.oid.chars().take(8).collect::<String>(),
-                    Style::default().fg(Color::LightBlue),
+                    Style::default().fg(super::selection_fg(selected, Color::LightBlue)),
                 )));
             }
             let subject = subject_lines(&commit.subject, subject_width)
@@ -520,19 +521,19 @@ fn render_commits(frame: &mut Frame, app: &App, graph: &crate::app::state::Graph
             if table_layout.show_date {
                 cells.push(Cell::from(Line::styled(
                     calendar_date(commit.timestamp),
-                    Style::default().fg(Color::Gray),
+                    Style::default().fg(super::selection_fg(selected, Color::Gray)),
                 )));
             }
             if table_layout.show_author {
                 cells.push(Cell::from(Line::styled(
                     commit.author.clone(),
-                    Style::default().fg(Color::Gray),
+                    Style::default().fg(super::selection_fg(selected, Color::Gray)),
                 )));
             }
             if table_layout.show_age {
                 cells.push(Cell::from(Line::styled(
                     relative_age(commit.timestamp),
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(super::selection_fg(selected, Color::DarkGray)),
                 )));
             }
             Some(
@@ -706,7 +707,7 @@ fn render_detail(frame: &mut Frame, app: &App, graph: &crate::app::state::GraphS
     );
 }
 
-fn topology_line(row: &super::graph_layout::TopologyRow) -> Line<'static> {
+fn topology_line(row: &super::graph_layout::TopologyRow, selected: bool) -> Line<'static> {
     let mut spans = row
         .cells
         .iter()
@@ -714,7 +715,7 @@ fn topology_line(row: &super::graph_layout::TopologyRow) -> Line<'static> {
             Span::styled(
                 format!("{} ", cell.glyph),
                 Style::default()
-                    .fg(lane_color(cell.color))
+                    .fg(super::selection_fg(selected, lane_color(cell.color)))
                     .add_modifier(Modifier::BOLD),
             )
         })
@@ -723,7 +724,7 @@ fn topology_line(row: &super::graph_layout::TopologyRow) -> Line<'static> {
         spans.push(Span::styled(
             format!("~{}", row.hidden_lanes),
             Style::default()
-                .fg(Color::Yellow)
+                .fg(super::selection_fg(selected, Color::Yellow))
                 .add_modifier(Modifier::BOLD),
         ));
     }
@@ -926,6 +927,19 @@ mod tests {
     }
 
     #[test]
+    fn selected_foreground_overrides_low_contrast_metadata_colors() {
+        for color in [
+            Color::Gray,
+            Color::DarkGray,
+            Color::LightBlue,
+            Color::Yellow,
+        ] {
+            assert_eq!(super::super::selection_fg(true, color), Color::Black);
+            assert_eq!(super::super::selection_fg(false, color), color);
+        }
+    }
+
+    #[test]
     fn renders_branch_split_and_merge_edges() {
         let commits = vec![
             commit("merge", &["feature", "main"]),
@@ -1067,7 +1081,14 @@ mod tests {
             hidden_lanes: 4,
             has_missing_edge: false,
         };
-        assert!(line_text(&topology_line(&row)).contains("~4"));
+        let normal = topology_line(&row, false);
+        assert!(line_text(&normal).contains("~4"));
+        assert_eq!(normal.spans[0].style.fg, Some(Color::Cyan));
+        assert_eq!(normal.spans[1].style.fg, Some(Color::Yellow));
+
+        let selected = topology_line(&row, true);
+        assert_eq!(selected.spans[0].style.fg, Some(Color::Black));
+        assert_eq!(selected.spans[1].style.fg, Some(Color::Black));
     }
 
     #[test]

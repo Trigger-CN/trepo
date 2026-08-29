@@ -20,11 +20,11 @@ cargo run -- doctor /path/to/workspace
 
 ## 2. 最快上手
 
-1. 在 Workspace 用 `j/k` 选择仓库，用 `Space`/`A` 冻结一个或多个仓库。
+1. 在 Workspace 用 `j/k` 将光标移到仓库；无需先选择即可直接按 `S/Z/D` 操作该仓库，或用 `Space`/`A` 显式选择多个仓库进行批量操作。
 2. 按 `d` 可在“全部仓库 → 仅改动仓库 → 改动仓库及文件树”三种主页视图间循环。
-3. 对所选仓库按 `Z` 批量 Stash，或按 `D` 批量 Discard；检查每仓库统计后按 `y` 确认。
-4. 按 `Enter` 查看完整提交图，按 `c` 查看和处理文件改动，按 `o` 管理 stash、分支、标签和远端。
-5. 在 Changes 用 `Space`/`A` 多选文件，按 `z/s/u/d` 执行 Stash/Stage/Unstage/Discard；`Tab` 切换 file/hunk/line 单目标作用域。
+3. 按 `S` 暂存（Stage）、按 `Z` 储藏（Stash），或按 `D` 丢弃（Discard）最终目标仓库的全部改动；检查确认框中的冻结仓库和每仓库统计后按 `y` 确认。
+4. 按 `Enter` 查看完整提交图，按 `c` 查看和处理文件改动，按 `o` 管理储藏、分支、标签和远端。
+5. 在 Changes 用 `Space`/`A` 多选文件，按 `z/s/u/d` 执行储藏/暂存/取消暂存/丢弃；`Tab` 切换 file/hunk/line 单目标作用域。
 6. 暂存完成后按 `m` 输入提交信息，按 `Ctrl-Enter` 或 `Ctrl-S` 提交。
 7. 需要推送时按 `o`，切换到 Remotes，按 `a` 选择 Push；也可在 Graph 选中本地分支对象后推送。
 8. 出现确认框时，仔细检查冻结目标和参数，按 `y` 执行，按 `n` 或 `Esc` 取消。
@@ -58,7 +58,7 @@ flowchart TD
     W -->|c| C[Changes]
     W -->|o| R[Repository]
     W -->|a，仅 Repo 工作区| B[Repo 批任务]
-    W -->|Space/A 后 Z/D| WG[Workspace Git Stash/Discard 确认与逐仓库结果]
+    W -->|S/Z/D: 光标仓库或显式选择| WG[Workspace Git 暂存/储藏/丢弃确认与逐仓库结果]
 
     G -->|c| C
     G -->|o| R
@@ -83,25 +83,32 @@ Workspace 展示仓库状态、HEAD、ahead/behind。`d` 的第三态会直接�
 | `j/k` | 选择仓库 |
 | `/` | 输入 project name/path 搜索，`Enter` 或 `Esc` 结束输入 |
 | `d` | 循环切换：全部仓库 → 仅改动仓库 → 改动仓库及其文件树 → 全部仓库 |
-| `Space` | 选择或取消当前仓库，供 Workspace Git 和 Repo 批任务使用 |
-| `A` | 选择或取消当前过滤结果中的所有仓库 |
-| `Z` | Stash 所选仓库的完整 dirty 状态，包含 untracked；必须确认 |
-| `D` | 完整 Discard 所选仓库的 tracked index/worktree 与 untracked；必须确认 |
+| `Space` | 显式选择或取消当前仓库，供 Workspace Git 和 Repo 批任务使用 |
+| `A` | 显式选择或取消当前过滤结果中的所有仓库 |
+| `S` | 暂存最终目标仓库的全部 tracked/untracked 改动；含未解决冲突时拒绝；必须确认 |
+| `Z` | 储藏最终目标仓库的完整 dirty 状态，包含 untracked；必须确认 |
+| `D` | 完整丢弃最终目标仓库的 tracked index/worktree 与 untracked；必须确认 |
 | `Enter` | 打开选中仓库的 Commit Graph |
 | `c` | 打开选中仓库的 Changes |
 | `o` | 打开选中仓库的 Repository 管理 |
 | `a` | 打开 Repo 批任务，仅 Android Repo 工作区有效 |
 
-搜索会与两个改动视图按 AND 组合；切换视图前后会按稳定 `ProjectId` 恢复当前仓库，文件树行不改变仓库选择或操作目标。
+搜索会与两个改动视图按 AND 组合；切换视图前后会按稳定 `ProjectId` 恢复当前仓库，文件树行不改变仓库选择或操作目标。没有显式选择时，`S/Z/D` 使用当前过滤视图中的光标仓库；显式选择集合非空时只使用该集合，不额外加入光标仓库。确认框列出的冻结仓库和每仓库统计是最终执行范围。
 
 ### Workspace Git 批任务流程
 
 ```mermaid
 flowchart TD
-    W[Workspace] -->|Space/A| S[冻结一个或多个仓库]
+    W[Workspace] --> T{存在 Space/A 显式选择?}
+    T -->|否| C[冻结光标仓库]
+    T -->|是| B[仅冻结显式选择集合]
+    C --> S[S/Z/D 最终目标]
+    B --> S
+    S -->|S| P0[读取全部 changes/token/统计，预览 Stage]
     S -->|Z| P1[读取全部 changes/token/统计，预览 Stash]
     S -->|D| P2[读取全部 changes/token/统计，预览 Discard]
-    P1 -->|y| V[workspace 与全部 project 锁内统一预检]
+    P0 -->|y| V[workspace 与全部 project 锁内统一预检]
+    P1 -->|y| V
     P2 -->|y| V
     P1 -->|n/Esc| W
     P2 -->|n/Esc| W
@@ -385,8 +392,8 @@ Push 固定使用 `branch:branch` refspec。Force Push 只使用 `--force-with-l
 
 ## 9. 确认与失败恢复
 
-- Changes 的 selected-file Stash/Discard、单目标 discard、Repository 的破坏性操作和所有 Push 必须按 `y` 确认。
-- Workspace `Z`/`D` 必须展示冻结仓库和每仓库改动统计并确认；所有 Repo 批任务也必须确认。
+- Changes 的 selected-file 储藏/丢弃、单目标丢弃、Repository 的破坏性操作和所有 Push 必须按 `y` 确认。
+- Workspace `S`/`Z`/`D` 必须展示冻结仓库和每仓库改动统计并确认；所有 Repo 批任务也必须确认。
 - `n` 或 `Esc` 取消确认，不执行命令。
 - 写操作在执行前重新检查 repository snapshot、project/workspace lock 和 `index.lock`；确认后状态变化会导致 stale/precondition failed，而不是对新状态继续执行。
 - Changes 和 Workspace Git 整批操作会在任何写入前完成全部目标预检；任一预检失败时整批零写入。

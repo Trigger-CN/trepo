@@ -503,6 +503,9 @@ fn handle_key(app: &mut App, key: KeyEvent) {
             KeyCode::Char('a') => app.open_repo_batch_menu(),
             KeyCode::Char(' ') => app.toggle_project_selection(),
             KeyCode::Char('A') => app.toggle_filtered_selection(),
+            KeyCode::Char('S') => {
+                app.begin_workspace_git(repo_tui::domain::WorkspaceGitAction::Stage)
+            }
             KeyCode::Char('Z') => {
                 app.begin_workspace_git(repo_tui::domain::WorkspaceGitAction::Stash)
             }

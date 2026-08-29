@@ -124,6 +124,7 @@ pub struct RepoProjectResult {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorkspaceGitAction {
+    Stage,
     Stash,
     Discard,
 }
@@ -131,13 +132,15 @@ pub enum WorkspaceGitAction {
 impl WorkspaceGitAction {
     pub fn label(self) -> &'static str {
         match self {
-            Self::Stash => "Stash selected repositories",
-            Self::Discard => "Discard selected repositories",
+            Self::Stage => "Stage target repositories",
+            Self::Stash => "Stash target repositories",
+            Self::Discard => "Discard target repositories",
         }
     }
 
     pub fn operation_kind(self) -> OperationKind {
         match self {
+            Self::Stage => OperationKind::Stage,
             Self::Stash => OperationKind::Stash,
             Self::Discard => OperationKind::Discard,
         }

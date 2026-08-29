@@ -140,8 +140,7 @@ Git 与 Repo 的参数面很大，而且会随版本、插件和服务端扩展�
 
 状态不能压缩成一个含糊的 dirty 布尔值。领域模型至少保留 staged、unstaged、untracked、conflicted 的数量以及 merge/rebase/cherry-pick/bisect 等进行中状态。
 
-颜色与符号同时传递信息，确保无颜色终端和色觉差异用户仍能判断状态。主题支持 16 色、256 色和 true color 降级。
-
+颜色与符号同时传递信息，确保无颜色终端和色觉差异用户仍能判断状态。主题支持 16 色、256 色和 true color 降级。Workspace、Graph、Changes 与 Repository 的数据行统一使用黑色前景、亮青色背景和粗体作为选中态；选中行内的 metadata、拓扑和 diff Span 不得重新覆盖为低对比前景，ref 徽标可保留完整的成对前景/背景。选中 diff 行即使暂时收敛红绿前景，也必须保留 `+`、`-`、`@@` 等字符语义。
 
 当前 Workspace 已实现一个轻量快捷过滤：在 Workspace 按 `d` 仅保留 `WorktreeSummary::is_dirty()` 的项目（staged、unstaged、untracked 或 conflicted）；它与 `/` 文本搜索按 AND 组合。切换过滤和扫描增量到达时，UI 先按稳定 `ProjectId` 恢复当前选择，只有该项目不可见时才退回首个可见项目。
 
@@ -172,11 +171,11 @@ Git 与 Repo 的参数面很大，而且会随版本、插件和服务端扩展�
 
 - 刷新、fetch、pull/rebase、push。
 - 创建/切换/删除分支，统一设置 upstream。
-- 对已选择仓库执行完整 dirty 状态 Stash（包含 untracked）或完整 Discard（tracked index/worktree 与 untracked）。
+- 对最终目标仓库执行完整 Stage（tracked/untracked）、完整 dirty 状态 Stash（包含 untracked）或完整 Discard（tracked index/worktree 与 untracked）。目标默认为过滤视图中的光标仓库；非空显式选择集合用于批量操作。
 - Repo start/checkout/abandon/prune/sync/upload。
 - 执行白名单 Git/Repo 命令。
 
-当前 Workspace Git 批任务使用独立于 Android Repo 命令的结构化服务。`Z`/`D` 仅作用于 `Space`/`A` 冻结的仓库选择；空选择不会隐式扩大。确认前读取每个仓库的完整 change 集合、文件 token 和 staged/unstaged/untracked/conflict 统计。确认后获取 workspace 锁和按路径排序的全部 project 锁，并在任何写入前统一复验真实路径边界、HEAD、`index.lock`、change 路径集合与全部 token；任一失败则所有仓库零写入。
+当前 Workspace Git 批任务使用独立于 Android Repo 命令的结构化服务。`S`/`Z`/`D` 在 `Space`/`A` 显式选择为空时作用于当前过滤视图中的光标仓库；显式选择非空时只作用于该稳定 `ProjectId` 集合，不额外加入光标仓库。确认前读取最终目标中每个仓库的完整 change 集合、文件 token 和 staged/unstaged/untracked/conflict 统计，确认框中的冻结仓库与统计是实际执行范围的权威预览。确认后获取 workspace 锁和按路径排序的全部 project 锁，并在任何写入前统一复验真实路径边界、HEAD、`index.lock`、change 路径集合与全部 token；任一失败则所有仓库零写入。整仓 Stage 和 Stash 拒绝含未解决冲突的仓库。
 
 执行结果按项目记录 `pending/running/success/failure`。全批预检通过后仍可能发生应用外 Git 竞争，因此执行期失败不会回滚已完成仓库，也不会把部分成功伪装成事务成功。
 
@@ -244,12 +243,14 @@ Git 提供提交及 parent 关系，`repo-tui` 的纯数据 `graph_layout` 模�
 
 当前实现一次加载 all-refs 完整可达历史，优先保证分支树和 stash 不被分页边界隐藏。大型仓库的后续优化应采用保持全局拓扑与 ref 可见性的虚拟化或流式加载，不能退化为仅显示 HEAD 或静默丢弃其他 refs。
 
+Workspace 仓库列表可先按稳定 `ProjectId` 多选，再直接执行整仓 Stage、Stash 或 Discard：`S` 使用结构化 `git add --all --` 暂存全部 tracked/untracked 改动，`Z` 储藏完整 dirty 状态，`D` 丢弃完整改动。三者都在确认前冻结所有路径和 token，确认后持有 workspace 与全部 project 锁完成整批预检；整仓 Stage 遇到未解决冲突时拒绝，避免隐式标记冲突已解决。
+
 ### 6.3 Changes 标签页
 
 Changes 页面分为文件树、hunk 列表、diff 检查器和提交对话框：
 
 - Workspace Inspector 与 Changes 使用同一目录树投影，以 `├─`、`└─`、`│` 展示 staged、unstaged、untracked 和 conflicted 文件的路径层级；目录行只负责显示，文件操作始终绑定原始 `PathBuf`。
-- Changes 文件模式用 `Space` 切换当前文件、`A` 全选/清空。存在文件选择时，Stage/Unstage、`z` Stash 和 `d` Discard 作用于该稳定路径集合；无文件选择时 Stage/Unstage/Discard 继续作用于当前 file/hunk/line，Stash 要求先选择文件。
+- Changes 文件模式用 `Space` 切换当前文件、`A` 全选/清空。存在文件选择时，Stage/Unstage、`z` Stash 和 `d` Discard 作用于该稳定路径集合；无文件选择时 Stage/Unstage/Discard 继续作用于当前 file/hunk/line，Stash 要求先选择文件。中文界面固定使用“暂存/取消暂存”表示 index Stage/Unstage，使用“储藏”表示 Stash。
 - 批量 Stage/Unstage 在同一 workspace/project lock 内重新读取所有条目，先验证全部文件的适用性与 diff token，再开始逐项写入；任一 token 陈旧时不写任何目标。
 - 批量 Stash/Discard 在显示确认框前异步冻结全部路径和内容 token；确认框列出动作、文件数、`XY` 状态和路径。确认后 Runner 在同一锁内复验冻结范围。Stash 固定包含 selected tracked/untracked 路径；Discard 恢复 tracked index/worktree、删除 staged-added/untracked，并正确处理 rename 的原路径与新路径，未选择路径不受影响。
 - hunk 与 changed-line 级 stage、unstage、discard；行操作使用当前 diff 重建零上下文 patch，执行 `git apply --check --unidiff-zero` 后写入。
@@ -692,6 +693,7 @@ struct WorktreeSummary {
 - reducer、过滤/排序、selection identity 和 generation stale result。
 - argv 构造、路径边界、凭据脱敏和风险分类。
 
+- TestBackend 在 80x24 和 120x40 直接断言选中 cell 的前景、背景与粗体，覆盖 Graph metadata/topology/ref badge、Changes 文件和 diff、Workspace 状态色及 Repository 列表。
 ### 13.2 集成测试
 
 使用临时目录和真实 `git` 构造：
