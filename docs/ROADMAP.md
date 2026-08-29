@@ -52,12 +52,12 @@ M1 是所有后续里程碑的共同数据与交互基础。M4 可以在 M2 后�
 
 - 从任意子目录识别 Repo 工作区或单 Git 仓库，并并发扫描状态。
 - Workspace、完整 all-refs Graph、Changes 和 Repository 管理页面均已可用。
-- Workspace 支持稳定 ProjectId 多选、命名搜索，以及 `d` 在全部、仅改动、改动仓库与文件树三态间循环；宽屏 Inspector 和 `Z`/`D` 冻结仓库 Stash/Discard 保持可用。
+- Workspace 支持稳定 ProjectId 多选、命名搜索，以及 `d` 在全部、仅改动、改动仓库与文件树三态间循环；宽屏 Inspector 和 `S`/`Z`/`D` 冻结仓库 Stage/Stash/Discard 保持可用。
 - Graph 支持 commit/HEAD/local branch/remote branch/tag/stash 两级上下文操作及 typed form；Subject 按显示列宽多行渲染，Inspector 保留 body 原始换行，本地分支直接提供普通 Push 与 Force push with lease。
 - Changes 支持文件多选批量 Stage/Unstage、selected-path Stash 和完整 Discard；文件/hunk/changed-line、commit/stash/conflict、refs/integration 和 remotes 写操作受锁、token 和 generation 保护。
 - Repo `sync/start/checkout/abandon/prune/rebase/upload/download` 和 pinned manifest export 具有 workspace lock、逐项目结果、流式日志、取消后复扫与失败重试。
-- Graph、Changes、Workspace Git 与 Repo overlay、confirmation 和结果状态均覆盖 80x24 与 120x40 TestBackend 渲染。
-- UI 默认英文，`-zh`/`--zh` 与 `-en`/`--en` 以实例级语言状态覆盖主要页面；长路径、diff 和外部文本按终端列宽安全处理，控制字符不能污染终端布局。
+- Graph、Changes、Workspace Git 与 Repo overlay、confirmation 和结果状态均覆盖 80x24 与 120x40 TestBackend 渲染；四个主页面的数据行选中态另有 cell 前景、背景和粗体断言。
+- UI 默认英文，`-zh`/`--zh` 与 `-en`/`--en` 以实例级语言状态覆盖主要页面；长路径、diff 和外部文本按终端列宽安全处理，控制字符不能污染终端布局。选中行使用高对比黑字亮青背景，状态仍由字符或符号共同表达。
 
 下一执行点是 M5 命令面板与终端接管；交互认证、外部 editor/mergetool 和任意受控命令不在 M4 后台任务中启动。
 
@@ -240,10 +240,10 @@ cargo run -- doctor .
 - diff token、hunk/line fingerprint 和 `git apply --check --unidiff-zero` 拒绝陈旧目标。
 - destructive file/hunk/line discard 确认；失败保留选择与错误，成功自动刷新。
 - 文件批次使用稳定 `PathBuf` 集合，在写入前验证全部 diff token；Stash 保存 selected tracked/untracked，Discard 清理 tracked index/worktree、staged-added、untracked 和 rename 新旧路径，未选路径保持不变。
-- Workspace `Z`/`D` 冻结 selected repositories 与改动统计，全批路径/token/index-lock 预检失败时零写入，执行结果按仓库保留且不承诺跨仓库回滚。
+- Workspace `S`/`Z`/`D` 在显式选择为空时冻结光标仓库，非空时仅冻结 stable multi-select，并在确认框展示最终仓库范围与改动统计；全批路径/token/index-lock 预检失败时零写入，Stage 暂存完整 tracked/untracked 改动并拒绝冲突仓库，执行结果按仓库保留且不承诺跨仓库回滚。
 - bracketed paste 保留提交正文换行；Unicode 光标移动、中间插入/删除、行首尾和跨行移动有状态测试覆盖。
 - 80x24/120x40 TestBackend 验证 Changes/Workspace Git 确认与结果、Message 边框、Options/Keys 分隔区和真实 cursor。
-- 真实临时仓库覆盖 selected-path Stash、完整 Discard、双仓库 Stash/Discard、stale 全批零写入，以及高级 stash 与 conflict 工作流。
+- 真实临时仓库覆盖 selected-path Stash、完整 Discard、双仓库 Stage/Stash/Discard、冲突拒绝、stale 全批零写入，以及高级 stash 与 conflict 工作流。
 
 关键基础设施：
 
@@ -391,8 +391,8 @@ cargo run -- doctor .
 | M2 stash/conflict | Done | staged/keep-index/index restore/branch/clear、非法组合拒绝、ours/theirs/resolved、continue/skip/abort 通过 |
 | M3 refs/integration | Done | branch/tag、merge/rebase/cherry-pick/revert 与 Graph 本地分支 Push/Force Push 矩阵通过 |
 | M3 remotes | Done | bare remote 普通 push、非快进拒绝、陈旧/当前 lease、fetch/pull/upstream/prune 与 remote 管理通过 |
-| M4 Repo/Workspace batch | Done | Repo batch 与 Workspace Git Stash/Discard 的 stable multi-select、全批预检、逐项结果和 80x24/120x40 通过 |
-| UI 文本/语言 | Done | 默认英文、-zh/-en 与长参数、三态 Workspace、显示列宽/控制字符/重绘回归及双语言 80x24/120x40 通过 |
+| M4 Repo/Workspace batch | Done | Repo batch 与 Workspace Git Stage/Stash/Discard 的 stable multi-select、全批预检、逐项结果和 80x24/120x40 通过 |
+| UI 文本/语言/配色 | Done | 默认英文、-zh/-en 与长参数、stash“储藏”/stage“暂存”术语、三态 Workspace、显示列宽/控制字符/重绘回归，以及四页面高对比选中态和双语言 80x24/120x40 通过 |
 | M5-M7 | Planned | 下一步从 M5 命令面板与终端接管开始 |
 
 M0-M4 最终验证（Rust 1.98、Git 2.43.0、Repo launcher 2.54）：
@@ -413,7 +413,7 @@ cargo build
 - Workspace Inspector 与 Changes 共享稳定路径文件树；Changes 批量 Stage/Unstage/Stash/Discard 在全量预检 token 后写入，多行提交编辑器支持 bracketed paste、Unicode 光标导航和清晰分区。
 - Git 与 Repo 写操作协调 workspace/project 锁、实时前置检查、确认和 generation。
 - Repository 与 Graph 的普通 Push/Force Push 使用固定 `branch:branch` refspec；裸 `--force` 不可达，force-with-lease 并发推进场景由真实 peer/bare remote 覆盖。
-- Stash 高级模式、index 恢复、branch/clear，以及 selected-file/selected-repository Stash 的领域映射、范围确认和 80x24/120x40 可见性均有测试覆盖。
+- Stash 高级模式、index 恢复、branch/clear，以及 selected-file/selected-repository Stash 和整仓 Stage 的领域映射、范围确认和 80x24/120x40 可见性均有测试覆盖。
 - Repo 批处理保留凭据脱敏日志；Workspace Git 批任务保留逐仓库 pending/running/success/failure。两者均不承诺跨仓库回滚并在结束后复扫事实状态。
 - Graph Subject 和 Workspace 展开仓库使用真实视觉行高；Changes diff 每个源行固定一行，显示列宽安全层已覆盖中文宽字符、控制字符与长转短重绘残留。
 - Language 注入 App，默认 English；精确 `-zh`/`-en` 在 Clap 前规范化，标准 `--zh`/`--en` 同时受支持且互斥。

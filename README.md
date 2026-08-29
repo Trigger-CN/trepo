@@ -37,7 +37,7 @@ Starting from a subdirectory is supported. If no `.repo` directory is found, rep
 | `Ctrl-Enter` / `Ctrl-S` | Submit the multiline Changes commit message |
 | `Space` | Select/unselect a Workspace repository or a file in Changes; toggle an option in forms |
 | `A` | Select/unselect all repositories in the current Workspace filter or all files in Changes |
-| `Z` / `D` | Workspace: confirm Stash / complete Discard for the frozen repository selection |
+| `S` / `Z` / `D` | Workspace: confirm Stage / Stash / complete Discard for the repository under the cursor, or only the explicit `Space` / `A` selection when non-empty |
 | `a` | Open Repo batch actions in Workspace; open fixed actions in Repository |
 | `c` | Open Changes; cancel a running Repo task from its task view |
 | `f` | Graph: open structured Branch/Query/Author/Since/Until filters; Repo task: retry only failed projects |

@@ -808,6 +808,11 @@ async fn git_apply(
     Ok(())
 }
 
+pub async fn stage_all(root: &Path) -> Result<()> {
+    git_output(root, ["add", "--all", "--"]).await?;
+    Ok(())
+}
+
 pub async fn stage_path(root: &Path, path: &Path) -> Result<()> {
     validate_path(path)?;
     git_output(root, path_args(&["add"], path)).await?;

@@ -26,6 +26,21 @@ pub fn render(frame: &mut Frame, app: &App) {
     }
 }
 
+fn selection_style() -> Style {
+    Style::default()
+        .fg(Color::Black)
+        .bg(Color::LightCyan)
+        .add_modifier(Modifier::BOLD)
+}
+
+fn selection_fg(selected: bool, color: Color) -> Color {
+    if selected {
+        Color::Black
+    } else {
+        color
+    }
+}
+
 fn render_help(frame: &mut Frame, app: &App) {
     let area = centered_rect(70, 70, frame.area());
     frame.render_widget(Clear, area);
@@ -41,12 +56,12 @@ fn render_help(frame: &mut Frame, app: &App) {
             Line::raw("g/G             首项 / 末项"),
             Line::raw("Enter           打开提交图 / 提交信息中换行"),
             Line::raw("Space / A       选择当前 / 全部仓库或改动文件"),
-            Line::raw("Z/D             对所选仓库执行暂存 / 丢弃"),
+            Line::raw("S/Z/D           对光标仓库 / 已选仓库执行暂存 / 储藏 / 丢弃"),
             Line::raw("d               全部 / 仅改动 / 改动与文件 三态循环"),
             Line::raw("a               打开 Repo 或仓库操作"),
             Line::raw("f, /, x         提交图过滤 / 搜索 / 清除"),
             Line::raw("Tab             切换改动模式或表单字段"),
-            Line::raw("z/s/u           暂存文件 / 暂存 / 取消暂存"),
+            Line::raw("z/s/u           储藏 / 暂存 / 取消暂存"),
             Line::raw("m               提交；Ctrl-Enter/S 确认"),
             Line::raw("r               刷新当前页面"),
             Line::raw("Esc / q / ?     返回 / 退出 / 切换帮助"),
@@ -67,7 +82,9 @@ fn render_help(frame: &mut Frame, app: &App) {
             Line::raw("g/G            First / last"),
             Line::raw("Enter          Open graph / newline in commit message"),
             Line::raw("Space / A      Select current / all repositories or Changed files"),
-            Line::raw("Z/D            Workspace selected repositories: Stash / Discard"),
+            Line::raw(
+                "S/Z/D          Workspace cursor / selected repositories: Stage / Stash / Discard",
+            ),
             Line::raw("d              Cycle all / changed / changed with files"),
             Line::raw("a              Open Workspace Repo or Repository actions"),
             Line::raw("f, /, x        Graph filter / query / clear; retry failed Repo task"),
@@ -184,6 +201,53 @@ mod tests {
         text
     }
 
+    fn assert_rendered_text_style(
+        app: &App,
+        width: u16,
+        height: u16,
+        needle: &str,
+        fg: Color,
+        bg: Color,
+    ) {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render(frame, app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let symbols = needle
+            .chars()
+            .map(|value| value.to_string())
+            .collect::<Vec<_>>();
+        let span_width = u16::try_from(symbols.len()).unwrap();
+        let mut found_text = false;
+        for y in 0..height {
+            for x in 0..=width.saturating_sub(span_width) {
+                let matches = symbols.iter().enumerate().all(|(offset, symbol)| {
+                    buffer[(x + u16::try_from(offset).unwrap(), y)].symbol() == symbol
+                });
+                if !matches {
+                    continue;
+                }
+                found_text = true;
+                let styled = (0..span_width).all(|offset| {
+                    let cell = &buffer[(x + offset, y)];
+                    cell.fg == fg && cell.bg == bg && cell.modifier.contains(Modifier::BOLD)
+                });
+                if styled {
+                    return;
+                }
+            }
+        }
+        assert!(
+            found_text,
+            "text {needle:?} was not rendered at {width}x{height}"
+        );
+        panic!("text {needle:?} had no {fg:?}/{bg:?}/bold rendering at {width}x{height}");
+    }
+
+    fn assert_selected_text(app: &App, width: u16, height: u16, needle: &str) {
+        assert_rendered_text_style(app, width, height, needle, Color::Black, Color::LightCyan);
+    }
+
     fn draw_text_and_cursor(
         app: &App,
         width: u16,
@@ -228,8 +292,9 @@ mod tests {
     #[test]
     fn renders_workspace_at_supported_sizes() {
         let app = app();
-        draw(&app, 80, 24);
-        draw(&app, 120, 40);
+        for (width, height) in [(80, 24), (120, 40)] {
+            assert_selected_text(&app, width, height, "demo");
+        }
     }
 
     #[test]
@@ -264,6 +329,7 @@ mod tests {
         for (width, height) in [(80, 24), (120, 40)] {
             let text = draw_text(&app, width, height);
             assert!(text.contains("Confirm Workspace Git operation"));
+            assert!(text.contains("Discard target repositories"));
             assert!(text.contains("Frozen repositories: 1"));
             assert!(text.contains("demo  S1 M1 ?0 !0"));
         }
@@ -272,8 +338,17 @@ mod tests {
             let text = compact_text(&draw_text(&app, width, height));
             assert!(text.contains("确认WorkspaceGit操作"));
             assert!(text.contains("已冻结仓库:1"));
-            assert!(text.contains("丢弃所选仓库改动"));
+            assert!(text.contains("丢弃目标仓库改动"));
             assert!(text.contains("现在执行"));
+        }
+        let mut stage_spec = spec.clone();
+        stage_spec.action = WorkspaceGitAction::Stage;
+        app.workspace_git.pending = Some(stage_spec);
+        app.language = crate::i18n::Language::Zh;
+        for (width, height) in [(80, 24), (120, 40)] {
+            let text = compact_text(&draw_text(&app, width, height));
+            assert!(text.contains("暂存目标仓库改动"));
+            assert!(text.contains("所有已跟踪及未跟踪改动将加入暂存区"));
         }
         app.language = crate::i18n::Language::En;
         app.workspace_git.pending = None;
@@ -513,6 +588,12 @@ mod tests {
         assert!(wide.contains("T:v1"));
         assert!(wide.contains("T:v2"));
         assert!(wide.contains("T:v3"));
+        for (width, height) in [(80, 24), (120, 40)] {
+            assert_selected_text(&app, width, height, "Subject remains readable");
+            assert_selected_text(&app, width, height, "●");
+            assert_rendered_text_style(&app, width, height, "T:v1", Color::Black, Color::Yellow);
+        }
+        assert_selected_text(&app, 120, 40, "2023-11-14");
     }
 
     #[test]
@@ -744,7 +825,7 @@ mod tests {
             assert!(text.contains("本地分支:feature/x"));
             assert!(text.contains("远程分支:origin/feature/x"));
             assert!(text.contains("标签:v1"));
-            assert!(text.contains("暂存:stash@{0}"));
+            assert!(text.contains("储藏:stash@{0}"));
             assert!(!text.contains("Remotebranch:"));
         }
         app.language = crate::i18n::Language::En;
@@ -840,6 +921,13 @@ mod tests {
             assert!(text.contains("1 selected"));
             assert!(text.contains("[x]"));
         }
+        app.changes.as_mut().unwrap().mode = ChangesMode::Hunk;
+        for (width, height) in [(80, 24), (120, 40)] {
+            assert_selected_text(&app, width, height, "main.rs");
+            assert_selected_text(&app, width, height, "@@ -1 +1 @@");
+            assert_selected_text(&app, width, height, "-old");
+            assert_selected_text(&app, width, height, "+new");
+        }
         app.changes.as_mut().unwrap().commit_editing = true;
         for (width, height) in [(80, 24), (120, 40)] {
             let (text, cursor) = draw_text_and_cursor(&app, width, height);
@@ -915,7 +1003,7 @@ mod tests {
         for (width, height) in [(80, 24), (120, 40)] {
             let raw = draw_text(&app, width, height);
             let text = compact_text(&raw);
-            assert!(text.contains("确认批量暂存"));
+            assert!(text.contains("确认批量储藏"));
             assert!(text.contains("仓库:demo"));
             assert!(text.contains("文件:1"));
             assert!(text.contains("包括未跟踪文件"));
@@ -1055,6 +1143,9 @@ mod tests {
         let mut app = app();
         app.screen = Screen::Repository;
         app.repository = Some(repository_state(&app));
+        for (width, height) in [(80, 24), (120, 40)] {
+            assert_selected_text(&app, width, height, "Operation: merge");
+        }
         for tab in RepositoryTab::ALL {
             app.repository.as_mut().unwrap().tab = tab;
             draw(&app, 80, 24);

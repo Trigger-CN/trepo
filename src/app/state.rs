@@ -1198,6 +1198,22 @@ impl App {
         self.selected_projects.len()
     }
 
+    fn workspace_git_targets(&self) -> Vec<Project> {
+        if self.selected_projects.is_empty() {
+            return self
+                .selected_project()
+                .map(|snapshot| snapshot.project.clone())
+                .into_iter()
+                .collect();
+        }
+        self.workspace
+            .projects
+            .iter()
+            .filter(|project| self.selected_projects.contains(&project.id))
+            .cloned()
+            .collect()
+    }
+
     pub fn begin_workspace_git(&mut self, action: WorkspaceGitAction) {
         if self.workspace_git.preparing
             || self
@@ -1210,16 +1226,9 @@ impl App {
                 Some((true, "A Workspace Git task is already active".into()));
             return;
         }
-        let targets = self
-            .workspace
-            .projects
-            .iter()
-            .filter(|project| self.selected_projects.contains(&project.id))
-            .cloned()
-            .collect::<Vec<_>>();
+        let targets = self.workspace_git_targets();
         if targets.is_empty() {
-            self.workspace_git.message =
-                Some((true, "Select at least one repository with Space".into()));
+            self.workspace_git.message = Some((true, "No repository is under the cursor".into()));
             return;
         }
         self.workspace_git_generation = self.workspace_git_generation.wrapping_add(1);
@@ -4336,6 +4345,35 @@ mod tests {
         assert_eq!(
             task.workspace_result.as_ref().unwrap().0,
             RepoProjectState::Pending
+        );
+    }
+
+    #[test]
+    fn workspace_git_targets_cursor_without_selection_and_explicit_batch_otherwise() {
+        let alpha = project("alpha");
+        let beta = project("beta");
+        let workspace = Workspace {
+            root: PathBuf::from("/tmp"),
+            kind: WorkspaceKind::Repo,
+            projects: vec![alpha.clone(), beta.clone()],
+        };
+        let mut app = App::new(workspace, 1);
+        app.search = "beta".into();
+        assert_eq!(
+            app.workspace_git_targets()
+                .iter()
+                .map(|project| project.id.clone())
+                .collect::<Vec<_>>(),
+            vec![beta.id.clone()]
+        );
+
+        app.selected_projects.insert(alpha.id.clone());
+        assert_eq!(
+            app.workspace_git_targets()
+                .iter()
+                .map(|project| project.id.clone())
+                .collect::<Vec<_>>(),
+            vec![alpha.id]
         );
     }
 

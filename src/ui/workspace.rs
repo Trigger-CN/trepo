@@ -344,8 +344,8 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
         app.language.text("Ready", "就绪").to_owned()
     };
     let keys = app.language.text(
-        "   Space Select   Z Stash   D Discard   d View cycle   a Repo actions   / Search",
-        "   Space 选择   Z 暂存   D 丢弃   d 视图循环   a Repo 操作   / 搜索",
+        "   Space Select   S Stage   Z Stash   D Discard   d View cycle   a Repo actions   / Search",
+        "   Space 选择   S 暂存   Z 储藏   D 丢弃   d 视图循环   a Repo 操作   / 搜索",
     );
     frame.render_widget(
         Paragraph::new(Line::from(vec![
@@ -400,16 +400,19 @@ fn render_workspace_git_overlay(frame: &mut Frame, app: &App) {
                 app.language.text("Frozen repositories", "已冻结仓库"),
                 spec.targets.len()
             )),
-            Line::raw(if spec.action == WorkspaceGitAction::Stash {
-                app.language.text(
+            Line::raw(match spec.action {
+                WorkspaceGitAction::Stage => app.language.text(
+                    "All tracked and untracked changes will be added to the index.",
+                    "所有已跟踪及未跟踪改动将加入暂存区。",
+                ),
+                WorkspaceGitAction::Stash => app.language.text(
                     "Each stash includes tracked, staged, and untracked changes.",
-                    "每个暂存都包含已跟踪、已暂存和未跟踪改动。",
-                )
-            } else {
-                app.language.text(
+                    "每个储藏都包含已跟踪、已暂存和未跟踪改动。",
+                ),
+                WorkspaceGitAction::Discard => app.language.text(
                     "Tracked index/worktree and untracked files will be permanently cleared.",
                     "已跟踪的暂存区/工作区改动及未跟踪文件将被永久清除。",
-                )
+                ),
             }),
             Line::raw(""),
         ];
@@ -851,7 +854,10 @@ fn change_tree_line(
 }
 
 fn row_style(snapshot: &crate::domain::ProjectSnapshot, selected: bool) -> Style {
-    let mut style = if matches!(snapshot.scan, ScanState::Error(_)) {
+    if selected {
+        return super::selection_style();
+    }
+    if matches!(snapshot.scan, ScanState::Error(_)) {
         Style::default().fg(Color::Red)
     } else if snapshot.worktree.conflicted > 0 {
         Style::default().fg(Color::LightRed)
@@ -859,11 +865,7 @@ fn row_style(snapshot: &crate::domain::ProjectSnapshot, selected: bool) -> Style
         Style::default().fg(Color::Yellow)
     } else {
         Style::default()
-    };
-    if selected {
-        style = style.bg(Color::DarkGray).add_modifier(Modifier::BOLD);
     }
-    style
 }
 
 fn head_label(head: &HeadState) -> String {
@@ -948,5 +950,50 @@ mod tests {
         assert_eq!(variable_viewport_start(0, 10, &[1; 100]), 0);
         assert_eq!(variable_viewport_start(3, 5, &[1, 3, 1, 4]), 2);
         assert_eq!(variable_viewport_start(2, 6, &[1, 3, 2, 4]), 0);
+    }
+
+    #[test]
+    fn selected_rows_override_status_colors() {
+        let project = crate::domain::Project {
+            id: crate::domain::ProjectId("/tmp/demo".into()),
+            name: "demo".into(),
+            path: "/tmp/demo".into(),
+            relative_path: "demo".into(),
+        };
+        for (scan, worktree, normal_fg) in [
+            (
+                ScanState::Error("failed".into()),
+                crate::domain::WorktreeSummary::default(),
+                Color::Red,
+            ),
+            (
+                ScanState::Ready,
+                crate::domain::WorktreeSummary {
+                    conflicted: 1,
+                    ..Default::default()
+                },
+                Color::LightRed,
+            ),
+            (
+                ScanState::Ready,
+                crate::domain::WorktreeSummary {
+                    unstaged: 1,
+                    ..Default::default()
+                },
+                Color::Yellow,
+            ),
+        ] {
+            let snapshot = crate::domain::ProjectSnapshot {
+                project: project.clone(),
+                head: HeadState::Unknown,
+                upstream: None,
+                worktree,
+                changes: Vec::new(),
+                scan,
+                generation: 0,
+            };
+            assert_eq!(row_style(&snapshot, false).fg, Some(normal_fg));
+            assert_eq!(row_style(&snapshot, true), super::super::selection_style());
+        }
     }
 }

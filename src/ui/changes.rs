@@ -127,9 +127,7 @@ fn render_files(frame: &mut Frame, app: &App, changes: &ChangesState, area: Rect
                 let selected = entry_index == changes.selected;
                 let checked = changes.selected_files.contains(&entry.path);
                 let style = if selected {
-                    Style::default()
-                        .bg(Color::DarkGray)
-                        .add_modifier(Modifier::BOLD)
+                    super::selection_style()
                 } else if entry.conflicted {
                     Style::default().fg(Color::LightRed)
                 } else if entry.untracked {
@@ -321,11 +319,11 @@ fn render_preview(frame: &mut Frame, app: &App, changes: &ChangesState, area: Re
         } else {
             Style::default()
         };
-        if selected_range
+        let selected = selected_range
             .as_ref()
-            .is_some_and(|range| range.contains(&index))
-        {
-            style = style.bg(Color::DarkGray);
+            .is_some_and(|range| range.contains(&index));
+        if selected {
+            style = super::selection_style();
             if line.starts_with("@@") {
                 style = style.add_modifier(Modifier::BOLD);
             }
@@ -360,7 +358,7 @@ fn render_footer(frame: &mut Frame, app: &App, changes: &ChangesState, area: Rec
     } else {
         Span::raw(app.language.text(
             "Space Select   A All   z Stash   s Stage   u Unstage   d Discard   m Commit",
-            "Space 选择   A 全选   z 暂存   s 暂存文件   u 取消暂存   d 丢弃   m 提交",
+            "Space 选择   A 全选   z 储藏   s 暂存   u 取消暂存   d 丢弃   m 提交",
         ))
     };
     let mode = match changes.mode {
@@ -448,7 +446,7 @@ fn render_confirmation(frame: &mut Frame, app: &App, changes: &ChangesState) {
                 match spec.kind {
                     OperationKind::Stash => app.language.text(
                         "Stash frozen files, including untracked files.",
-                        "暂存已冻结的文件，包括未跟踪文件。",
+                        "储藏已冻结的文件，包括未跟踪文件。",
                     ),
                     OperationKind::Discard => app.language.text(
                         "Permanently discard staged, worktree, and untracked changes.",
@@ -497,12 +495,12 @@ fn render_confirmation(frame: &mut Frame, app: &App, changes: &ChangesState) {
                     app.language
                         .text(" Confirm batch discard ", " 确认批量丢弃 ")
                 } else {
-                    app.language.text(" Confirm batch stash ", " 确认批量暂存 ")
+                    app.language.text(" Confirm batch stash ", " 确认批量储藏 ")
                 },
                 if destructive {
                     app.language.text("discard", "丢弃")
                 } else {
-                    app.language.text("stash", "暂存")
+                    app.language.text("stash", "储藏")
                 },
             )
         }

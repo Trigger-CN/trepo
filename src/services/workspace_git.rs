@@ -63,10 +63,15 @@ async fn prepare(action: WorkspaceGitAction, projects: Vec<Project>) -> Result<W
                 project.relative_path.display()
             );
         }
-        if action == WorkspaceGitAction::Stash && changes.iter().any(|entry| entry.conflicted) {
+        if matches!(
+            action,
+            WorkspaceGitAction::Stage | WorkspaceGitAction::Stash
+        ) && changes.iter().any(|entry| entry.conflicted)
+        {
             bail!(
-                "precondition failed: {} has conflicts and cannot be stashed",
-                project.relative_path.display()
+                "precondition failed: {} has conflicts and cannot be {} as a whole",
+                project.relative_path.display(),
+                action.operation_kind().label().to_ascii_lowercase()
             );
         }
         let mut items = Vec::with_capacity(changes.len());
@@ -219,7 +224,11 @@ async fn validate_target(action: WorkspaceGitAction, target: &WorkspaceGitTarget
                     target.project.relative_path.display()
                 )
             })?;
-        if action == WorkspaceGitAction::Stash && entry.conflicted {
+        if matches!(
+            action,
+            WorkspaceGitAction::Stage | WorkspaceGitAction::Stash
+        ) && entry.conflicted
+        {
             bail!(
                 "precondition failed: {} has conflicts",
                 target.project.relative_path.display()
@@ -244,6 +253,7 @@ async fn execute_target(action: WorkspaceGitAction, target: &WorkspaceGitTarget)
         .map(|item| item.change.clone())
         .collect::<Vec<_>>();
     match action {
+        WorkspaceGitAction::Stage => git::stage_all(&target.project.path).await,
         WorkspaceGitAction::Stash => {
             git::stash_paths(&target.project.path, &changes, "repo-tui workspace batch").await
         }
@@ -392,6 +402,100 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stages_all_changes_in_selected_repositories() {
+        let temp = tempdir().unwrap();
+        let first = temp.path().join("first");
+        let second = temp.path().join("second");
+        initialize(&first);
+        initialize(&second);
+        fs::write(first.join("tracked.txt"), "changed\n").unwrap();
+        fs::write(first.join("new.txt"), "new\n").unwrap();
+        fs::remove_file(second.join("tracked.txt")).unwrap();
+        fs::write(second.join("new.txt"), "new\n").unwrap();
+
+        let spec = prepare(
+            WorkspaceGitAction::Stage,
+            vec![project(&first, "first"), project(&second, "second")],
+        )
+        .await
+        .unwrap();
+        let (sender, receiver) = mpsc::unbounded_channel();
+        spawn_execute(temp.path().to_path_buf(), spec, 8, sender);
+        let events = collect_events(receiver).await;
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(
+                    event.kind,
+                    WorkspaceGitEventKind::Finished {
+                        state: RepoProjectState::Succeeded,
+                        ..
+                    }
+                ))
+                .count(),
+            2
+        );
+        for root in [&first, &second] {
+            let changes = git::changes(root).await.unwrap();
+            assert_eq!(changes.len(), 2);
+            assert!(changes.iter().all(|entry| entry.index.is_some()));
+            assert!(changes.iter().all(|entry| entry.worktree.is_none()));
+            assert!(changes.iter().all(|entry| !entry.untracked));
+        }
+    }
+
+    #[tokio::test]
+    async fn stage_rejects_conflicted_repository_during_prepare() {
+        let temp = tempdir().unwrap();
+        initialize(temp.path());
+        run_git(temp.path(), &["switch", "-q", "-c", "other"]);
+        fs::write(temp.path().join("tracked.txt"), "other\n").unwrap();
+        run_git(temp.path(), &["add", "tracked.txt"]);
+        run_git(
+            temp.path(),
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.com",
+                "commit",
+                "-q",
+                "-m",
+                "other",
+            ],
+        );
+        run_git(temp.path(), &["switch", "-q", "main"]);
+        fs::write(temp.path().join("tracked.txt"), "main\n").unwrap();
+        run_git(temp.path(), &["add", "tracked.txt"]);
+        run_git(
+            temp.path(),
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.com",
+                "commit",
+                "-q",
+                "-m",
+                "main",
+            ],
+        );
+        assert!(!std::process::Command::new("git")
+            .args(["merge", "other"])
+            .current_dir(temp.path())
+            .status()
+            .unwrap()
+            .success());
+        let error = prepare(
+            WorkspaceGitAction::Stage,
+            vec![project(temp.path(), "conflicted")],
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("has conflicts"));
+    }
+
+    #[tokio::test]
     async fn discards_all_selected_repositories() {
         let temp = tempdir().unwrap();
         let first = temp.path().join("first");
@@ -524,5 +628,49 @@ mod tests {
             fs::read_to_string(second.join("tracked.txt")).unwrap(),
             "stale after confirmation\n"
         );
+    }
+
+    #[tokio::test]
+    async fn stage_stale_preflight_prevents_every_repository_write() {
+        let temp = tempdir().unwrap();
+        let first = temp.path().join("first");
+        let second = temp.path().join("second");
+        initialize(&first);
+        initialize(&second);
+        fs::write(first.join("tracked.txt"), "first selected\n").unwrap();
+        fs::write(second.join("tracked.txt"), "second selected\n").unwrap();
+        let spec = prepare(
+            WorkspaceGitAction::Stage,
+            vec![project(&first, "first"), project(&second, "second")],
+        )
+        .await
+        .unwrap();
+        fs::write(second.join("tracked.txt"), "stale after confirmation\n").unwrap();
+
+        let (sender, receiver) = mpsc::unbounded_channel();
+        spawn_execute(temp.path().to_path_buf(), spec, 11, sender);
+        let events = collect_events(receiver).await;
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(
+                    event.kind,
+                    WorkspaceGitEventKind::Finished {
+                        state: RepoProjectState::Failed,
+                        ..
+                    }
+                ))
+                .count(),
+            2
+        );
+        for root in [&first, &second] {
+            assert!(String::from_utf8(
+                git::git_output(root, ["diff", "--cached", "--name-only"])
+                    .await
+                    .unwrap(),
+            )
+            .unwrap()
+            .is_empty());
+        }
     }
 }

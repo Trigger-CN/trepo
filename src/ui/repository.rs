@@ -194,9 +194,7 @@ fn render_items(frame: &mut Frame, app: &App, state: &RepositoryState, area: Rec
                     area.width.saturating_sub(2) as usize,
                 ))
                 .style(if index == state.selected {
-                    Style::default()
-                        .bg(Color::DarkGray)
-                        .add_modifier(Modifier::BOLD)
+                    super::selection_style()
                 } else {
                     Style::default()
                 })
@@ -410,7 +408,7 @@ fn localized_field_value(app: &App, field: &FormField) -> String {
 fn repository_tab_label(app: &App, tab: RepositoryTab) -> &'static str {
     match tab {
         RepositoryTab::Status => app.language.text("Status", "状态"),
-        RepositoryTab::Stashes => app.language.text("Stashes", "暂存"),
+        RepositoryTab::Stashes => app.language.text("Stashes", "储藏"),
         RepositoryTab::Refs => app.language.text("Branches & Tags", "分支与标签"),
         RepositoryTab::Remotes => app.language.text("Remotes", "远程"),
     }
