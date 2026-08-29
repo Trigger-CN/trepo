@@ -770,9 +770,10 @@ Repo 集成测试使用小型本地 manifest 和本地 bare remotes，避免依�
 
 ### Phase 5：发布质量
 
-- 安装包、shell completion、man page、升级与配置迁移。
-- 大规模 benchmark、fuzz、跨终端/平台测试。
-- 用户文档、故障诊断、隐私与安全审查。
+- 已实现 `v<semver>` tag 驱动的 GitHub Release 基础链路：tag 必须匹配 Cargo 版本，Linux x86_64、macOS Intel 与 macOS Apple Silicon 独立构建归档并生成 `SHA256SUMS`。
+- Release 正文由受版本控制脚本生成，固定包含下载/安装/启动指导、上一可达 `v*` tag 的 compare 链接和非 merge 提交列表；首发则列出截至当前 tag 的提交。
+- 后续补充安装包、shell completion、man page、升级与配置迁移。
+- 后续补充大规模 benchmark、fuzz、更多终端/平台测试，以及隐私与安全审查。
 
 ## 16. MVP 验收清单
 

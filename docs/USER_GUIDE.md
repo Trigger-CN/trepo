@@ -18,6 +18,8 @@ cargo run -- doctor /path/to/workspace
 
 最低终端尺寸：Workspace/Graph 为 60x12，Changes 为 60x14。推荐使用 120x40。
 
+发布版可从 GitHub Release 的 Assets 下载 Linux x86_64、macOS Intel 或 macOS Apple Silicon 压缩包。解压后将 `trepo` 安装到 `~/.local/bin`；Release 正文包含完整安装命令、常用启动方式、校验文件和本版本提交列表。
+
 ## 2. 最快上手
 
 1. 在 Workspace 用 `j/k` 将光标移到仓库；无需先选择即可直接按 `S/Z/D` 操作该仓库，或用 `Space`/`A` 显式选择多个仓库进行批量操作。
