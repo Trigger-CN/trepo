@@ -6,7 +6,24 @@ use ratatui::Frame;
 
 use super::change_tree::{change_tree_rows, ChangeTreeRow};
 use crate::app::state::{App, ChangesMode, ChangesState, PendingOperation};
-use crate::domain::{OperationKind, OperationTarget};
+use crate::domain::{ChangeEntry, OperationKind, OperationTarget};
+
+fn change_file_style(entry: &ChangeEntry) -> Style {
+    if entry.conflicted {
+        Style::default()
+            .fg(Color::LightRed)
+            .add_modifier(Modifier::BOLD)
+    } else if entry.untracked {
+        Style::default().fg(Color::Yellow)
+    } else {
+        match (entry.index.is_some(), entry.worktree.is_some()) {
+            (true, true) => Style::default().fg(Color::LightMagenta),
+            (true, false) => Style::default().fg(Color::LightGreen),
+            (false, true) => Style::default().fg(Color::LightRed),
+            (false, false) => Style::default(),
+        }
+    }
+}
 
 pub fn render(frame: &mut Frame, app: &App) {
     let area = frame.area();
@@ -70,7 +87,7 @@ fn render_header(frame: &mut Frame, app: &App, changes: &ChangesState, area: Rec
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled(
-                " repo-tui ",
+                " trepo ",
                 Style::default()
                     .fg(Color::Black)
                     .bg(Color::Cyan)
@@ -126,22 +143,23 @@ fn render_files(frame: &mut Frame, app: &App, changes: &ChangesState, area: Rect
                 let entry = &changes.entries[entry_index];
                 let selected = entry_index == changes.selected;
                 let checked = changes.selected_files.contains(&entry.path);
-                let style = if selected {
+                let row_style = if selected {
                     super::selection_style()
-                } else if entry.conflicted {
-                    Style::default().fg(Color::LightRed)
-                } else if entry.untracked {
-                    Style::default().fg(Color::Yellow)
                 } else {
                     Style::default()
+                };
+                let file_style = if selected {
+                    Style::default()
+                } else {
+                    change_file_style(entry)
                 };
                 Row::new(vec![
                     Cell::from(if selected { ">" } else { " " }),
                     Cell::from(if checked { "[x]" } else { "[ ]" }),
-                    Cell::from(entry.status_label()),
-                    Cell::from(super::text::truncate(&row.display(), tree_width)),
+                    Cell::from(entry.status_label()).style(file_style),
+                    Cell::from(super::text::truncate(&row.display(), tree_width)).style(file_style),
                 ])
-                .style(style)
+                .style(row_style)
             }
         });
     let title = if changes.loading {

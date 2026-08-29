@@ -1,4 +1,4 @@
-# repo-tui 用户指南与操作流程
+# trepo 用户指南与操作流程
 
 本文只描述当前版本中已经实现、可以通过键盘到达的操作。
 
@@ -50,7 +50,7 @@ cargo run -- doctor /path/to/workspace
 
 ```mermaid
 flowchart TD
-    S[启动 repo-tui] --> D{发现工作区类型}
+    S[启动 trepo] --> D{发现工作区类型}
     D -->|Android Repo| W[Workspace 多仓库主页]
     D -->|单 Git 仓库| W
 
@@ -228,6 +228,8 @@ flowchart TD
 ## 7. Changes 文件改动页
 
 Diff 的每个源行固定占一个终端渲染行，超宽部分在面板内截断，不自动折回终端最左侧。路径、提交文本和外部 Git 输出按终端显示列宽处理，中文双宽字符不会被切半；控制字符会转成可见文本，不能改变终端布局。
+
+文件树通过 `XY` 和文件名颜色共同区分状态：仅 staged（已暂存）为亮绿，仅 unstaged（未暂存工作区改动）为亮红，同时存在 staged 与 unstaged 改动为亮紫，untracked 为黄色，conflict 为加粗亮红。光标所在行统一显示黑字亮青背景；无法显示颜色时仍以 `XY` 字符为准。
 
 ### 作用域与操作流程
 

@@ -13,7 +13,7 @@ pub fn render(frame: &mut Frame, app: &App) {
     if area.width < 60 || area.height < 12 {
         frame.render_widget(
             Paragraph::new("Terminal too small. Resize to at least 60x12. Press q to quit.")
-                .block(Block::default().title(" repo-tui ").borders(Borders::ALL))
+                .block(Block::default().title(" trepo ").borders(Borders::ALL))
                 .wrap(Wrap { trim: true }),
             area,
         );
@@ -53,7 +53,7 @@ fn render_header(frame: &mut Frame, app: &App, area: Rect) {
     };
     let title = Line::from(vec![
         Span::styled(
-            " repo-tui ",
+            " trepo ",
             Style::default()
                 .fg(Color::Black)
                 .bg(Color::Cyan)

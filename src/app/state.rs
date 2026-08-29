@@ -1614,7 +1614,7 @@ impl App {
         }
         task.cancelling = true;
         task.logs.push(
-            "[repo-tui] Cancellation requested; completed changes will not be rolled back".into(),
+            "[trepo] Cancellation requested; completed changes will not be rolled back".into(),
         );
         if let Some(handle) = &self.repo_batch_handle {
             handle.cancel();

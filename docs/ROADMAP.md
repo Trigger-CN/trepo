@@ -1,4 +1,4 @@
-# repo-tui 实现路线图
+# trepo 实现路线图
 
 - 文档状态：Active
 - 设计依据：[DESIGN.md](./DESIGN.md)
@@ -72,8 +72,8 @@ M1 是所有后续里程碑的共同数据与交互基础。M4 可以在 M2 后�
 交付物：
 
 - Rust package、锁文件和最小依赖集合。
-- `repo-tui [PATH]` 启动 TUI。
-- `repo-tui doctor [PATH]` 输出 Git、Repo、终端和工作区诊断。
+- `trepo [PATH]` 启动 TUI。
+- `trepo doctor [PATH]` 输出 Git、Repo、终端和工作区诊断。
 - `--scan-concurrency`、`--log-file` 等基础参数留出稳定接口。
 
 验收：
@@ -242,7 +242,7 @@ cargo run -- doctor .
 - 文件批次使用稳定 `PathBuf` 集合，在写入前验证全部 diff token；Stash 保存 selected tracked/untracked，Discard 清理 tracked index/worktree、staged-added、untracked 和 rename 新旧路径，未选路径保持不变。
 - Workspace `S`/`Z`/`D` 在显式选择为空时冻结光标仓库，非空时仅冻结 stable multi-select，并在确认框展示最终仓库范围与改动统计；全批路径/token/index-lock 预检失败时零写入，Stage 暂存完整 tracked/untracked 改动并拒绝冲突仓库，执行结果按仓库保留且不承诺跨仓库回滚。
 - bracketed paste 保留提交正文换行；Unicode 光标移动、中间插入/删除、行首尾和跨行移动有状态测试覆盖。
-- 80x24/120x40 TestBackend 验证 Changes/Workspace Git 确认与结果、Message 边框、Options/Keys 分隔区和真实 cursor。
+- 80x24/120x40 TestBackend 验证 Changes/Workspace Git 确认与结果、Message 边框、Options/Keys 分隔区和真实 cursor；Changes 文件名 cell 直接覆盖 staged、unstaged、mixed、untracked、conflict 状态色及选中态覆盖。
 - 真实临时仓库覆盖 selected-path Stash、完整 Discard、双仓库 Stage/Stash/Discard、冲突拒绝、stale 全批零写入，以及高级 stash 与 conflict 工作流。
 
 关键基础设施：
@@ -402,7 +402,7 @@ cargo fmt --all -- --check
 cargo test
 cargo clippy --all-targets --all-features -- -D warnings
 cargo build
-./target/debug/repo-tui doctor /path/to/git-or-repo-workspace
+./target/debug/trepo doctor /path/to/git-or-repo-workspace
 ```
 
 已验证边界：

@@ -46,7 +46,7 @@ pub fn render(frame: &mut Frame, app: &App) {
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled(
-                " repo-tui ",
+                " trepo ",
                 Style::default()
                     .fg(Color::Black)
                     .bg(Color::Cyan)

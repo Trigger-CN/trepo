@@ -152,7 +152,7 @@ impl OperationRunner {
 
         match spec.kind {
             OperationKind::Stash => {
-                git::stash_paths(root, &validated, "repo-tui selected files").await?
+                git::stash_paths(root, &validated, "trepo selected files").await?
             }
             OperationKind::Discard => git::discard_paths(root, &validated).await?,
             OperationKind::Stage | OperationKind::Unstage => {
