@@ -140,6 +140,14 @@ cargo run -- doctor .
 7. 同步相关文档，确认 roadmap 状态与真实实现一致。
 8. 提交前检查 staged 文件、diff、测试结果和提交消息格式。
 
+### 6.1 发布流程
+
+- 发布 tag 固定为 `v<semver>`，且去掉 `v` 后必须与 `Cargo.toml` 中 `trepo` package version 完全一致。
+- 先更新 `Cargo.toml` 并运行 Cargo 刷新 `Cargo.lock`，完成提交和门禁后再创建 tag。
+- tag 必须单独推送，例如 `git push origin v0.5.0`；不要在未经用户明确要求时创建或推送 release tag。
+- `.github/workflows/release.yml` 构建 Linux x86_64、macOS Intel 和 macOS Apple Silicon 归档，并发布 `SHA256SUMS`。
+- 修改发布矩阵、归档结构或说明模板时，必须运行 release notes 脚本语法检查，并用首发/后续 tag 临时历史验证提交范围。
+
 ## 7. 测试与验证门禁
 
 所有正常交付至少运行：

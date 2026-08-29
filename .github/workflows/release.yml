@@ -1,0 +1,124 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Validate release tag
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Verify tag matches Cargo version
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo_version="$(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "trepo") | .version')"
+          expected_tag="v${cargo_version}"
+          if [[ "${GITHUB_REF_NAME}" != "${expected_tag}" ]]; then
+            echo "Release tag ${GITHUB_REF_NAME} does not match Cargo package version ${cargo_version}." >&2
+            echo "Expected tag: ${expected_tag}" >&2
+            exit 1
+          fi
+
+  build:
+    name: Build ${{ matrix.platform }}
+    needs: validate
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            platform: linux-x86_64
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+            platform: macos-x86_64
+          - os: macos-15
+            target: aarch64-apple-darwin
+            platform: macos-aarch64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install Rust target
+        run: rustup target add "${{ matrix.target }}"
+
+      - name: Build release binary
+        run: cargo build --locked --release --target "${{ matrix.target }}"
+
+      - name: Package release archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          package_name="trepo-${GITHUB_REF_NAME}-${{ matrix.platform }}"
+          package_dir="dist/${package_name}"
+          mkdir -p "${package_dir}/docs"
+          cp "target/${{ matrix.target }}/release/trepo" "${package_dir}/trepo"
+          cp README.md "${package_dir}/README.md"
+          cp docs/USER_GUIDE.md "${package_dir}/docs/USER_GUIDE.md"
+          tar -C dist -czf "dist/${package_name}.tar.gz" "${package_name}"
+
+      - name: Upload release archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: trepo-${{ matrix.platform }}
+          path: dist/trepo-${{ github.ref_name }}-${{ matrix.platform }}.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Check out source and tags
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download release archives
+        uses: actions/download-artifact@v4
+        with:
+          pattern: trepo-*
+          path: dist
+          merge-multiple: true
+
+      - name: Generate checksums and release notes
+        shell: bash
+        run: |
+          set -euo pipefail
+          (cd dist && sha256sum ./*.tar.gz > SHA256SUMS)
+          bash .github/scripts/generate-release-notes.sh \
+            "${GITHUB_REF_NAME}" \
+            "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
+            release-notes.md
+
+      - name: Create or update GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          release_args=(--repo "${GITHUB_REPOSITORY}" --title "trepo ${tag}" --notes-file release-notes.md)
+          if [[ "${tag}" == *-* ]]; then
+            release_args+=(--prerelease)
+          fi
+
+          if gh release view "${tag}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            gh release edit "${tag}" "${release_args[@]}"
+            gh release upload "${tag}" dist/*.tar.gz dist/SHA256SUMS --repo "${GITHUB_REPOSITORY}" --clobber
+          else
+            gh release create "${tag}" dist/*.tar.gz dist/SHA256SUMS "${release_args[@]}" --verify-tag
+          fi

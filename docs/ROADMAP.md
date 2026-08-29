@@ -58,6 +58,7 @@ M1 是所有后续里程碑的共同数据与交互基础。M4 可以在 M2 后�
 - Repo `sync/start/checkout/abandon/prune/rebase/upload/download` 和 pinned manifest export 具有 workspace lock、逐项目结果、流式日志、取消后复扫与失败重试。
 - Graph、Changes、Workspace Git 与 Repo overlay、confirmation 和结果状态均覆盖 80x24 与 120x40 TestBackend 渲染；四个主页面的数据行选中态另有 cell 前景、背景和粗体断言。
 - UI 默认英文，`-zh`/`--zh` 与 `-en`/`--en` 以实例级语言状态覆盖主要页面；长路径、diff 和外部文本按终端列宽安全处理，控制字符不能污染终端布局。选中行使用高对比黑字亮青背景，状态仍由字符或符号共同表达。
+- GitHub Actions 已支持 `v<semver>` tag 自动校验 Cargo 版本，构建 Linux x86_64、macOS Intel/Apple Silicon 归档与 `SHA256SUMS`，并发布含使用指导、compare 链接和提交列表的 Release。
 
 下一执行点是 M5 命令面板与终端接管；交互认证、外部 editor/mergetool 和任意受控命令不在 M4 后台任务中启动。
 
@@ -393,6 +394,7 @@ cargo run -- doctor .
 | M3 remotes | Done | bare remote 普通 push、非快进拒绝、陈旧/当前 lease、fetch/pull/upstream/prune 与 remote 管理通过 |
 | M4 Repo/Workspace batch | Done | Repo batch 与 Workspace Git Stage/Stash/Discard 的 stable multi-select、全批预检、逐项结果和 80x24/120x40 通过 |
 | UI 文本/语言/配色 | Done | 默认英文、-zh/-en 与长参数、stash“储藏”/stage“暂存”术语、三态 Workspace、显示列宽/控制字符/重绘回归，以及四页面高对比选中态和双语言 80x24/120x40 通过 |
+| GitHub Release 基础链路 | Done | tag/Cargo 版本校验、三平台归档、SHA-256、首发/增量 release notes 脚本验证通过 |
 | M5-M7 | Planned | 下一步从 M5 命令面板与终端接管开始 |
 
 M0-M4 最终验证（Rust 1.98、Git 2.43.0、Repo launcher 2.54）：

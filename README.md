@@ -23,6 +23,28 @@ cargo run -- doctor /path/to/workspace
 
 Starting from a subdirectory is supported. If no `.repo` directory is found, trepo opens the containing Git repository.
 
+## Releases
+
+Pushing a tag that exactly matches `v<version>` from `Cargo.toml` creates a GitHub Release. The workflow builds and attaches:
+
+- `trepo-v<version>-linux-x86_64.tar.gz`
+- `trepo-v<version>-macos-x86_64.tar.gz`
+- `trepo-v<version>-macos-aarch64.tar.gz`
+- `SHA256SUMS`
+
+Each release message includes download and usage instructions, a comparison link to the previous reachable `v*` tag, and the intervening non-merge commits. A mismatched tag fails before any artifact is built.
+
+Release procedure:
+
+```bash
+# Update the package version and lock file first.
+cargo check
+git add Cargo.toml Cargo.lock
+git commit
+git tag v0.5.0
+git push origin v0.5.0
+```
+
 ## Keys
 
 | Key | Action |
