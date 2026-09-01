@@ -28,17 +28,12 @@ pub fn render(frame: &mut Frame, app: &App) {
 
 fn selection_style() -> Style {
     Style::default()
-        .fg(Color::Black)
-        .bg(Color::LightCyan)
+        .bg(Color::Rgb(38, 46, 58))
         .add_modifier(Modifier::BOLD)
 }
 
-fn selection_fg(selected: bool, color: Color) -> Color {
-    if selected {
-        Color::Black
-    } else {
-        color
-    }
+fn selection_fg(_selected: bool, color: Color) -> Color {
+    color
 }
 
 fn render_help(frame: &mut Frame, app: &App) {
@@ -54,7 +49,8 @@ fn render_help(frame: &mut Frame, app: &App) {
             Line::raw("Enter           打开提交图 / 提交信息中换行"),
             Line::raw("Space / A       选择当前 / 全部仓库或改动文件"),
             Line::raw("S/Z/D           对光标仓库 / 已选仓库执行暂存 / 储藏 / 丢弃"),
-            Line::raw("d               全部 / 仅改动 / 改动与文件 三态循环"),
+            Line::raw("d               切换全部 / 仅改动 / 改动与文件范围"),
+            Line::raw("t               切换当前范围的列表 / 树形布局"),
             Line::raw("a               打开 Repo 或仓库操作"),
             Line::raw("f, /, x         提交图过滤 / 搜索 / 清除"),
             Line::raw("Tab             切换改动模式或表单字段"),
@@ -79,7 +75,8 @@ fn render_help(frame: &mut Frame, app: &App) {
             Line::raw(
                 "S/Z/D          Workspace cursor / selected repositories: Stage / Stash / Discard",
             ),
-            Line::raw("d              Cycle all / changed / changed with files"),
+            Line::raw("d              Switch all / changed / changed with files scope"),
+            Line::raw("t              Toggle List / Tree for the current scope"),
             Line::raw("a              Open Workspace Repo or Repository actions"),
             Line::raw("f, /, x        Graph filter / query / clear; retry failed Repo task"),
             Line::raw("Tab            Toggle Changes mode or active form field"),
@@ -262,7 +259,29 @@ mod tests {
     }
 
     fn assert_selected_text(app: &App, width: u16, height: u16, needle: &str) {
-        assert_rendered_text_style(app, width, height, needle, Color::Black, Color::LightCyan);
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render(frame, app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let symbols = needle
+            .chars()
+            .map(|value| value.to_string())
+            .collect::<Vec<_>>();
+        let span_width = u16::try_from(symbols.len()).unwrap();
+        for y in 0..height {
+            for x in 0..=width.saturating_sub(span_width) {
+                let matches = symbols.iter().enumerate().all(|(offset, symbol)| {
+                    buffer[(x + u16::try_from(offset).unwrap(), y)].symbol() == symbol
+                });
+                if matches
+                    && (0..span_width)
+                        .all(|offset| buffer[(x + offset, y)].bg == Color::Rgb(38, 46, 58))
+                {
+                    return;
+                }
+            }
+        }
+        panic!("text {needle:?} had no selection background rendering at {width}x{height}");
     }
 
     fn draw_text_and_cursor(
@@ -398,7 +417,7 @@ mod tests {
     }
 
     #[test]
-    fn workspace_changed_files_view_expands_files_in_main_list() {
+    fn workspace_views_switch_independent_list_and_tree_layouts() {
         let mut app = app();
         app.projects[0].worktree.staged = 1;
         app.projects[0].changes = (0..24)
@@ -412,29 +431,50 @@ mod tests {
             })
             .collect();
 
+        let all_list = draw_text(&app, 120, 40);
+        assert!(all_list.contains("[List]"));
+        app.toggle_workspace_layout();
+        let all_tree = draw_text(&app, 120, 40);
+        assert!(all_tree.contains("[Tree]"));
+        assert!(all_tree.contains("└─demo"));
+
         app.cycle_workspace_view();
         assert_eq!(
             app.workspace_view,
             crate::app::state::WorkspaceView::Changed
         );
-        let changed = draw_text(&app, 120, 40);
-        assert!(changed.contains("Changed only"));
+        let changed_list = draw_text(&app, 120, 40);
+        assert!(changed_list.contains("changed only [List]"));
+        app.toggle_workspace_layout();
+        let changed_tree = draw_text(&app, 120, 40);
+        assert!(changed_tree.contains("changed only [Tree]"));
+        assert!(changed_tree.contains("└─demo"));
 
         app.cycle_workspace_view();
         assert_eq!(
             app.workspace_view,
             crate::app::state::WorkspaceView::ChangedWithFiles
         );
-        let expanded = draw_text(&app, 120, 40);
-        assert!(expanded.contains("Changed + files"));
-        assert!(expanded.contains("src/"));
-        assert!(expanded.contains("M.  "));
-        assert!(expanded.contains("dirty-0.rs"));
-        assert!(expanded.contains("more tree rows"));
+        let file_tree = draw_text(&app, 120, 40);
+        assert!(file_tree.contains("changed + files [Tree]"));
+        assert!(file_tree.contains("src/"));
+        assert!(file_tree.contains("M.  "));
+        assert!(file_tree.contains("dirty-0.rs"));
+        assert!(file_tree.contains("more tree rows"));
         draw(&app, 80, 24);
+
+        app.toggle_workspace_layout();
+        let file_list = draw_text(&app, 120, 40);
+        assert!(file_list.contains("changed + files [List]"));
+        assert!(file_list.contains("M.  src/dirty-0.rs"));
+        assert!(file_list.contains("more files"));
 
         app.cycle_workspace_view();
         assert_eq!(app.workspace_view, crate::app::state::WorkspaceView::All);
+        assert_eq!(
+            app.workspace_layout(),
+            crate::app::state::WorkspaceLayout::Tree
+        );
     }
 
     #[test]
@@ -991,6 +1031,14 @@ mod tests {
         assert_text_foreground(&app, 120, 40, "untracked.rs", Color::Yellow);
         assert_text_foreground(&app, 120, 40, "conflicted.rs", Color::LightRed);
         assert_selected_text(&app, 120, 40, "main.rs");
+        assert_rendered_text_style(
+            &app,
+            120,
+            40,
+            "main.rs",
+            Color::LightMagenta,
+            Color::Rgb(38, 46, 58),
+        );
         app.changes.as_mut().unwrap().mode = ChangesMode::Hunk;
         for (width, height) in [(80, 24), (120, 40)] {
             assert_selected_text(&app, width, height, "main.rs");
@@ -998,6 +1046,8 @@ mod tests {
             assert_selected_text(&app, width, height, "-old");
             assert_selected_text(&app, width, height, "+new");
         }
+        assert_rendered_text_style(&app, 120, 40, "-old", Color::Red, Color::Rgb(38, 46, 58));
+        assert_rendered_text_style(&app, 120, 40, "+new", Color::Green, Color::Rgb(38, 46, 58));
         app.changes.as_mut().unwrap().commit_editing = true;
         for (width, height) in [(80, 24), (120, 40)] {
             let (text, cursor) = draw_text_and_cursor(&app, width, height);

@@ -48,12 +48,35 @@ impl WorkspaceView {
         }
     }
 
+    fn index(self) -> usize {
+        match self {
+            Self::All => 0,
+            Self::Changed => 1,
+            Self::ChangedWithFiles => 2,
+        }
+    }
+
     pub fn filters_changed(self) -> bool {
         self != Self::All
     }
 
     pub fn expands_files(self) -> bool {
         self == Self::ChangedWithFiles
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkspaceLayout {
+    List,
+    Tree,
+}
+
+impl WorkspaceLayout {
+    pub fn toggle(self) -> Self {
+        match self {
+            Self::List => Self::Tree,
+            Self::Tree => Self::List,
+        }
     }
 }
 
@@ -143,7 +166,7 @@ pub struct GraphForm {
 impl GraphForm {
     fn text(&self, index: usize) -> anyhow::Result<String> {
         match self.fields.get(index) {
-            Some(FormField::Text { value, label }) if !value.trim().is_empty() => {
+            Some(FormField::Text { value, .. }) if !value.trim().is_empty() => {
                 Ok(value.trim().to_owned())
             }
             Some(FormField::Text { label, .. }) => anyhow::bail!("{label} cannot be empty"),
@@ -936,6 +959,7 @@ pub struct App {
     pub search: String,
     pub search_mode: bool,
     pub workspace_view: WorkspaceView,
+    pub workspace_layouts: [WorkspaceLayout; 3],
     pub language: Language,
     pub help: bool,
     pub generation: u64,
@@ -1013,6 +1037,11 @@ impl App {
             search: String::new(),
             search_mode: false,
             workspace_view: WorkspaceView::All,
+            workspace_layouts: [
+                WorkspaceLayout::List,
+                WorkspaceLayout::List,
+                WorkspaceLayout::Tree,
+            ],
             language,
             help: false,
             generation: 0,
@@ -1099,7 +1128,8 @@ impl App {
 
     pub fn filtered_indices(&self) -> Vec<usize> {
         let query = self.search.to_lowercase();
-        self.projects
+        let mut indices = self
+            .projects
             .iter()
             .enumerate()
             .filter(|(_, snapshot)| {
@@ -1115,7 +1145,17 @@ impl App {
                         || snapshot.head.label().to_lowercase().contains(&query))
             })
             .map(|(index, _)| index)
-            .collect()
+            .collect::<Vec<_>>();
+        if self.workspace_layout() == WorkspaceLayout::Tree && !self.workspace_view.expands_files()
+        {
+            indices.sort_by(|left, right| {
+                self.projects[*left]
+                    .project
+                    .relative_path
+                    .cmp(&self.projects[*right].project.relative_path)
+            });
+        }
+        indices
     }
 
     pub fn cycle_workspace_view(&mut self) {
@@ -1123,6 +1163,19 @@ impl App {
             .selected_project()
             .map(|snapshot| snapshot.project.id.clone());
         self.workspace_view = self.workspace_view.next();
+        self.restore_workspace_selection(selected_id.as_ref());
+    }
+
+    pub fn workspace_layout(&self) -> WorkspaceLayout {
+        self.workspace_layouts[self.workspace_view.index()]
+    }
+
+    pub fn toggle_workspace_layout(&mut self) {
+        let selected_id = self
+            .selected_project()
+            .map(|snapshot| snapshot.project.id.clone());
+        let index = self.workspace_view.index();
+        self.workspace_layouts[index] = self.workspace_layouts[index].toggle();
         self.restore_workspace_selection(selected_id.as_ref());
     }
 
@@ -3572,6 +3625,44 @@ mod tests {
         app.cycle_workspace_view();
         assert!(app.selected_project().is_none());
         assert_eq!(app.selected, 0);
+    }
+
+    #[test]
+    fn workspace_layouts_are_remembered_per_view_and_preserve_selection() {
+        let workspace = Workspace {
+            root: PathBuf::from("/tmp"),
+            kind: WorkspaceKind::Repo,
+            projects: vec![project("zeta/repo"), project("alpha/repo")],
+        };
+        let mut app = App::new(workspace, 2);
+        app.selected = 0;
+        let selected_id = app.selected_project().unwrap().project.id.clone();
+
+        assert_eq!(app.workspace_layout(), WorkspaceLayout::List);
+        app.toggle_workspace_layout();
+        assert_eq!(app.workspace_layout(), WorkspaceLayout::Tree);
+        assert_eq!(app.filtered_indices(), vec![1, 0]);
+        assert_eq!(app.selected_project().unwrap().project.id, selected_id);
+
+        let alpha_id = app.projects[1].project.id.clone();
+        app.move_selection(-1);
+        assert_eq!(app.selected_project().unwrap().project.id, alpha_id);
+        assert_eq!(app.workspace_git_targets()[0].id, alpha_id);
+        app.toggle_project_selection();
+        app.move_selection(1);
+        assert_eq!(app.selected_project().unwrap().project.id, selected_id);
+        assert_eq!(app.workspace_git_targets()[0].id, alpha_id);
+
+        app.projects[0].worktree.unstaged = 1;
+        app.projects[1].worktree.unstaged = 1;
+        app.cycle_workspace_view();
+        assert_eq!(app.workspace_layout(), WorkspaceLayout::List);
+        app.cycle_workspace_view();
+        assert_eq!(app.workspace_layout(), WorkspaceLayout::Tree);
+        app.toggle_workspace_layout();
+        assert_eq!(app.workspace_layout(), WorkspaceLayout::List);
+        app.cycle_workspace_view();
+        assert_eq!(app.workspace_layout(), WorkspaceLayout::Tree);
     }
 
     #[test]

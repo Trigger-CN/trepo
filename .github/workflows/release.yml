@@ -44,6 +44,9 @@ jobs:
           - os: macos-15
             target: aarch64-apple-darwin
             platform: macos-aarch64
+          - os: windows-2022
+            target: x86_64-pc-windows-msvc
+            platform: windows-x86_64
     runs-on: ${{ matrix.os }}
     steps:
       - name: Check out source
@@ -52,10 +55,20 @@ jobs:
       - name: Install Rust target
         run: rustup target add "${{ matrix.target }}"
 
+      - name: Validate PowerShell installer
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $tokens = $null
+          $parseErrors = $null
+          [void][System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path "install.ps1"), [ref]$tokens, [ref]$parseErrors)
+          if ($parseErrors.Count -ne 0) { $parseErrors | ForEach-Object { Write-Error $_ }; exit 1 }
+
       - name: Build release binary
         run: cargo build --locked --release --target "${{ matrix.target }}"
 
-      - name: Package release archive
+      - name: Package Unix release archive
+        if: runner.os != 'Windows'
         shell: bash
         run: |
           set -euo pipefail
@@ -67,11 +80,25 @@ jobs:
           cp docs/USER_GUIDE.md "${package_dir}/docs/USER_GUIDE.md"
           tar -C dist -czf "dist/${package_name}.tar.gz" "${package_name}"
 
+      - name: Package Windows release archive
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $packageName = "trepo-${env:GITHUB_REF_NAME}-${{ matrix.platform }}"
+          $packageDir = Join-Path "dist" $packageName
+          New-Item -ItemType Directory -Force -Path (Join-Path $packageDir "docs") | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/trepo.exe" (Join-Path $packageDir "trepo.exe")
+          Copy-Item "README.md" (Join-Path $packageDir "README.md")
+          Copy-Item "docs/USER_GUIDE.md" (Join-Path $packageDir "docs/USER_GUIDE.md")
+          Compress-Archive -Path $packageDir -DestinationPath "dist/${packageName}.zip"
+
       - name: Upload release archive
         uses: actions/upload-artifact@v4
         with:
           name: trepo-${{ matrix.platform }}
-          path: dist/trepo-${{ github.ref_name }}-${{ matrix.platform }}.tar.gz
+          path: |
+            dist/trepo-${{ github.ref_name }}-${{ matrix.platform }}.tar.gz
+            dist/trepo-${{ github.ref_name }}-${{ matrix.platform }}.zip
           if-no-files-found: error
           retention-days: 7
 
@@ -98,7 +125,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          (cd dist && sha256sum ./*.tar.gz > SHA256SUMS)
+          (cd dist && find . -maxdepth 1 -type f \( -name '*.tar.gz' -o -name '*.zip' \) -printf '%f\n' | sort | xargs sha256sum > SHA256SUMS)
           bash .github/scripts/generate-release-notes.sh \
             "${GITHUB_REF_NAME}" \
             "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
@@ -118,7 +145,7 @@ jobs:
 
           if gh release view "${tag}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
             gh release edit "${tag}" "${release_args[@]}"
-            gh release upload "${tag}" dist/*.tar.gz dist/SHA256SUMS --repo "${GITHUB_REPOSITORY}" --clobber
+            gh release upload "${tag}" dist/*.tar.gz dist/*.zip dist/SHA256SUMS --repo "${GITHUB_REPOSITORY}" --clobber
           else
-            gh release create "${tag}" dist/*.tar.gz dist/SHA256SUMS "${release_args[@]}" --verify-tag
+            gh release create "${tag}" dist/*.tar.gz dist/*.zip dist/SHA256SUMS "${release_args[@]}" --verify-tag
           fi

@@ -9,7 +9,7 @@ See [the user guide and operation flowcharts](docs/USER_GUIDE.md), [the design](
 - Rust 1.81 or newer
 - Git with porcelain v2 support
 - Google/Android `repo` for Repo workspace mode
-- Linux or macOS terminal
+- Linux, macOS, or Windows terminal (native Windows supports Git mode; Repo mode depends on an available `repo` tool)
 
 ## Build and run
 
@@ -23,6 +23,22 @@ cargo run -- doctor /path/to/workspace
 
 Starting from a subdirectory is supported. If no `.repo` directory is found, trepo opens the containing Git repository.
 
+## Install
+
+Linux x86_64 (the script also selects supported macOS assets):
+
+```bash
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/Trigger-CN/trepo/raw/main/install.sh | sh
+```
+
+Windows x86_64 PowerShell:
+
+```powershell
+irm https://github.com/Trigger-CN/trepo/raw/main/install.ps1 | iex
+```
+
+Both installers select the versioned asset listed in `SHA256SUMS`, verify SHA-256, and install into a user-writable directory. Override it with `TREPO_INSTALL_DIR`. Check or install a newer release with `trepo update --check` or `trepo update`; self-update verifies the same checksum before replacing the executable.
+
 ## Releases
 
 Pushing a tag that exactly matches `v<version>` from `Cargo.toml` creates a GitHub Release. The workflow builds and attaches:
@@ -30,6 +46,7 @@ Pushing a tag that exactly matches `v<version>` from `Cargo.toml` creates a GitH
 - `trepo-v<version>-linux-x86_64.tar.gz`
 - `trepo-v<version>-macos-x86_64.tar.gz`
 - `trepo-v<version>-macos-aarch64.tar.gz`
+- `trepo-v<version>-windows-x86_64.zip`
 - `SHA256SUMS`
 
 Each release message includes download and usage instructions, a comparison link to the previous reachable `v*` tag, and the intervening non-merge commits. A mismatched tag fails before any artifact is built.
@@ -66,7 +83,8 @@ git push origin v0.5.0
 | `Tab` | Cycle file / hunk / line mode in Changes; switch tabs or form fields |
 | `z` | Changes: confirm stashing the selected files, including untracked files |
 | `s` / `u` | Stage / unstage selected Changes files, or the active file, hunk, or line when no file selection exists |
-| `d` | Workspace: cycle all projects → changed projects → changed projects with file trees; Changes: confirm complete Discard for selected files or discard the active file/hunk/line |
+| `d` | Workspace: cycle the data scope through all projects → changed projects → changed projects with files; Changes: confirm complete Discard for selected files or discard the active file/hunk/line |
+| `t` | Workspace: toggle List / Tree layout for the current scope; each scope remembers its own layout |
 | `m` | Open the bordered multiline commit editor from Changes; typing and multiline paste insert at the cursor |
 | `Ctrl-A` / `Ctrl-U` / `Ctrl-G` | Toggle amend / sign-off / signing in Changes commit dialog |
 | `o` | Open Repository management from Workspace, Graph, or Changes |
@@ -85,7 +103,7 @@ Implemented:
 - Repo and single-Git workspace discovery
 - Concurrent porcelain v2 status scanning
 - staged, unstaged, untracked, conflict, HEAD, ahead/behind summary, and file-level porcelain status captured from the same scan
-- searchable responsive Workspace page where `d` cycles all projects, changed projects, and changed projects expanded with their file trees; repository selection remains bound to stable project identity
+- searchable responsive Workspace page where `d` cycles all projects, changed projects, and changed projects with files while `t` independently switches each scope between List and Tree; the first two scopes can render repository path trees, the third can render a change tree or flat full-path file list, and repository selection remains bound to stable project identity
 - complete all-refs commit graph covering local branches, remote branches, tags, HEAD, and every stash entry, ordered with pure topological order and showing UTC calendar dates
 - compact pipe-based topology lanes with left-shifting continuations, solid split/merge connectors, explicit `~N` hidden-lane markers, and `◉` missing-parent boundaries
 - responsive Graph columns preserve topology, wrapped subject text, and important refs first; rows use their real visual height, commit body keeps original line breaks, and dense remote/tag badges fold into `R:+N`/`T:+N` while Inspector/object menus retain every ref

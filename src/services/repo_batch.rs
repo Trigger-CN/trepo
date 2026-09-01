@@ -421,8 +421,7 @@ async fn run_command(
                     let _ = status.context("failed to wait for interrupted repo")?;
                 }
                 Err(_) => {
-                    terminate_group(pid);
-                    let _ = child.wait().await;
+                    terminate_process(&mut child, pid).await;
                 }
             }
             ProcessOutcome::Cancelled
@@ -520,19 +519,23 @@ fn interrupt_group(pid: u32) {
 }
 
 #[cfg(unix)]
-fn terminate_group(pid: Option<u32>) {
+async fn terminate_process(child: &mut tokio::process::Child, pid: Option<u32>) {
     if let Some(pid) = pid {
         unsafe {
             libc::kill(-(pid as libc::pid_t), libc::SIGKILL);
         }
     }
+    let _ = child.wait().await;
+}
+
+#[cfg(not(unix))]
+async fn terminate_process(child: &mut tokio::process::Child, _pid: Option<u32>) {
+    let _ = child.kill().await;
+    let _ = child.wait().await;
 }
 
 #[cfg(not(unix))]
 fn interrupt_group(_pid: u32) {}
-
-#[cfg(not(unix))]
-fn terminate_group(_pid: Option<u32>) {}
 
 fn send(sender: &mpsc::UnboundedSender<RepoBatchEvent>, generation: u64, kind: RepoBatchEventKind) {
     let _ = sender.send(RepoBatchEvent { generation, kind });
@@ -615,7 +618,7 @@ pub(crate) fn workspace_lock(path: PathBuf) -> Arc<Mutex<()>> {
         .clone()
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use std::fs;
     use std::os::unix::fs::PermissionsExt;

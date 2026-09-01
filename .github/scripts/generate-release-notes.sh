@@ -14,26 +14,29 @@ previous_tag="$(git tag --merged "${tag}^{}" --list 'v*' --sort=-version:refname
 cat > "${output_file}" <<EOF
 ## 安装与使用
 
-1. 在下方 **Assets** 下载与系统匹配的压缩包：
-   - Linux x86_64: \`trepo-${tag}-linux-x86_64.tar.gz\`
-   - macOS Intel: \`trepo-${tag}-macos-x86_64.tar.gz\`
-   - macOS Apple Silicon: \`trepo-${tag}-macos-aarch64.tar.gz\`
-2. 解压并安装：
+Linux x86_64 一键安装：
 
 \`\`\`bash
-tar -xzf trepo-${tag}-<platform>.tar.gz
-install -m 0755 trepo-${tag}-<platform>/trepo ~/.local/bin/trepo
+curl --proto '=https' --tlsv1.2 -LsSf ${repository_url}/raw/${tag}/install.sh | sh
 \`\`\`
 
-3. 启动或诊断工作区：
+Windows x86_64 PowerShell 一键安装：
+
+\`\`\`powershell
+irm ${repository_url}/raw/${tag}/install.ps1 | iex
+\`\`\`
+
+下方 **Assets** 同时提供 Linux x86_64、macOS Intel、macOS Apple Silicon 的 \`.tar.gz\` 和 Windows x86_64 的 \`.zip\`。安装脚本和 \`trepo update\` 都会使用 \`SHA256SUMS\` 校验版本化产物。
 
 \`\`\`bash
 trepo /path/to/git-or-repo-workspace
 trepo -zh /path/to/git-or-repo-workspace
 trepo doctor /path/to/git-or-repo-workspace
+trepo update --check
+trepo update
 \`\`\`
 
-运行 Repo 工作区模式需要安装 Google/Android \`repo\`；所有模式都需要 Git。可用 \`SHA256SUMS\` 校验下载产物。
+运行 Repo 工作区模式需要安装 Google/Android \`repo\`；所有模式都需要 Git。Windows 原生发布支持 Git 仓库模式，Repo 模式取决于外部 \`repo\` 工具是否可用。
 
 ## 提交改动
 
