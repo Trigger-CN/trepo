@@ -2,7 +2,7 @@
 
 - 文档状态：Draft
 - 产品名称：`trepo`
-- 目标平台：Linux、macOS；Windows/WSL 后续评估
+- 目标平台：Linux、macOS、Windows；Windows 原生承诺 Git 模式，Repo 模式取决于外部 `repo` 工具
 - 主要技术栈：Rust、Ratatui、Crossterm、Tokio
 
 ## 1. 背景与术语
@@ -91,7 +91,7 @@ Git 与 Repo 的参数面很大，而且会随版本、插件和服务端扩展�
 | Settings | 显示、快捷键、扫描并发、默认命令参数、确认策略和日志设置 |
 | Help | 当前上下文可用快捷键、版本和诊断信息 |
 
-- Workspace 的 `d` 使用显式三态：全部仓库、仅改动仓库、改动仓库及文件树。后两态共享 dirty 过滤，文件树只是仓库行的视觉展开，选择和操作仍绑定稳定 `ProjectId`。
+- Workspace 的过滤范围与展示布局正交：`d` 在全部仓库、仅改动仓库、改动仓库及文件三种范围间循环，`t` 在当前范围切换 List/Tree。三个范围分别记忆布局，默认依次为 List、List、Tree；前两种范围的 Tree 按仓库相对路径分层，第三种范围的 Tree/List 分别展示文件目录树和完整路径列表。仓库目录行与文件行只是视觉节点，选择和操作始终绑定稳定 `ProjectId`。
 - 所有外部文本经过共享显示安全层：控制字符可视化、按终端列宽截断或换行、双宽字符不从中间切开；diff 源行不使用自动换行。
 
 ### 4.2 导航模型
@@ -140,9 +140,9 @@ Git 与 Repo 的参数面很大，而且会随版本、插件和服务端扩展�
 
 状态不能压缩成一个含糊的 dirty 布尔值。领域模型至少保留 staged、unstaged、untracked、conflicted 的数量以及 merge/rebase/cherry-pick/bisect 等进行中状态。
 
-颜色与符号同时传递信息，确保无颜色终端和色觉差异用户仍能判断状态。主题支持 16 色、256 色和 true color 降级。Workspace、Graph、Changes 与 Repository 的数据行统一使用黑色前景、亮青色背景和粗体作为选中态；选中行内的 metadata、拓扑和 diff Span 不得重新覆盖为低对比前景，ref 徽标可保留完整的成对前景/背景。选中 diff 行即使暂时收敛红绿前景，也必须保留 `+`、`-`、`@@` 等字符语义。
+颜色与符号同时传递信息，确保无颜色终端和色觉差异用户仍能判断状态。主题支持 16 色、256 色和 true color 降级。Workspace、Graph、Changes 与 Repository 的数据行统一使用暗蓝灰色 `#262e3a` 背景和粗体作为选中态，不覆盖文本原有前景色；metadata、拓扑、状态和 diff Span 因此保留各自语义色，ref 徽标可保留完整的成对前景/背景。`+`、`-`、`@@` 等字符语义仍是无颜色环境下的权威信息。
 
-当前 Workspace 已实现一个轻量快捷过滤：在 Workspace 按 `d` 仅保留 `WorktreeSummary::is_dirty()` 的项目（staged、unstaged、untracked 或 conflicted）；它与 `/` 文本搜索按 AND 组合。切换过滤和扫描增量到达时，UI 先按稳定 `ProjectId` 恢复当前选择，只有该项目不可见时才退回首个可见项目。
+当前 Workspace 使用 `d` 切换三种数据范围；后两种范围共享 `WorktreeSummary::is_dirty()` 过滤（staged、unstaged、untracked 或 conflicted）。`t` 只切换当前范围的 List/Tree 投影，并由 `WorkspaceLayout[3]` 独立记忆。它们与 `/` 文本搜索按 AND 组合。切换范围、切换布局和扫描增量到达时，UI 先按稳定 `ProjectId` 恢复当前选择，只有该项目不可见时才退回首个可见项目；目录视觉行从不进入选择索引。
 
 ### 5.3 搜索、过滤与排序
 
@@ -249,7 +249,7 @@ Workspace 仓库列表可先按稳定 `ProjectId` 多选，再直接执行整仓
 
 Changes 页面分为文件树、hunk 列表、diff 检查器和提交对话框：
 
-- Workspace Inspector 与 Changes 使用同一目录树投影，以 `├─`、`└─`、`│` 展示 staged、unstaged、untracked 和 conflicted 文件的路径层级；目录行只负责显示，文件操作始终绑定原始 `PathBuf`。Changes 的 `XY` 与文件名使用固定状态色增强区分：仅 staged 为亮绿、仅 unstaged 为亮红、两者并存为亮紫、untracked 为黄、conflict 为加粗亮红；`XY` 字符仍是无颜色环境下的权威语义，光标行统一使用黑字亮青背景覆盖状态色。
+- Workspace Inspector 与 Changes 使用同一目录树投影，以 `├─`、`└─`、`│` 展示 staged、unstaged、untracked 和 conflicted 文件的路径层级；目录行只负责显示，文件操作始终绑定原始 `PathBuf`。Changes 的 `XY` 与文件名使用固定状态色增强区分：仅 staged 为亮绿、仅 unstaged 为亮红、两者并存为亮紫、untracked 为黄、conflict 为加粗亮红；`XY` 字符仍是无颜色环境下的权威语义，光标行使用暗蓝灰色 `#262e3a` 背景并保留状态前景色。
 - Changes 文件模式用 `Space` 切换当前文件、`A` 全选/清空。存在文件选择时，Stage/Unstage、`z` Stash 和 `d` Discard 作用于该稳定路径集合；无文件选择时 Stage/Unstage/Discard 继续作用于当前 file/hunk/line，Stash 要求先选择文件。中文界面固定使用“暂存/取消暂存”表示 index Stage/Unstage，使用“储藏”表示 Stash。
 - 批量 Stage/Unstage 在同一 workspace/project lock 内重新读取所有条目，先验证全部文件的适用性与 diff token，再开始逐项写入；任一 token 陈旧时不写任何目标。
 - 批量 Stash/Discard 在显示确认框前异步冻结全部路径和内容 token；确认框列出动作、文件数、`XY` 状态和路径。确认后 Runner 在同一锁内复验冻结范围。Stash 固定包含 selected tracked/untracked 路径；Discard 恢复 tracked index/worktree、删除 staged-added/untracked，并正确处理 rename 的原路径与新路径，未选择路径不受影响。
@@ -676,7 +676,7 @@ struct WorktreeSummary {
 
 兼容策略：
 
-- Linux、macOS 为首发平台；Repo 在原生 Windows 上的可用性和 PTY 差异使其不进入首版承诺，WSL 可按 Linux 路径测试。
+- Linux、macOS、Windows 发布原生二进制；Windows Git 模式进入发布矩阵，Repo 模式仍通过能力探测决定，WSL 按 Linux 路径运行。
 - 支持当前仍受上游维护的 Git 版本范围；最低版本根据 porcelain v2 等依赖确定并在构建时写入文档。
 - Repo 使用能力探测而非只比较版本字符串。
 - 终端最小建议 80x24；过小时显示明确占位提示，但保持退出/帮助可用。
@@ -770,10 +770,11 @@ Repo 集成测试使用小型本地 manifest 和本地 bare remotes，避免依�
 
 ### Phase 5：发布质量
 
-- 已实现 `v<semver>` tag 驱动的 GitHub Release 基础链路：tag 必须匹配 Cargo 版本，Linux x86_64、macOS Intel 与 macOS Apple Silicon 独立构建归档并生成 `SHA256SUMS`。
-- Release 正文由受版本控制脚本生成，固定包含下载/安装/启动指导、上一可达 `v*` tag 的 compare 链接和非 merge 提交列表；首发则列出截至当前 tag 的提交。
-- 后续补充安装包、shell completion、man page、升级与配置迁移。
-- 后续补充大规模 benchmark、fuzz、更多终端/平台测试，以及隐私与安全审查。
+- `v<semver>` tag 必须匹配 Cargo 版本；Linux x86_64、macOS Intel/Apple Silicon 生成 `.tar.gz`，Windows x86_64 MSVC 生成 `.zip`，所有资产进入 `SHA256SUMS`。
+- `install.sh` 与 `install.ps1` 从 latest Release 的 `SHA256SUMS` 精确选择当前平台版本化资产，下载后校验 SHA-256，再安装到用户目录。
+- `trepo update` 在 TUI 初始化前查询结构化 GitHub Release API，以 semver 比较版本，限制下载大小，只提取归档中预期二进制；校验通过后交给 `self-replace` 原子/延迟替换。Windows 会先移走运行中 exe，由临时辅助 exe 等待父进程退出后清理旧文件。
+- Release 正文固定包含单命令安装、启动、自更新、上一可达 `v*` tag compare 链接和非 merge 提交列表；首发则列出截至当前 tag 的提交。
+- 后续补充安装包、shell completion、man page和配置迁移；同时补充大规模 benchmark、fuzz、更多终端/平台测试，以及隐私与安全审查。
 
 ## 16. MVP 验收清单
 

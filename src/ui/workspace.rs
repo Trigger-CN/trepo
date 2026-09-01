@@ -1,3 +1,7 @@
+use std::collections::BTreeMap;
+use std::ffi::OsString;
+use std::path::Component;
+
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -5,7 +9,7 @@ use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, Wrap}
 use ratatui::Frame;
 
 use super::change_tree::{change_tree_rows, ChangeTreeRow};
-use crate::app::state::{App, WorkspaceView};
+use crate::app::state::{App, WorkspaceLayout, WorkspaceView};
 use crate::domain::{HeadState, RepoProjectState, ScanState, WorkspaceGitAction, WorkspaceKind};
 
 pub fn render(frame: &mut Frame, app: &App) {
@@ -113,23 +117,42 @@ fn render_header(frame: &mut Frame, app: &App, area: Rect) {
     );
 }
 
+fn workspace_view_suffix(app: &App) -> &'static str {
+    match (app.language.is_zh(), app.workspace_view) {
+        (_, WorkspaceView::All) => "",
+        (false, WorkspaceView::Changed) => " changed only",
+        (false, WorkspaceView::ChangedWithFiles) => " changed + files",
+        (true, WorkspaceView::Changed) => " 仅改动",
+        (true, WorkspaceView::ChangedWithFiles) => " 改动与文件",
+    }
+}
+
+fn workspace_layout_label(app: &App) -> &'static str {
+    match (app.language.is_zh(), app.workspace_layout()) {
+        (false, WorkspaceLayout::List) => "List",
+        (false, WorkspaceLayout::Tree) => "Tree",
+        (true, WorkspaceLayout::List) => "列表",
+        (true, WorkspaceLayout::Tree) => "树形",
+    }
+}
+
 fn render_table(frame: &mut Frame, app: &App, area: Rect) {
     let indices = app.filtered_indices();
     let row_budget = area.height.saturating_sub(3) as usize;
     let project_width = area.width.saturating_sub(49).max(20) as usize;
-    let row_heights = indices
+    let display_rows = workspace_display_rows(app, &indices, row_budget);
+    let selected_row = display_rows
         .iter()
-        .map(|project_index| {
-            app.projects.get(*project_index).map_or(1, |snapshot| {
-                workspace_row_height(snapshot, app.workspace_view, row_budget)
-            })
-        })
+        .position(|row| row.visible_index() == Some(app.selected))
+        .unwrap_or(0);
+    let row_heights = display_rows
+        .iter()
+        .map(WorkspaceDisplayRow::height)
         .collect::<Vec<_>>();
-    let start = variable_viewport_start(app.selected, row_budget, &row_heights);
+    let start = variable_viewport_start(selected_row, row_budget, &row_heights);
     let mut used_rows = 0;
-    let rows = indices
+    let rows = display_rows
         .iter()
-        .enumerate()
         .zip(row_heights.iter().copied())
         .skip(start)
         .take_while(|(_, height)| {
@@ -139,20 +162,35 @@ fn render_table(frame: &mut Frame, app: &App, area: Rect) {
             }
             fits
         })
-        .filter_map(|((visible_index, project_index), row_height)| {
-            let snapshot = app.projects.get(*project_index)?;
-            let selected = visible_index == app.selected;
-            let style = row_style(snapshot, selected);
-            let upstream = snapshot.upstream.as_ref().map_or_else(
-                || "-".to_owned(),
-                |value| format!("+{} -{}", value.ahead, value.behind),
-            );
-            let status = match &snapshot.scan {
-                ScanState::Pending => app.language.text("scanning", "扫描中").to_owned(),
-                ScanState::Error(_) => app.language.text("error", "错误").to_owned(),
-                ScanState::Ready => snapshot.worktree.status_label(),
-            };
-            Some(
+        .map(|(display_row, row_height)| match display_row {
+            WorkspaceDisplayRow::Directory(label) => Row::new(vec![
+                Cell::from(" "),
+                Cell::from(" "),
+                Cell::from(Line::styled(
+                    super::text::truncate(label, project_width),
+                    Color::DarkGray,
+                )),
+                Cell::from(" "),
+                Cell::from(" "),
+            ]),
+            WorkspaceDisplayRow::Project {
+                visible_index,
+                project_index,
+                label,
+                ..
+            } => {
+                let snapshot = &app.projects[*project_index];
+                let selected = *visible_index == app.selected;
+                let style = row_style(snapshot, selected);
+                let upstream = snapshot.upstream.as_ref().map_or_else(
+                    || "-".to_owned(),
+                    |value| format!("+{} -{}", value.ahead, value.behind),
+                );
+                let status = match &snapshot.scan {
+                    ScanState::Pending => app.language.text("scanning", "扫描中").to_owned(),
+                    ScanState::Error(_) => app.language.text("error", "错误").to_owned(),
+                    ScanState::Ready => snapshot.worktree.status_label(),
+                };
                 Row::new(vec![
                     Cell::from(format!(
                         "{}{}",
@@ -167,6 +205,8 @@ fn render_table(frame: &mut Frame, app: &App, area: Rect) {
                     Cell::from(workspace_project_lines(
                         snapshot,
                         app.workspace_view,
+                        app.workspace_layout(),
+                        label,
                         project_width,
                         row_budget,
                     )),
@@ -174,8 +214,8 @@ fn render_table(frame: &mut Frame, app: &App, area: Rect) {
                     Cell::from(upstream),
                 ])
                 .height(u16::try_from(row_height).unwrap_or(u16::MAX))
-                .style(style),
-            )
+                .style(style)
+            }
         });
 
     let widths = [
@@ -204,17 +244,12 @@ fn render_table(frame: &mut Frame, app: &App, area: Rect) {
         .block(
             Block::default()
                 .title(format!(
-                    " {} ({}/{}){} ",
+                    " {} ({}/{}){} [{}] ",
                     app.language.text("Projects", "仓库"),
                     indices.len(),
                     app.projects.len(),
-                    match (app.language.is_zh(), app.workspace_view) {
-                        (_, WorkspaceView::All) => "",
-                        (false, WorkspaceView::Changed) => " changed only",
-                        (false, WorkspaceView::ChangedWithFiles) => " changed + files",
-                        (true, WorkspaceView::Changed) => " 仅改动",
-                        (true, WorkspaceView::ChangedWithFiles) => " 改动与文件",
-                    }
+                    workspace_view_suffix(app),
+                    workspace_layout_label(app),
                 ))
                 .borders(Borders::ALL),
         );
@@ -344,8 +379,8 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
         app.language.text("Ready", "就绪").to_owned()
     };
     let keys = app.language.text(
-        "   Space Select   S Stage   Z Stash   D Discard   d View cycle   a Repo actions   / Search",
-        "   Space 选择   S 暂存   Z 储藏   D 丢弃   d 视图循环   a Repo 操作   / 搜索",
+        "   Space Select  S Stage  Z Stash  D Discard  d Scope  t List/Tree  a Repo actions  / Search",
+        "   Space 选择  S 暂存  Z 储藏  D 丢弃  d 范围  t 列表/树形  a Repo 操作  / 搜索",
     );
     frame.render_widget(
         Paragraph::new(Line::from(vec![
@@ -549,12 +584,15 @@ fn render_repo_batch_overlay(frame: &mut Frame, app: &App) {
             .iter()
             .enumerate()
             .map(|(index, action)| {
-                let style = if index == app.repo_batch.action_selected {
-                    Style::default().fg(Color::Black).bg(Color::Cyan)
-                } else if action.is_destructive() {
+                let base = if action.is_destructive() {
                     Style::default().fg(Color::LightRed)
                 } else {
                     Style::default()
+                };
+                let style = if index == app.repo_batch.action_selected {
+                    base.patch(super::selection_style())
+                } else {
+                    base
                 };
                 Line::styled(format!(" {}", app.language.action(action.label())), style)
             })
@@ -841,23 +879,13 @@ fn change_tree_line(
                 &format!("{}  {}", change.status_label(), row.display()),
                 width,
             );
-            let color = if change.conflicted {
-                Color::LightRed
-            } else if change.untracked {
-                Color::Yellow
-            } else {
-                Color::Cyan
-            };
-            Line::styled(text, color)
+            Line::styled(text, change_line_color(change))
         }
     }
 }
 
 fn row_style(snapshot: &crate::domain::ProjectSnapshot, selected: bool) -> Style {
-    if selected {
-        return super::selection_style();
-    }
-    if matches!(snapshot.scan, ScanState::Error(_)) {
+    let style = if matches!(snapshot.scan, ScanState::Error(_)) {
         Style::default().fg(Color::Red)
     } else if snapshot.worktree.conflicted > 0 {
         Style::default().fg(Color::LightRed)
@@ -865,6 +893,11 @@ fn row_style(snapshot: &crate::domain::ProjectSnapshot, selected: bool) -> Style
         Style::default().fg(Color::Yellow)
     } else {
         Style::default()
+    };
+    if selected {
+        style.patch(super::selection_style())
+    } else {
+        style
     }
 }
 
@@ -877,54 +910,218 @@ fn head_label(head: &HeadState) -> String {
     }
 }
 
+#[derive(Debug)]
+enum WorkspaceDisplayRow {
+    Directory(String),
+    Project {
+        visible_index: usize,
+        project_index: usize,
+        label: String,
+        row_height: usize,
+    },
+}
+
+impl WorkspaceDisplayRow {
+    fn visible_index(&self) -> Option<usize> {
+        match self {
+            Self::Directory(_) => None,
+            Self::Project { visible_index, .. } => Some(*visible_index),
+        }
+    }
+
+    fn height(&self) -> usize {
+        match self {
+            Self::Directory(_) => 1,
+            Self::Project { row_height, .. } => *row_height,
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct ProjectTreeNode {
+    children: BTreeMap<OsString, ProjectTreeNode>,
+    project: Option<(usize, usize)>,
+}
+
+fn workspace_display_rows(
+    app: &App,
+    indices: &[usize],
+    row_budget: usize,
+) -> Vec<WorkspaceDisplayRow> {
+    if app.workspace_layout() == WorkspaceLayout::Tree && !app.workspace_view.expands_files() {
+        return project_tree_rows(app, indices);
+    }
+    indices
+        .iter()
+        .enumerate()
+        .map(|(visible_index, project_index)| {
+            let snapshot = &app.projects[*project_index];
+            WorkspaceDisplayRow::Project {
+                visible_index,
+                project_index: *project_index,
+                label: snapshot
+                    .project
+                    .relative_path
+                    .to_string_lossy()
+                    .into_owned(),
+                row_height: workspace_row_height(
+                    snapshot,
+                    app.workspace_view,
+                    app.workspace_layout(),
+                    row_budget,
+                ),
+            }
+        })
+        .collect()
+}
+
+fn project_tree_rows(app: &App, indices: &[usize]) -> Vec<WorkspaceDisplayRow> {
+    let mut root = ProjectTreeNode::default();
+    for (visible_index, project_index) in indices.iter().copied().enumerate() {
+        let snapshot = &app.projects[project_index];
+        let mut components = snapshot
+            .project
+            .relative_path
+            .components()
+            .filter_map(|component| match component {
+                Component::Normal(name) => Some(name.to_os_string()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if components.is_empty() {
+            components.push(OsString::from("."));
+        }
+        let mut node = &mut root;
+        for component in components {
+            node = node.children.entry(component).or_default();
+        }
+        node.project = Some((visible_index, project_index));
+    }
+    let mut rows = Vec::new();
+    flatten_project_tree(&root, &mut Vec::new(), &mut rows);
+    rows
+}
+
+fn flatten_project_tree(
+    node: &ProjectTreeNode,
+    ancestors_last: &mut Vec<bool>,
+    rows: &mut Vec<WorkspaceDisplayRow>,
+) {
+    let child_count = node.children.len();
+    for (position, (name, child)) in node.children.iter().enumerate() {
+        let is_last = position + 1 == child_count;
+        let prefix = project_tree_prefix(ancestors_last, is_last);
+        let name = name.to_string_lossy();
+        if let Some((visible_index, project_index)) = child.project {
+            rows.push(WorkspaceDisplayRow::Project {
+                visible_index,
+                project_index,
+                label: format!("{prefix}{name}"),
+                row_height: 1,
+            });
+        } else {
+            rows.push(WorkspaceDisplayRow::Directory(format!("{prefix}{name}/")));
+        }
+        if !child.children.is_empty() {
+            ancestors_last.push(is_last);
+            flatten_project_tree(child, ancestors_last, rows);
+            ancestors_last.pop();
+        }
+    }
+}
+
+fn project_tree_prefix(ancestors_last: &[bool], is_last: bool) -> String {
+    let mut prefix = ancestors_last
+        .iter()
+        .map(|ancestor_last| if *ancestor_last { "  " } else { "│ " })
+        .collect::<String>();
+    prefix.push_str(if is_last { "└─" } else { "├─" });
+    prefix
+}
+
 fn workspace_row_height(
     snapshot: &crate::domain::ProjectSnapshot,
     view: WorkspaceView,
+    layout: WorkspaceLayout,
     row_budget: usize,
 ) -> usize {
     if !view.expands_files() || snapshot.changes.is_empty() {
         return 1;
     }
-    let tree_rows = change_tree_rows(&snapshot.changes);
-    let tree_budget = row_budget.saturating_sub(1).min(6);
-    1 + tree_rows.len().min(tree_budget)
+    let change_rows = match layout {
+        WorkspaceLayout::List => snapshot.changes.len(),
+        WorkspaceLayout::Tree => change_tree_rows(&snapshot.changes).len(),
+    };
+    let change_budget = row_budget.saturating_sub(1).min(6);
+    1 + change_rows.min(change_budget)
 }
 
 fn workspace_project_lines(
     snapshot: &crate::domain::ProjectSnapshot,
     view: WorkspaceView,
+    layout: WorkspaceLayout,
+    label: &str,
     width: usize,
     row_budget: usize,
 ) -> Vec<Line<'static>> {
-    let mut lines = vec![Line::raw(super::text::truncate(
-        &snapshot.project.relative_path.to_string_lossy(),
-        width,
-    ))];
+    let mut lines = vec![Line::raw(super::text::truncate(label, width))];
     if !view.expands_files() || snapshot.changes.is_empty() {
         return lines;
     }
 
-    let tree_rows = change_tree_rows(&snapshot.changes);
-    let tree_budget = row_budget.saturating_sub(1).min(6);
-    let visible_tree_rows = if tree_rows.len() > tree_budget {
-        tree_budget.saturating_sub(1)
-    } else {
-        tree_budget
-    };
-    lines.extend(
-        tree_rows
+    let change_lines = match layout {
+        WorkspaceLayout::Tree => change_tree_rows(&snapshot.changes)
             .iter()
-            .take(visible_tree_rows)
-            .map(|row| change_tree_line(row, &snapshot.changes, width)),
-    );
-    let remaining = tree_rows.len().saturating_sub(visible_tree_rows);
-    if remaining > 0 && tree_budget > 0 {
+            .map(|row| change_tree_line(row, &snapshot.changes, width))
+            .collect::<Vec<_>>(),
+        WorkspaceLayout::List => snapshot
+            .changes
+            .iter()
+            .map(|change| flat_change_line(change, width))
+            .collect::<Vec<_>>(),
+    };
+    let change_budget = row_budget.saturating_sub(1).min(6);
+    let visible_rows = if change_lines.len() > change_budget {
+        change_budget.saturating_sub(1)
+    } else {
+        change_budget
+    };
+    lines.extend(change_lines.into_iter().take(visible_rows));
+    let remaining = match layout {
+        WorkspaceLayout::List => snapshot.changes.len(),
+        WorkspaceLayout::Tree => change_tree_rows(&snapshot.changes).len(),
+    }
+    .saturating_sub(visible_rows);
+    if remaining > 0 && change_budget > 0 {
+        let kind = match layout {
+            WorkspaceLayout::List => "files",
+            WorkspaceLayout::Tree => "tree rows",
+        };
         lines.push(Line::styled(
-            super::text::truncate(&format!("... {remaining} more tree rows"), width),
+            super::text::truncate(&format!("... {remaining} more {kind}"), width),
             Color::DarkGray,
         ));
     }
     lines
+}
+
+fn flat_change_line(change: &crate::domain::ChangeEntry, width: usize) -> Line<'static> {
+    let path = change.original_path.as_ref().map_or_else(
+        || change.path.display().to_string(),
+        |original| format!("{} -> {}", original.display(), change.path.display()),
+    );
+    let text = super::text::truncate(&format!("{}  {path}", change.status_label()), width);
+    Line::styled(text, change_line_color(change))
+}
+
+fn change_line_color(change: &crate::domain::ChangeEntry) -> Color {
+    if change.conflicted {
+        Color::LightRed
+    } else if change.untracked {
+        Color::Yellow
+    } else {
+        Color::Cyan
+    }
 }
 
 fn variable_viewport_start(selected: usize, budget: usize, heights: &[usize]) -> usize {
@@ -943,6 +1140,8 @@ fn variable_viewport_start(selected: usize, budget: usize, heights: &[usize]) ->
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use super::*;
 
     #[test]
@@ -993,7 +1192,92 @@ mod tests {
                 generation: 0,
             };
             assert_eq!(row_style(&snapshot, false).fg, Some(normal_fg));
-            assert_eq!(row_style(&snapshot, true), super::super::selection_style());
+            let selected = row_style(&snapshot, true);
+            assert_eq!(selected.fg, Some(normal_fg));
+            assert_eq!(selected.bg, super::super::selection_style().bg);
         }
+    }
+
+    #[test]
+    fn project_tree_rows_keep_directories_visual_and_projects_selectable() {
+        let nested = |relative_path: &str| crate::domain::Project {
+            id: crate::domain::ProjectId(PathBuf::from(format!("/tmp/{relative_path}"))),
+            name: relative_path.into(),
+            path: PathBuf::from(format!("/tmp/{relative_path}")),
+            relative_path: PathBuf::from(relative_path),
+        };
+        let workspace = crate::domain::Workspace {
+            root: PathBuf::from("/tmp"),
+            kind: WorkspaceKind::Repo,
+            projects: vec![
+                nested("platform/app"),
+                nested("platform/lib"),
+                nested("tools"),
+            ],
+        };
+        let mut app = App::new(workspace, 1);
+        app.toggle_workspace_layout();
+        let indices = app.filtered_indices();
+        let rows = project_tree_rows(&app, &indices);
+
+        assert!(
+            matches!(&rows[0], WorkspaceDisplayRow::Directory(label) if label == "├─platform/")
+        );
+        assert_eq!(rows[0].visible_index(), None);
+        assert!(matches!(
+            &rows[1],
+            WorkspaceDisplayRow::Project { visible_index: 0, label, .. }
+                if label == "│ ├─app"
+        ));
+        assert!(matches!(
+            &rows[2],
+            WorkspaceDisplayRow::Project { visible_index: 1, label, .. }
+                if label == "│ └─lib"
+        ));
+        assert!(matches!(
+            &rows[3],
+            WorkspaceDisplayRow::Project { visible_index: 2, label, .. }
+                if label == "└─tools"
+        ));
+    }
+
+    #[test]
+    fn project_tree_uses_dot_as_the_single_git_repository_leaf() {
+        let project = crate::domain::Project {
+            id: crate::domain::ProjectId(PathBuf::from("/tmp/demo")),
+            name: "demo".into(),
+            path: PathBuf::from("/tmp/demo"),
+            relative_path: PathBuf::new(),
+        };
+        let workspace = crate::domain::Workspace {
+            root: PathBuf::from("/tmp/demo"),
+            kind: WorkspaceKind::Git,
+            projects: vec![project],
+        };
+        let app = App::new(workspace, 1);
+        let rows = project_tree_rows(&app, &[0]);
+
+        assert!(matches!(
+            &rows[0],
+            WorkspaceDisplayRow::Project { visible_index: 0, project_index: 0, label, .. }
+                if label == "└─."
+        ));
+    }
+
+    #[test]
+    fn flat_change_lines_show_rename_source_and_destination() {
+        let change = crate::domain::ChangeEntry {
+            path: PathBuf::from("src/new.rs"),
+            original_path: Some(PathBuf::from("src/old.rs")),
+            index: Some(crate::domain::ChangeCode::Renamed),
+            worktree: None,
+            untracked: false,
+            conflicted: false,
+        };
+
+        assert_eq!(
+            flat_change_line(&change, 80).to_string(),
+            "R.  src/old.rs -> src/new.rs"
+        );
     }
 }

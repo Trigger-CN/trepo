@@ -2,8 +2,8 @@
 
 - 文档状态：Active
 - 设计依据：[DESIGN.md](./DESIGN.md)
-- 当前版本目标：`0.3.0` M2 + M3
-- 状态更新时间：2026-08-25
+- 当前版本目标：`0.4.0` M4 + 跨平台发布/更新
+- 状态更新时间：2026-08-31
 
 ## 1. 路线图原则
 
@@ -52,13 +52,14 @@ M1 是所有后续里程碑的共同数据与交互基础。M4 可以在 M2 后�
 
 - 从任意子目录识别 Repo 工作区或单 Git 仓库，并并发扫描状态。
 - Workspace、完整 all-refs Graph、Changes 和 Repository 管理页面均已可用。
-- Workspace 支持稳定 ProjectId 多选、命名搜索，以及 `d` 在全部、仅改动、改动仓库与文件树三态间循环；宽屏 Inspector 和 `S`/`Z`/`D` 冻结仓库 Stage/Stash/Discard 保持可用。
+- Workspace 支持稳定 ProjectId 多选、命名搜索；`d` 独立切换全部、仅改动、改动仓库及文件三种范围，`t` 独立切换每种范围的列表/树形布局并分别记忆。宽屏 Inspector 和 `S`/`Z`/`D` 冻结仓库 Stage/Stash/Discard 保持可用。
 - Graph 支持 commit/HEAD/local branch/remote branch/tag/stash 两级上下文操作及 typed form；Subject 按显示列宽多行渲染，Inspector 保留 body 原始换行，本地分支直接提供普通 Push 与 Force push with lease。
 - Changes 支持文件多选批量 Stage/Unstage、selected-path Stash 和完整 Discard；文件/hunk/changed-line、commit/stash/conflict、refs/integration 和 remotes 写操作受锁、token 和 generation 保护。
 - Repo `sync/start/checkout/abandon/prune/rebase/upload/download` 和 pinned manifest export 具有 workspace lock、逐项目结果、流式日志、取消后复扫与失败重试。
 - Graph、Changes、Workspace Git 与 Repo overlay、confirmation 和结果状态均覆盖 80x24 与 120x40 TestBackend 渲染；四个主页面的数据行选中态另有 cell 前景、背景和粗体断言。
-- UI 默认英文，`-zh`/`--zh` 与 `-en`/`--en` 以实例级语言状态覆盖主要页面；长路径、diff 和外部文本按终端列宽安全处理，控制字符不能污染终端布局。选中行使用高对比黑字亮青背景，状态仍由字符或符号共同表达。
-- GitHub Actions 已支持 `v<semver>` tag 自动校验 Cargo 版本，构建 Linux x86_64、macOS Intel/Apple Silicon 归档与 `SHA256SUMS`，并发布含使用指导、compare 链接和提交列表的 Release。
+- UI 默认英文，`-zh`/`--zh` 与 `-en`/`--en` 以实例级语言状态覆盖主要页面；长路径、diff 和外部文本按终端列宽安全处理，控制字符不能污染终端布局。选中行使用暗蓝灰色 `#262e3a` 背景并保留原有文本前景色，状态仍由颜色和字符或符号共同表达。
+- GitHub Actions 已支持 `v<semver>` tag 自动校验 Cargo 版本，构建 Linux x86_64、macOS Intel/Apple Silicon 的 tar.gz 与 Windows x86_64 MSVC zip，生成 `SHA256SUMS`，并发布含一键安装、自更新、compare 链接和提交列表的 Release。
+- `install.sh`、`install.ps1` 和 `trepo update [--check]` 共用版本化资产与 SHA-256 信任链；Windows 更新由 self-replace 辅助进程处理运行中 exe。
 
 下一执行点是 M5 命令面板与终端接管；交互认证、外部 editor/mergetool 和任意受控命令不在 M4 后台任务中启动。
 
@@ -170,14 +171,15 @@ cargo run -- doctor .
 - 表格展示状态、project/path、HEAD、upstream 和错误。
 - Summary 展示总数、dirty、conflict、ahead、behind、error。
 - `j/k`、方向键、`g/G` 导航。
-- `/` 搜索 project/path/branch，`Esc` 清空搜索或退出；`d` 按“全部 → 仅改动 → 改动与文件树”循环，两个改动态与搜索按 AND 组合。
+- `/` 搜索 project/path/branch，`Esc` 清空搜索或退出；`d` 按“全部 → 仅改动 → 改动与文件”循环数据范围，两个改动范围与搜索按 AND 组合。
+- `t` 切换当前范围的 List/Tree，三个范围分别记忆布局；前两个范围的 Tree 展示仓库相对路径树，第三个范围的 Tree/List 展示文件目录树/完整路径列表。
 - `r` 刷新，`Enter` 打开选中仓库，`?` 显示帮助。
-- 展开态在主列表仓库行内显示同次 porcelain 扫描解析出的文件状态树，文件行不可独立选择；宽屏 Inspector 继续显示完整仓库详情。
+- 仓库树目录行和文件行不可独立选择；`j/k`、Enter、Space、Workspace Git 和 Repo 批量操作始终解析到稳定 `ProjectId`。宽屏 Inspector 继续显示完整仓库详情。
 
 验收：
 
-- selection 绑定 project identity，搜索、三态切换和扫描增量后不会索引越界或跳到错误项目。
-- 80x24 与 120x40 TestBackend 渲染不 panic；展开态可见仓库与文件状态树。
+- selection 绑定 project identity，搜索、范围/布局切换和扫描增量后不会索引越界或跳到错误项目。
+- 80x24 与 120x40 TestBackend 渲染不 panic；六种范围/布局组合均可见，仓库树目录行不可选择，改动文件可显示目录树或完整路径列表。
 - 扫描中、空列表和错误状态都有明确界面。
 
 ### M1.5 Commit graph 页面
@@ -356,9 +358,9 @@ cargo run -- doctor .
 
 - 1,000 project 和大型 commit history benchmark。
 - 可见行优先、缓存上限、任务日志 ring buffer、可选 watcher。
-- Linux/macOS、主流终端、16/256/true color、Unicode/ASCII 矩阵。
+- Linux/macOS/Windows、主流终端、16/256/true color、Unicode/ASCII 矩阵。
 - parser fuzz、PTY 信号测试和安全审查。
-- 安装包、man page、completion、配置迁移和发布文档。
+- 已交付单命令安装、SHA-256 自更新和发布文档；后续补充系统安装包、man page、completion 与配置迁移。
 
 1.0 门禁：
 
@@ -393,8 +395,8 @@ cargo run -- doctor .
 | M3 refs/integration | Done | branch/tag、merge/rebase/cherry-pick/revert 与 Graph 本地分支 Push/Force Push 矩阵通过 |
 | M3 remotes | Done | bare remote 普通 push、非快进拒绝、陈旧/当前 lease、fetch/pull/upstream/prune 与 remote 管理通过 |
 | M4 Repo/Workspace batch | Done | Repo batch 与 Workspace Git Stage/Stash/Discard 的 stable multi-select、全批预检、逐项结果和 80x24/120x40 通过 |
-| UI 文本/语言/配色 | Done | 默认英文、-zh/-en 与长参数、stash“储藏”/stage“暂存”术语、三态 Workspace、显示列宽/控制字符/重绘回归，以及四页面高对比选中态和双语言 80x24/120x40 通过 |
-| GitHub Release 基础链路 | Done | tag/Cargo 版本校验、三平台归档、SHA-256、首发/增量 release notes 脚本验证通过 |
+| UI 文本/语言/配色 | Done | 默认英文、-zh/-en、stash“储藏”/stage“暂存”术语、Workspace 三范围与独立 List/Tree、显示列宽/控制字符/重绘回归，以及四页面暗蓝灰选中态和双语言 80x24/120x40 通过 |
+| GitHub Release 与更新链路 | Done | tag/Cargo 校验、Linux/macOS tar.gz、Windows MSVC zip、SHA256SUMS、安装脚本、update 单测和双 Windows target check 通过 |
 | M5-M7 | Planned | 下一步从 M5 命令面板与终端接管开始 |
 
 M0-M4 最终验证（Rust 1.98、Git 2.43.0、Repo launcher 2.54）：

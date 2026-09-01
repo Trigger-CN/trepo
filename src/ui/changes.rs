@@ -144,15 +144,11 @@ fn render_files(frame: &mut Frame, app: &App, changes: &ChangesState, area: Rect
                 let selected = entry_index == changes.selected;
                 let checked = changes.selected_files.contains(&entry.path);
                 let row_style = if selected {
-                    super::selection_style()
+                    change_file_style(entry).patch(super::selection_style())
                 } else {
                     Style::default()
                 };
-                let file_style = if selected {
-                    Style::default()
-                } else {
-                    change_file_style(entry)
-                };
+                let file_style = change_file_style(entry);
                 Row::new(vec![
                     Cell::from(if selected { ">" } else { " " }),
                     Cell::from(if checked { "[x]" } else { "[ ]" }),
@@ -341,10 +337,7 @@ fn render_preview(frame: &mut Frame, app: &App, changes: &ChangesState, area: Re
             .as_ref()
             .is_some_and(|range| range.contains(&index));
         if selected {
-            style = super::selection_style();
-            if line.starts_with("@@") {
-                style = style.add_modifier(Modifier::BOLD);
-            }
+            style = style.patch(super::selection_style());
         }
         Line::styled(super::text::truncate(line, line_width), style)
     });

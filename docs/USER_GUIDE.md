@@ -10,6 +10,8 @@ cargo run -- -zh /path/to/repo-client    # 中文界面
 cargo run -- -en /path/to/git-repository # 显式英文
 cargo run -- --zh /path/to/repo-client   # 也支持标准长参数
 cargo run -- doctor /path/to/workspace
+cargo run -- update --check
+cargo run -- update
 ```
 
 `-zh`/`--zh` 选择中文，`-en`/`--en` 选择英文；未指定时默认英文，中文和英文参数不能同时使用。语言保存在当前 App 实例中，不影响其他并行实例或测试。
@@ -18,12 +20,12 @@ cargo run -- doctor /path/to/workspace
 
 最低终端尺寸：Workspace/Graph 为 60x12，Changes 为 60x14。推荐使用 120x40。
 
-发布版可从 GitHub Release 的 Assets 下载 Linux x86_64、macOS Intel 或 macOS Apple Silicon 压缩包。解压后将 `trepo` 安装到 `~/.local/bin`；Release 正文包含完整安装命令、常用启动方式、校验文件和本版本提交列表。
+发布版支持 Linux x86_64、macOS Intel/Apple Silicon 和 Windows x86_64。Linux 执行 `curl --proto '=https' --tlsv1.2 -LsSf https://github.com/Trigger-CN/trepo/raw/main/install.sh | sh`；Windows PowerShell 执行 `irm https://github.com/Trigger-CN/trepo/raw/main/install.ps1 | iex`。脚本按 `SHA256SUMS` 选择并校验版本化产物；后续使用 `trepo update --check` 检查、`trepo update` 安装最新版。Windows 原生支持 Git 模式，Repo 模式取决于外部 `repo` 工具。
 
 ## 2. 最快上手
 
 1. 在 Workspace 用 `j/k` 将光标移到仓库；无需先选择即可直接按 `S/Z/D` 操作该仓库，或用 `Space`/`A` 显式选择多个仓库进行批量操作。
-2. 按 `d` 可在“全部仓库 → 仅改动仓库 → 改动仓库及文件树”三种主页视图间循环。
+2. 按 `d` 在“全部仓库 → 仅改动仓库 → 改动仓库及文件”三种数据范围间循环；按 `t` 单独切换当前范围的列表/树形布局，三个范围会分别记忆布局。
 3. 按 `S` 暂存（Stage）、按 `Z` 储藏（Stash），或按 `D` 丢弃（Discard）最终目标仓库的全部改动；检查确认框中的冻结仓库和每仓库统计后按 `y` 确认。
 4. 按 `Enter` 查看完整提交图，按 `c` 查看和处理文件改动，按 `o` 管理储藏、分支、标签和远端。
 5. 在 Changes 用 `Space`/`A` 多选文件，按 `z/s/u/d` 执行储藏/暂存/取消暂存/丢弃；`Tab` 切换 file/hunk/line 单目标作用域。
@@ -76,7 +78,7 @@ flowchart TD
 
 ## 5. Workspace 多仓库主页
 
-Workspace 展示仓库状态、HEAD、ahead/behind。`d` 的第三态会直接在左侧主列表中展开 dirty 仓库的修改文件树；宽屏右侧 Inspector 仍展示选中仓库详情。文件视觉行不成为独立选择项，导航、批处理和 Enter/c/o 始终作用于对应仓库。
+Workspace 展示仓库状态、HEAD、ahead/behind。`d` 只循环“全部仓库、仅改动仓库、改动仓库及文件”三种数据范围；`t` 只切换当前范围的列表/树形布局。前两个范围的树形布局按仓库相对路径分层，第三个范围可在改动文件目录树和完整路径文件列表之间切换；三个范围分别记忆布局，默认依次为列表、列表、树形。宽屏右侧 Inspector 仍展示选中仓库详情。仓库树目录行和改动文件行均为视觉节点，不能独立选择，导航、批处理和 Enter/c/o 始终作用于对应仓库。
 
 ### 操作
 
@@ -84,7 +86,8 @@ Workspace 展示仓库状态、HEAD、ahead/behind。`d` 的第三态会直接�
 | --- | --- |
 | `j/k` | 选择仓库 |
 | `/` | 输入 project name/path 搜索，`Enter` 或 `Esc` 结束输入 |
-| `d` | 循环切换：全部仓库 → 仅改动仓库 → 改动仓库及其文件树 → 全部仓库 |
+| `d` | 循环数据范围：全部仓库 → 仅改动仓库 → 改动仓库及文件 → 全部仓库 |
+| `t` | 切换当前范围的列表/树形布局；三个范围分别记忆布局 |
 | `Space` | 显式选择或取消当前仓库，供 Workspace Git 和 Repo 批任务使用 |
 | `A` | 显式选择或取消当前过滤结果中的所有仓库 |
 | `S` | 暂存最终目标仓库的全部 tracked/untracked 改动；含未解决冲突时拒绝；必须确认 |
@@ -95,7 +98,7 @@ Workspace 展示仓库状态、HEAD、ahead/behind。`d` 的第三态会直接�
 | `o` | 打开选中仓库的 Repository 管理 |
 | `a` | 打开 Repo 批任务，仅 Android Repo 工作区有效 |
 
-搜索会与两个改动视图按 AND 组合；切换视图前后会按稳定 `ProjectId` 恢复当前仓库，文件树行不改变仓库选择或操作目标。没有显式选择时，`S/Z/D` 使用当前过滤视图中的光标仓库；显式选择集合非空时只使用该集合，不额外加入光标仓库。确认框列出的冻结仓库和每仓库统计是最终执行范围。
+搜索会与两个改动范围按 AND 组合；切换范围或布局前后会按稳定 `ProjectId` 恢复当前仓库，只有当前仓库不再可见时才回退到首个可见仓库。仓库目录行和文件视觉行不改变仓库选择或操作目标。没有显式选择时，`S/Z/D` 使用当前过滤范围中的光标仓库；显式选择集合非空时只使用该集合，不额外加入光标仓库。确认框列出的冻结仓库和每仓库统计是最终执行范围。
 
 ### Workspace Git 批任务流程
 
@@ -231,7 +234,7 @@ flowchart TD
 
 Diff 的每个源行固定占一个终端渲染行，超宽部分在面板内截断，不自动折回终端最左侧。路径、提交文本和外部 Git 输出按终端显示列宽处理，中文双宽字符不会被切半；控制字符会转成可见文本，不能改变终端布局。
 
-文件树通过 `XY` 和文件名颜色共同区分状态：仅 staged（已暂存）为亮绿，仅 unstaged（未暂存工作区改动）为亮红，同时存在 staged 与 unstaged 改动为亮紫，untracked 为黄色，conflict 为加粗亮红。光标所在行统一显示黑字亮青背景；无法显示颜色时仍以 `XY` 字符为准。
+文件树通过 `XY` 和文件名颜色共同区分状态：仅 staged（已暂存）为亮绿，仅 unstaged（未暂存工作区改动）为亮红，同时存在 staged 与 unstaged 改动为亮紫，untracked 为黄色，conflict 为加粗亮红。光标所在行使用暗蓝灰色 `#262e3a` 背景并保留文本原有前景色；无法显示颜色时仍以 `XY` 字符为准。
 
 ### 作用域与操作流程
 

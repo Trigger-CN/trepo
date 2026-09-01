@@ -21,14 +21,14 @@
 当前核心能力包括：
 
 - Repo client 与单 Git 仓库发现。
-- 多项目并发状态扫描和 Workspace 汇总。
+- 多项目并发状态扫描和 Workspace 汇总；`d` 切换全部/仅改动/改动与文件范围，`t` 为每个范围独立切换并记忆列表/树形布局。
 - 包含本地分支、远端分支、tag、HEAD 与每条 stash 的全引用 commit graph。
 - Graph 两级对象菜单：从选中节点发现 commit/HEAD/local branch/remote branch/tag/stash，再进入固定对象动作或 typed form。
 - Graph 内可执行 commit/amend、stash 创建、branch/tag 创建、merge/rebase/cherry-pick/revert 和 stash 操作；本地与远端 branch 动作严格区分。
 - staged、worktree、untracked diff，以及文件、hunk、changed-line stage/unstage/discard。
 - commit/amend、sign-off、signing 与 hook 失败消息恢复。
 - stash、conflict/operation state、branch/tag、merge/rebase/cherry-pick/revert 和 remote 工作流。
-- Workspace 稳定项目多选，以及受 workspace exclusive lock 保护的 Repo 批量动作、流式日志、取消、复扫和失败重试。
+- Workspace 稳定项目多选；仓库树目录和文件展示行不可选择，导航与所有操作必须保持绑定稳定 `ProjectId`。Repo 批量动作受 workspace exclusive lock 保护，并支持流式日志、取消、复扫和失败重试。
 
 M0-M4 已完成。下一执行点是 M5 命令面板与终端接管；需要外部 editor、mergetool、交互认证或任意交互命令的流程仍不在后台 capture 任务中执行。
 
@@ -145,8 +145,9 @@ cargo run -- doctor .
 - 发布 tag 固定为 `v<semver>`，且去掉 `v` 后必须与 `Cargo.toml` 中 `trepo` package version 完全一致。
 - 先更新 `Cargo.toml` 并运行 Cargo 刷新 `Cargo.lock`，完成提交和门禁后再创建 tag。
 - tag 必须单独推送，例如 `git push origin v0.5.0`；不要在未经用户明确要求时创建或推送 release tag。
-- `.github/workflows/release.yml` 构建 Linux x86_64、macOS Intel 和 macOS Apple Silicon 归档，并发布 `SHA256SUMS`。
-- 修改发布矩阵、归档结构或说明模板时，必须运行 release notes 脚本语法检查，并用首发/后续 tag 临时历史验证提交范围。
+- `.github/workflows/release.yml` 构建 Linux x86_64、macOS Intel/Apple Silicon 的 tar.gz 和 Windows x86_64 MSVC zip，并发布 `SHA256SUMS`。
+- 修改发布矩阵、归档结构、安装器或 updater 时，必须保持平台 ID/资产命名一致，验证 `SHA256SUMS` 失败即拒绝安装，并同时检查 POSIX shell、PowerShell 和 Windows target；Windows 自更新不得直接覆盖运行中的 exe。
+- 修改说明模板时，必须运行 release notes 脚本语法检查，并用首发/后续 tag 临时历史验证提交范围。
 
 ## 7. 测试与验证门禁
 
@@ -168,6 +169,7 @@ git diff --check
 - UI：使用 Ratatui TestBackend 覆盖 80x24、120x40、空数据、错误、加载和确认状态。
 - 终端交互：使用真实 PTY 验证按键流程、外部状态变化以及退出后的 echo、光标和 shell prompt。
 - 写操作：证明只改变目标文件/hunk/ref，并明确断言未选择对象保持不变。
+- 安装/更新：模拟版本化 Release 资产验证选择、SHA-256 成功/失败与归档布局；运行 Windows GNU/MSVC target check，并在原生 Windows runner 构建最终 exe。
 
 不能运行某项验证时，在交付说明中写明原因和残余风险，不得声称通过。
 

@@ -74,10 +74,7 @@ fn render_header(frame: &mut Frame, app: &App, state: &RepositoryState, area: Re
 fn render_tabs(frame: &mut Frame, app: &App, state: &RepositoryState, area: Rect) {
     let spans = RepositoryTab::ALL.into_iter().flat_map(|tab| {
         let style = if tab == state.tab {
-            Style::default()
-                .fg(Color::Black)
-                .bg(Color::Cyan)
-                .add_modifier(Modifier::BOLD)
+            super::selection_style()
         } else {
             Style::default().fg(Color::Gray)
         };
@@ -265,10 +262,7 @@ fn render_action_menu(frame: &mut Frame, app: &App, state: &RepositoryState) {
         .map(|(index, choice)| {
             ListItem::new(app.language.action(choice.label())).style(
                 if index == state.action_selected {
-                    Style::default()
-                        .fg(Color::Black)
-                        .bg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD)
+                    super::selection_style()
                 } else {
                     Style::default()
                 },
@@ -293,7 +287,7 @@ fn render_form(frame: &mut Frame, app: &App, state: &RepositoryState) {
     let lines = form.fields.iter().enumerate().map(|(index, field)| {
         let prefix = if index == form.selected { ">" } else { " " };
         let style = if index == form.selected {
-            Style::default().fg(Color::Cyan)
+            super::selection_style()
         } else {
             Style::default()
         };

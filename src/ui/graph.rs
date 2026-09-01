@@ -145,7 +145,7 @@ fn render_filter_form(frame: &mut Frame, app: &App, graph: &GraphState) {
                     app.language.label(label)
                 ),
                 if index == form.selected {
-                    Style::default().fg(Color::Cyan)
+                    super::selection_style()
                 } else {
                     Style::default()
                 },
@@ -251,7 +251,7 @@ fn render_graph_form(frame: &mut Frame, app: &App, graph: &GraphState) {
                     app.language.label(field.label())
                 ),
                 if index == form.selected {
-                    Style::default().fg(Color::Cyan)
+                    super::selection_style()
                 } else {
                     Style::default()
                 },
@@ -356,10 +356,7 @@ fn localized_graph_object_label(app: &App, object: &crate::app::state::GraphObje
 
 fn menu_style(selected: bool) -> Style {
     if selected {
-        Style::default()
-            .fg(Color::Black)
-            .bg(Color::Cyan)
-            .add_modifier(Modifier::BOLD)
+        super::selection_style()
     } else {
         Style::default()
     }
@@ -927,14 +924,14 @@ mod tests {
     }
 
     #[test]
-    fn selected_foreground_overrides_low_contrast_metadata_colors() {
+    fn selected_foreground_preserves_metadata_colors() {
         for color in [
             Color::Gray,
             Color::DarkGray,
             Color::LightBlue,
             Color::Yellow,
         ] {
-            assert_eq!(super::super::selection_fg(true, color), Color::Black);
+            assert_eq!(super::super::selection_fg(true, color), color);
             assert_eq!(super::super::selection_fg(false, color), color);
         }
     }
@@ -1087,8 +1084,8 @@ mod tests {
         assert_eq!(normal.spans[1].style.fg, Some(Color::Yellow));
 
         let selected = topology_line(&row, true);
-        assert_eq!(selected.spans[0].style.fg, Some(Color::Black));
-        assert_eq!(selected.spans[1].style.fg, Some(Color::Black));
+        assert_eq!(selected.spans[0].style.fg, Some(Color::Cyan));
+        assert_eq!(selected.spans[1].style.fg, Some(Color::Yellow));
     }
 
     #[test]

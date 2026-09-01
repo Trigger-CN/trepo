@@ -20,6 +20,7 @@ use trepo::adapters::repo;
 use trepo::app::state::{App, Screen};
 use trepo::i18n::Language;
 use trepo::services::discovery;
+use trepo::services::update;
 
 #[derive(Debug, Parser)]
 #[command(name = "trepo", version, about)]
@@ -50,6 +51,12 @@ enum Commands {
         #[arg(default_value = ".")]
         path: PathBuf,
     },
+    /// Check for and install the latest GitHub Release.
+    Update {
+        /// Only report whether an update is available.
+        #[arg(long)]
+        check: bool,
+    },
 }
 
 #[tokio::main]
@@ -57,8 +64,10 @@ async fn main() -> Result<()> {
     let cli = Cli::parse_from(normalize_language_args(std::env::args_os()));
     init_logging(cli.log_file.as_deref())?;
 
-    if let Some(Commands::Doctor { path }) = cli.command {
-        return doctor(&path).await;
+    match cli.command {
+        Some(Commands::Doctor { path }) => return doctor(&path).await,
+        Some(Commands::Update { check }) => return update::run(check),
+        None => {}
     }
     if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
         anyhow::bail!("trepo requires an interactive terminal; use `trepo doctor` for diagnostics");
@@ -505,6 +514,7 @@ fn handle_key(app: &mut App, key: KeyEvent) {
                 app.begin_workspace_git(trepo::domain::WorkspaceGitAction::Discard)
             }
             KeyCode::Char('d') => app.cycle_workspace_view(),
+            KeyCode::Char('t') => app.toggle_workspace_layout(),
             KeyCode::Char('r') => app.refresh(),
             KeyCode::Char('c') => app.open_changes(),
             KeyCode::Char('o') => app.open_repository(),
@@ -597,6 +607,15 @@ mod tests {
         assert!(parse(&["trepo", "--zh"]).unwrap().zh);
         assert!(parse(&["trepo", "-en"]).unwrap().en);
         assert!(parse(&["trepo", "--en"]).unwrap().en);
+    }
+
+    #[test]
+    fn accepts_update_check_command() {
+        let cli = parse(&["trepo", "update", "--check"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Update { check: true })
+        ));
     }
 
     #[test]
