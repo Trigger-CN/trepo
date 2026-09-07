@@ -77,7 +77,7 @@ git push origin v0.5.0
 | `Space` | Select/unselect a Workspace repository or a file in Changes; toggle an option in forms |
 | `A` | Select/unselect all repositories in the current Workspace filter or all files in Changes |
 | `S` / `Z` / `D` | Workspace: confirm Stage / Stash / complete Discard for the repository under the cursor, or only the explicit `Space` / `A` selection when non-empty |
-| `a` | Open Repo batch actions in Workspace; open fixed actions in Repository |
+| `a` | Workspace: open Repo batch actions; Changes: Amend current `HEAD`; Repository: open fixed actions |
 | `c` | Open Changes; cancel a running Repo task from its task view |
 | `f` | Graph: open structured Branch/Query/Author/Since/Until filters; Repo task: retry only failed projects |
 | `Tab` | Cycle file / hunk / line mode in Changes; switch tabs or form fields |
@@ -85,13 +85,13 @@ git push origin v0.5.0
 | `s` / `u` | Stage / unstage selected Changes files, or the active file, hunk, or line when no file selection exists |
 | `d` | Workspace: cycle the data scope through all projects → changed projects → changed projects with files; Changes: confirm complete Discard for selected files or discard the active file/hunk/line |
 | `t` | Workspace: toggle List / Tree layout for the current scope; each scope remembers its own layout |
-| `m` | Open the bordered multiline commit editor from Changes; typing and multiline paste insert at the cursor |
-| `Ctrl-A` / `Ctrl-U` / `Ctrl-G` | Toggle amend / sign-off / signing in Changes commit dialog |
+| `m` / `a` / `w` | Changes: open Commit / Amend `HEAD` / Reword `HEAD`; Amend and Reword preload the current message |
+| `Ctrl-A` / `Ctrl-U` / `Ctrl-G` | Toggle Commit/Amend compatibility mode / sign-off / signing in the Changes commit dialog |
 | `o` | Open Repository management from Workspace, Graph, or Changes |
 | `PageUp` / `PageDown` | Scroll the selected diff |
 | `/` | Workspace: search projects; Graph: open filters focused on commit Query |
 | `r` | Refresh current page |
-| `x` | Graph: clear all commit filters |
+| `x` | Workspace/Changes: abort the displayed active Git operation after fresh-state validation and confirmation; Graph: clear all commit filters |
 | `Esc` | Close overlay, back, clear search, or exit |
 | `q` | Exit from Workspace |
 | `?` | Toggle contextual help |
@@ -102,14 +102,14 @@ Implemented:
 
 - Repo and single-Git workspace discovery
 - Concurrent porcelain v2 status scanning
-- staged, unstaged, untracked, conflict, HEAD, ahead/behind summary, and file-level porcelain status captured from the same scan
+- staged, unstaged, untracked, conflict, HEAD, ahead/behind, and active merge/rebase/cherry-pick/revert state captured during status scans
 - searchable responsive Workspace page where `d` cycles all projects, changed projects, and changed projects with files while `t` independently switches each scope between List and Tree; the first two scopes can render repository path trees, the third can render a change tree or flat full-path file list, and repository selection remains bound to stable project identity
 - complete all-refs commit graph covering local branches, remote branches, tags, HEAD, and every stash entry, ordered with pure topological order and showing UTC calendar dates
 - compact pipe-based topology lanes with left-shifting continuations, solid split/merge connectors, explicit `~N` hidden-lane markers, and `◉` missing-parent boundaries
 - responsive Graph columns preserve topology, wrapped subject text, and important refs first; rows use their real visual height, commit body keeps original line breaks, and dense remote/tag badges fold into `R:+N`/`T:+N` while Inspector/object menus retain every ref
 - in-memory Graph filtering by local/remote branch history, commit OID/subject/body/ref text, author, and inclusive UTC date range; conditions combine with AND while selection remains bound to commit OID
 - Graph two-level object menu: select a commit node, choose its commit/HEAD/local branch/remote branch/tag/stash object, then choose a fixed contextual action
-- Graph contextual commit/amend, advanced stash creation, branch/tag creation, merge, rebase, cherry-pick, revert, stash actions, and local-branch Push/Force Push
+- Graph contextual commit on commit/HEAD objects and amend only on the current HEAD object, plus advanced stash creation, branch/tag creation, integration, stash, and local-branch Push/Force Push actions
 - Graph forms and confirmations reuse the protected RepositoryAction/OperationRunner workflow; local branches expose separate Push and force-with-lease actions while remote branches expose only valid local operations
 - stable project multi-selection and name/path filtering in Workspace
 - selected-repository Workspace Git Stash/Discard with frozen per-repository change counts, full-batch path/token/index-lock preflight, and per-repository pending/running/success/failure results; cross-repository execution makes no rollback claim
@@ -123,7 +123,8 @@ Implemented:
 - stable Changes file multi-selection with all-token-preflight batch Stage/Unstage, confirmed selected-path Stash, and confirmed complete Discard of tracked index/worktree plus untracked paths
 - guarded file-, hunk-, and changed-line stage, unstage, and discard with lock-time patch reconstruction
 - `git apply --check`, stale token/fingerprint rejection, destructive confirmation, and failure-state preservation
-- multiline commit/amend input and paste, sign-off, signing, hook output, and message recovery
+- multiline Commit/Amend/Reword input and paste, current-message preload for Amend/Reword, sign-off, signing, hook output, and message recovery; Reword uses `--amend --only` so staged changes remain staged
+- Workspace and Changes expose active merge/rebase/cherry-pick/revert state and guarded abort through a fresh repository snapshot, destructive confirmation, project lock, and snapshot token
 - Repository page with Status, Stashes, Branches & Tags, and Remotes tabs
 - structured Stash workflows for include-untracked, keep-index, staged-only, apply/pop index restore, branch creation, drop, and clear; staged-only rejects incompatible modes before execution
 - separate Push and Force Push entries in Repository and Graph; force updates always use `--force-with-lease`, with exact refspec/OID-range preview and explicit remote-history warning

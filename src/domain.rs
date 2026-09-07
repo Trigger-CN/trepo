@@ -232,6 +232,7 @@ pub struct ProjectSnapshot {
     pub upstream: Option<UpstreamState>,
     pub worktree: WorktreeSummary,
     pub changes: Vec<ChangeEntry>,
+    pub operation: Option<GitOperationKind>,
     pub scan: ScanState,
     pub generation: u64,
 }
@@ -244,6 +245,7 @@ impl ProjectSnapshot {
             upstream: None,
             worktree: WorktreeSummary::default(),
             changes: Vec::new(),
+            operation: None,
             scan: ScanState::Pending,
             generation,
         }
@@ -490,10 +492,27 @@ pub struct OperationOutcome {
     pub message: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommitMode {
+    Commit,
+    Amend,
+    Reword,
+}
+
+impl CommitMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Commit => "commit",
+            Self::Amend => "amend",
+            Self::Reword => "reword",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct CommitSpec {
     pub message: String,
-    pub amend: bool,
+    pub mode: CommitMode,
     pub signoff: bool,
     pub signing: bool,
 }

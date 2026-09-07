@@ -78,7 +78,7 @@ flowchart TD
 
 ## 5. Workspace 多仓库主页
 
-Workspace 展示仓库状态、HEAD、ahead/behind。`d` 只循环“全部仓库、仅改动仓库、改动仓库及文件”三种数据范围；`t` 只切换当前范围的列表/树形布局。前两个范围的树形布局按仓库相对路径分层，第三个范围可在改动文件目录树和完整路径文件列表之间切换；三个范围分别记忆布局，默认依次为列表、列表、树形。宽屏右侧 Inspector 仍展示选中仓库详情。仓库树目录行和改动文件行均为视觉节点，不能独立选择，导航、批处理和 Enter/c/o 始终作用于对应仓库。
+Workspace 展示仓库状态、活动 merge/rebase/cherry-pick/revert、HEAD 和 ahead/behind。`d` 只循环“全部仓库、仅改动仓库、改动仓库及文件”三种数据范围；活动 Git 操作的仓库即使工作树暂时干净，也会保留在两个改动范围中。`t` 只切换当前范围的列表/树形布局。前两个范围的树形布局按仓库相对路径分层，第三个范围可在改动文件目录树和完整路径文件列表之间切换；三个范围分别记忆布局，默认依次为列表、列表、树形。宽屏右侧 Inspector 展示活动操作和选中仓库详情。仓库树目录行和改动文件行均为视觉节点，不能独立选择，导航、批处理和 Enter/c/o/x 始终作用于对应仓库。
 
 ### 操作
 
@@ -97,6 +97,7 @@ Workspace 展示仓库状态、HEAD、ahead/behind。`d` 只循环“全部仓�
 | `c` | 打开选中仓库的 Changes |
 | `o` | 打开选中仓库的 Repository 管理 |
 | `a` | 打开 Repo 批任务，仅 Android Repo 工作区有效 |
+| `x` | 活动 Git 操作存在时，重新读取仓库状态并进入终止确认 |
 
 搜索会与两个改动范围按 AND 组合；切换范围或布局前后会按稳定 `ProjectId` 恢复当前仓库，只有当前仓库不再可见时才回退到首个可见仓库。仓库目录行和文件视觉行不改变仓库选择或操作目标。没有显式选择时，`S/Z/D` 使用当前过滤范围中的光标仓库；显式选择集合非空时只使用该集合，不额外加入光标仓库。确认框列出的冻结仓库和每仓库统计是最终执行范围。
 
@@ -218,7 +219,8 @@ flowchart TD
 
 | 对象 | 可用动作 |
 | --- | --- |
-| Commit / HEAD | Open Changes、Commit staged changes、Amend current commit、Create stash、Create branch here、Create tag here、Cherry-pick、Revert、Merge、Rebase |
+| Commit | Open Changes、Commit staged changes、Create stash、Create branch here、Create tag here、Cherry-pick、Revert、Merge、Rebase |
+| HEAD | Open Changes、Commit staged changes、Amend current commit、Create stash、Create branch here、Create tag here、Cherry-pick、Revert、Merge、Rebase |
 | Local branch | Switch、Push、Force push with lease、Merge、Rebase、Rename、Delete |
 | Remote branch | Create local branch、Merge、Rebase、Cherry-pick、Revert |
 | Tag | Create branch、Cherry-pick、Revert、Merge、Rebase、Delete tag |
@@ -226,7 +228,7 @@ flowchart TD
 
 注意：
 
-- Graph 的 Commit/Amend 使用当前暂存区和当前 HEAD；选中的历史 commit 只提供操作上下文，并不把提交目标切换到该历史 commit。
+- Graph 的 Commit 使用当前暂存区；Amend 只在当前 HEAD 对象提供并修订当前 HEAD，历史 commit 对象不提供 Amend。
 - Graph 的 Apply/Pop 默认不恢复 index。需要 `Restore index` 时，从 Repository → Stashes 操作。
 - Graph 本地分支的强推始终为 `--force-with-lease`，不提供裸 `--force`。
 
@@ -235,6 +237,8 @@ flowchart TD
 Diff 的每个源行固定占一个终端渲染行，超宽部分在面板内截断，不自动折回终端最左侧。路径、提交文本和外部 Git 输出按终端显示列宽处理，中文双宽字符不会被切半；控制字符会转成可见文本，不能改变终端布局。
 
 文件树通过 `XY` 和文件名颜色共同区分状态：仅 staged（已暂存）为亮绿，仅 unstaged（未暂存工作区改动）为亮红，同时存在 staged 与 unstaged 改动为亮紫，untracked 为黄色，conflict 为加粗亮红。光标所在行使用暗蓝灰色 `#262e3a` 背景并保留文本原有前景色；无法显示颜色时仍以 `XY` 字符为准。
+
+Changes 标题直接显示当前 merge/rebase/cherry-pick/revert 操作。按 `x` 会重新读取完整 Repository snapshot，只有相同操作仍在进行时才显示破坏性确认；确认后通过 project/workspace lock 和 snapshot token 执行 abort。
 
 ### 作用域与操作流程
 
@@ -285,31 +289,36 @@ flowchart TD
 | `u` | Unstage 当前作用域；有文件多选时批量 Unstage |
 | `d` | 有文件多选时完整 Discard 所选 tracked index/worktree 与 untracked；否则丢弃当前 file/hunk/line；必须确认 |
 | `PageUp/PageDown` | 滚动 diff |
-| `m` | 打开 Commit 编辑器 |
+| `m` | 打开 Commit 编辑器，提交暂存区 |
+| `a` | 打开 Amend 编辑器并预载当前 HEAD message，可同时包含暂存改动 |
+| `w` | 打开 Reword 编辑器并预载当前 HEAD message，只改写 HEAD message，不消费暂存区 |
+| `x` | 当前操作存在时，重新读取状态并确认终止 |
 
 某个动作不适用于当前来源时会被拒绝，例如 staged hunk 不能再次 Stage，worktree hunk不能 Unstage。二进制文件或没有可选择文本 hunk 的文件不能进入对应细粒度模式。
 
-### Commit/Amend 流程
+### Commit/Amend/Reword 流程
 
 ```mermaid
 flowchart TD
-    C[Changes] -->|完成 Stage| M[m 打开提交编辑器]
+    C[Changes] -->|m| M[Commit: 空消息编辑器]
+    C -->|a| A[Amend: 预载 HEAD message]
+    C -->|w| W[Reword: 预载 HEAD message]
     M --> E[输入或粘贴多行消息]
+    A --> E
+    W --> E
     E --> O{可选项}
-    O -->|Ctrl-A| A[Amend on/off]
     O -->|Ctrl-U| S[Sign-off on/off]
     O -->|Ctrl-G| G[GPG signing on/off]
-    A --> Q[Ctrl-Enter 或 Ctrl-S]
-    S --> Q
+    S --> Q[Ctrl-Enter 或 Ctrl-S]
     G --> Q
     E --> Q
     Q --> V{消息非空且 Git 成功?}
     V -->|是| R[刷新 Changes/Workspace]
-    V -->|否| K[保留消息、光标、选项和错误，继续编辑]
+    V -->|否| K[保留消息、光标、模式、选项和错误，继续编辑]
     E -->|Esc| C
 ```
 
-编辑器支持多行粘贴、方向键、Home/End、Backspace/Delete。普通 `Enter` 只插入换行，不会提交。
+Amend 与 Reword 要求存在 HEAD。Amend 执行 `git commit --amend`，可将当前暂存内容纳入提交；Reword 执行 `git commit --amend --only`，只改写当前 HEAD message，原有暂存内容仍留在 index。编辑器支持多行粘贴、方向键、Home/End、Backspace/Delete。普通 `Enter` 只插入换行，不会提交。
 
 ## 8. Repository 管理页
 

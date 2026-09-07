@@ -323,7 +323,7 @@ fn render_form(frame: &mut Frame, app: &App, state: &RepositoryState) {
     );
 }
 
-fn render_confirmation(frame: &mut Frame, app: &App, state: &RepositoryState) {
+pub(super) fn render_confirmation(frame: &mut Frame, app: &App, state: &RepositoryState) {
     let Some(action) = state.pending.as_ref() else {
         return;
     };

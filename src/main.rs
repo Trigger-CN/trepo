@@ -18,6 +18,7 @@ use tracing_subscriber::EnvFilter;
 
 use trepo::adapters::repo;
 use trepo::app::state::{App, Screen};
+use trepo::domain::CommitMode;
 use trepo::i18n::Language;
 use trepo::services::discovery;
 use trepo::services::update;
@@ -518,6 +519,7 @@ fn handle_key(app: &mut App, key: KeyEvent) {
             KeyCode::Char('r') => app.refresh(),
             KeyCode::Char('c') => app.open_changes(),
             KeyCode::Char('o') => app.open_repository(),
+            KeyCode::Char('x') => app.abort_active_operation(),
             KeyCode::Enter => app.open_graph(),
             KeyCode::Down | KeyCode::Char('j') => app.move_selection(1),
             KeyCode::Up | KeyCode::Char('k') => app.move_selection(-1),
@@ -561,7 +563,10 @@ fn handle_key(app: &mut App, key: KeyEvent) {
             KeyCode::Char('G') | KeyCode::End => app.changes_last(),
             KeyCode::PageDown => app.scroll_preview(12),
             KeyCode::PageUp => app.scroll_preview(-12),
-            KeyCode::Char('m') => app.start_commit_editing(),
+            KeyCode::Char('m') => app.start_commit_editing(CommitMode::Commit),
+            KeyCode::Char('a') => app.start_commit_editing(CommitMode::Amend),
+            KeyCode::Char('w') => app.start_commit_editing(CommitMode::Reword),
+            KeyCode::Char('x') => app.abort_active_operation(),
             _ => {}
         },
         Screen::Repository => match key.code {

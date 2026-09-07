@@ -9,10 +9,10 @@ use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
 use crate::domain::{
-    BranchEntry, ChangeCode, ChangeEntry, ChangeHunk, ChangeLine, ChangePreview, Commit, CommitRef,
-    CommitRefKind, CommitSpec, GitOperationKind, HeadState, HunkSource, RemoteBranchEntry,
-    RemoteEntry, RepositoryAction, RepositoryActionOutcome, RepositorySnapshot, StashEntry,
-    TagEntry, UpstreamState, WorktreeSummary,
+    BranchEntry, ChangeCode, ChangeEntry, ChangeHunk, ChangeLine, ChangePreview, Commit,
+    CommitMode, CommitRef, CommitRefKind, CommitSpec, GitOperationKind, HeadState, HunkSource,
+    RemoteBranchEntry, RemoteEntry, RepositoryAction, RepositoryActionOutcome, RepositorySnapshot,
+    StashEntry, TagEntry, UpstreamState, WorktreeSummary,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -21,6 +21,7 @@ pub struct StatusSnapshot {
     pub upstream: Option<UpstreamState>,
     pub worktree: WorktreeSummary,
     pub changes: Vec<ChangeEntry>,
+    pub operation: Option<GitOperationKind>,
 }
 
 pub async fn git_output<I, S>(cwd: &Path, args: I) -> Result<Vec<u8>>
@@ -126,7 +127,9 @@ pub(crate) async fn has_head(root: &Path) -> Result<bool> {
 
 pub async fn status(path: &Path) -> Result<StatusSnapshot> {
     let bytes = git_output(path, ["status", "--porcelain=v2", "--branch", "-z"]).await?;
-    parse_status(&bytes)
+    let mut snapshot = parse_status(&bytes)?;
+    snapshot.operation = operation_state(path).await?;
+    Ok(snapshot)
 }
 
 const MAX_PREVIEW_BYTES: usize = 256 * 1024;
@@ -961,8 +964,13 @@ pub async fn commit(root: &Path, spec: &CommitSpec) -> Result<String> {
         bail!("commit message cannot be empty");
     }
     let mut args = vec![OsString::from("commit")];
-    if spec.amend {
-        args.push(OsString::from("--amend"));
+    match spec.mode {
+        CommitMode::Commit => {}
+        CommitMode::Amend => args.push(OsString::from("--amend")),
+        CommitMode::Reword => {
+            args.push(OsString::from("--amend"));
+            args.push(OsString::from("--only"));
+        }
     }
     if spec.signoff {
         args.push(OsString::from("--signoff"));
@@ -1053,7 +1061,7 @@ pub async fn repository_snapshot(root: &Path) -> Result<RepositorySnapshot> {
     let worktree_bytes = git_output(root, ["status", "--porcelain=v2", "-z"]).await?;
     let mut worktree_hasher = DefaultHasher::new();
     worktree_bytes.hash(&mut worktree_hasher);
-    let operation = detect_operation(root).await?;
+    let operation = operation_state(root).await?;
     let mut snapshot = RepositorySnapshot {
         operation,
         conflicts: parse_path_list(&conflicts)?,
@@ -1069,7 +1077,7 @@ pub async fn repository_snapshot(root: &Path) -> Result<RepositorySnapshot> {
     Ok(snapshot)
 }
 
-async fn detect_operation(root: &Path) -> Result<Option<GitOperationKind>> {
+pub async fn operation_state(root: &Path) -> Result<Option<GitOperationKind>> {
     let checks = [
         ("MERGE_HEAD", GitOperationKind::Merge),
         ("rebase-merge", GitOperationKind::Rebase),
@@ -1083,6 +1091,15 @@ async fn detect_operation(root: &Path) -> Result<Option<GitOperationKind>> {
         }
     }
     Ok(None)
+}
+
+pub async fn head_commit_message(root: &Path) -> Result<Option<String>> {
+    if !has_head(root).await? {
+        return Ok(None);
+    }
+    let bytes = git_output(root, ["show", "-s", "--format=%B", "HEAD"]).await?;
+    let message = String::from_utf8(bytes).context("HEAD commit message is not UTF-8")?;
+    Ok(Some(message.trim_end_matches(['\r', '\n']).to_owned()))
 }
 
 fn parse_path_list(bytes: &[u8]) -> Result<Vec<PathBuf>> {
@@ -1292,7 +1309,7 @@ pub(crate) async fn validate_repository_action(
         RepositoryAction::Continue { operation }
         | RepositoryAction::Skip { operation }
         | RepositoryAction::Abort { operation } => {
-            if detect_operation(root).await? != Some(*operation) {
+            if operation_state(root).await? != Some(*operation) {
                 bail!(
                     "precondition failed: {} is no longer active",
                     operation.label()
@@ -1721,6 +1738,7 @@ pub fn parse_status(bytes: &[u8]) -> Result<StatusSnapshot> {
         upstream,
         worktree,
         changes,
+        operation: None,
     })
 }
 
@@ -2020,7 +2038,7 @@ mod tests {
             temp.path(),
             &CommitSpec {
                 message: "second\n\nbody".into(),
-                amend: false,
+                mode: CommitMode::Commit,
                 signoff: true,
                 signing: false,
             },
@@ -2038,7 +2056,7 @@ mod tests {
             temp.path(),
             &CommitSpec {
                 message: "amended".into(),
-                amend: true,
+                mode: CommitMode::Amend,
                 signoff: false,
                 signing: false,
             },
@@ -2047,6 +2065,36 @@ mod tests {
         .unwrap();
         assert_eq!(run_git(temp.path(), &["rev-list", "--count", "HEAD"]), "2");
         assert!(run_git(temp.path(), &["show", "-s", "--format=%s", "HEAD"]) == "amended");
+
+        fs::write(temp.path().join("tracked.txt"), "base\nstaged for later\n").unwrap();
+        run_git(temp.path(), &["add", "tracked.txt"]);
+        let head_tree = run_git(temp.path(), &["rev-parse", "HEAD^{tree}"]);
+        let staged_tree = run_git(temp.path(), &["write-tree"]);
+        assert_ne!(head_tree, staged_tree);
+        commit(
+            temp.path(),
+            &CommitSpec {
+                message: "reworded only".into(),
+                mode: CommitMode::Reword,
+                signoff: false,
+                signing: false,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            run_git(temp.path(), &["show", "-s", "--format=%s", "HEAD"]),
+            "reworded only"
+        );
+        assert_eq!(
+            run_git(temp.path(), &["rev-parse", "HEAD^{tree}"]),
+            head_tree
+        );
+        assert_eq!(run_git(temp.path(), &["write-tree"]), staged_tree);
+        assert_eq!(
+            run_git(temp.path(), &["status", "--short"]),
+            "M  tracked.txt"
+        );
 
         #[cfg(unix)]
         {
@@ -2060,7 +2108,7 @@ mod tests {
                 temp.path(),
                 &CommitSpec {
                     message: "hook failure".into(),
-                    amend: false,
+                    mode: CommitMode::Commit,
                     signoff: false,
                     signing: false,
                 },

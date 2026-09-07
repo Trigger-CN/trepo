@@ -51,11 +51,11 @@ fn render_help(frame: &mut Frame, app: &App) {
             Line::raw("S/Z/D           对光标仓库 / 已选仓库执行暂存 / 储藏 / 丢弃"),
             Line::raw("d               切换全部 / 仅改动 / 改动与文件范围"),
             Line::raw("t               切换当前范围的列表 / 树形布局"),
-            Line::raw("a               打开 Repo 或仓库操作"),
-            Line::raw("f, /, x         提交图过滤 / 搜索 / 清除"),
+            Line::raw("a               Workspace Repo 操作；Changes 修订 HEAD"),
+            Line::raw("f, /, x         提交图过滤 / 搜索 / 清除；x 也可终止活动 Git 操作"),
             Line::raw("Tab             切换改动模式或表单字段"),
             Line::raw("z/s/u           储藏 / 暂存 / 取消暂存"),
-            Line::raw("m               提交；Ctrl-Enter/S 确认"),
+            Line::raw("m/a/w           提交 / 修订 HEAD / 改写 HEAD；Ctrl-Enter/S 确认"),
             Line::raw("r               刷新当前页面"),
             Line::raw("Esc / q / ?     返回 / 退出 / 切换帮助"),
             Line::raw(""),
@@ -77,11 +77,13 @@ fn render_help(frame: &mut Frame, app: &App) {
             ),
             Line::raw("d              Switch all / changed / changed with files scope"),
             Line::raw("t              Toggle List / Tree for the current scope"),
-            Line::raw("a              Open Workspace Repo or Repository actions"),
-            Line::raw("f, /, x        Graph filter / query / clear; retry failed Repo task"),
+            Line::raw("a              Workspace Repo actions; Changes Amend HEAD"),
+            Line::raw(
+                "f, /, x        Graph filter / query / clear; x also aborts active Git operations",
+            ),
             Line::raw("Tab            Toggle Changes mode or active form field"),
             Line::raw("z/s/u          Stash files / Stage / Unstage in Changes"),
-            Line::raw("m              Commit; Ctrl-Enter/S submit, Ctrl-A/U/G options"),
+            Line::raw("m/a/w          Commit / Amend HEAD / Reword HEAD; Ctrl-Enter/S submit"),
             Line::raw("r              Refresh current page"),
             Line::raw("Esc / q / ?    Back / quit Workspace / toggle help"),
             Line::raw(""),
@@ -128,7 +130,7 @@ mod tests {
     };
     use crate::domain::{
         BatchOperationItem, BranchEntry, ChangeCode, ChangeEntry, ChangeHunk, ChangeLine,
-        ChangePreview, Commit, CommitRef, CommitRefKind, GitOperationKind, HunkSource,
+        ChangePreview, Commit, CommitMode, CommitRef, CommitRefKind, GitOperationKind, HunkSource,
         OperationKind, OperationTarget, Project, ProjectId, RemoteBranchEntry, RemoteEntry,
         RepoBatchAction, RepoBatchSpec, RepoProjectResult, RepoProjectState, RepositoryAction,
         RepositorySnapshot, StashEntry, TagEntry, Workspace, WorkspaceGitAction, WorkspaceGitSpec,
@@ -327,9 +329,20 @@ mod tests {
 
     #[test]
     fn renders_workspace_at_supported_sizes() {
-        let app = app();
+        let mut app = app();
+        app.projects[0].operation = Some(GitOperationKind::Rebase);
+        app.projects[0].scan = crate::domain::ScanState::Ready;
         for (width, height) in [(80, 24), (120, 40)] {
-            assert_selected_text(&app, width, height, "demo");
+            assert!(draw_text(&app, width, height).contains("rebase"));
+        }
+        app.repository = Some(repository_state(&app));
+        app.repository.as_mut().unwrap().pending = Some(RepositoryAction::Abort {
+            operation: GitOperationKind::Rebase,
+        });
+        for (width, height) in [(80, 24), (120, 40)] {
+            let text = draw_text(&app, width, height);
+            assert!(text.contains("Confirm operation"));
+            assert!(text.contains("Abort operation"));
         }
     }
 
@@ -973,6 +986,8 @@ mod tests {
                 untracked,
                 conflicted,
             ],
+            operation: None,
+            head_message: None,
             selected: 3,
             selected_files: std::iter::once(entry.path.clone()).collect(),
             mode: ChangesMode::File,
@@ -1012,7 +1027,7 @@ mod tests {
             commit_message: "subject\n\nbody".into(),
             commit_cursor: "subject\n\nbody".len(),
             commit_editing: false,
-            commit_amend: false,
+            commit_mode: CommitMode::Commit,
             commit_signoff: false,
             commit_signing: false,
             commit_running: false,
@@ -1083,12 +1098,34 @@ mod tests {
             assert!(text.contains("提交信息"));
             assert!(text.contains("选项"));
             assert!(text.contains("按键"));
-            assert!(text.contains("Ctrl-A修订:关"));
+            assert!(text.contains("模式:提交"));
             assert!(text.contains("方向键移动"));
             assert!(text.contains("Ctrl-Enter/Ctrl-S提交"));
             assert!(cursor.x < width);
         }
         app.language = crate::i18n::Language::En;
+        {
+            let changes = app.changes.as_mut().unwrap();
+            changes.commit_editing = false;
+            changes.operation = Some(GitOperationKind::CherryPick);
+        }
+        app.repository = Some(repository_state(&app));
+        {
+            let state = app.repository.as_mut().unwrap();
+            state.return_screen = Screen::Changes;
+            state.snapshot.as_mut().unwrap().operation = Some(GitOperationKind::CherryPick);
+            state.pending = Some(RepositoryAction::Abort {
+                operation: GitOperationKind::CherryPick,
+            });
+        }
+        for (width, height) in [(80, 24), (120, 40)] {
+            let text = draw_text(&app, width, height);
+            assert!(text.contains("cherry-pick"));
+            assert!(text.contains("Confirm operation"));
+            assert!(text.contains("Abort operation"));
+        }
+
+        app.repository.as_mut().unwrap().pending = None;
         let changes = app.changes.as_mut().unwrap();
         changes.commit_editing = false;
         changes.confirmation = Some(PendingOperation::Single {
@@ -1149,6 +1186,8 @@ mod tests {
             project,
             return_screen: Screen::Workspace,
             entries: vec![entry.clone()],
+            operation: None,
+            head_message: None,
             selected: 0,
             selected_files: Default::default(),
             mode: ChangesMode::File,
@@ -1177,7 +1216,7 @@ mod tests {
             commit_message: String::new(),
             commit_cursor: 0,
             commit_editing: false,
-            commit_amend: false,
+            commit_mode: CommitMode::Commit,
             commit_signoff: false,
             commit_signing: false,
             commit_running: false,

@@ -47,6 +47,15 @@ pub fn render(frame: &mut Frame, app: &App) {
     render_footer(frame, app, vertical[2]);
     render_repo_batch_overlay(frame, app);
     render_workspace_git_overlay(frame, app);
+    if app.repository.as_ref().is_some_and(|state| {
+        state.return_screen == crate::app::state::Screen::Workspace && state.pending.is_some()
+    }) {
+        super::repository::render_confirmation(
+            frame,
+            app,
+            app.repository.as_ref().expect("repository state"),
+        );
+    }
 }
 
 fn render_header(frame: &mut Frame, app: &App, area: Rect) {
@@ -189,7 +198,10 @@ fn render_table(frame: &mut Frame, app: &App, area: Rect) {
                 let status = match &snapshot.scan {
                     ScanState::Pending => app.language.text("scanning", "扫描中").to_owned(),
                     ScanState::Error(_) => app.language.text("error", "错误").to_owned(),
-                    ScanState::Ready => snapshot.worktree.status_label(),
+                    ScanState::Ready => snapshot.operation.map_or_else(
+                        || snapshot.worktree.status_label(),
+                        |operation| operation.label().to_owned(),
+                    ),
                 };
                 Row::new(vec![
                     Cell::from(format!(
@@ -293,6 +305,18 @@ fn render_inspector(frame: &mut Frame, app: &App, area: Rect) {
                     snapshot.worktree.conflicted
                 )),
             ];
+            if let Some(operation) = snapshot.operation {
+                lines.push(Line::styled(
+                    format!(
+                        "{}: {}",
+                        app.language.text("Git operation", "Git 操作"),
+                        operation.label()
+                    ),
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ));
+            }
             if let Some(upstream) = &snapshot.upstream {
                 lines.push(Line::raw(""));
                 lines.push(Line::raw(format!("Upstream: {}", upstream.name)));
@@ -362,36 +386,73 @@ fn render_inspector(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
-    let task = if app.workspace_git.preparing {
-        app.language
-            .text(
-                "Preparing Workspace Git confirmation",
-                "正在准备工作区 Git 确认",
-            )
-            .to_owned()
+    let repository = app
+        .repository
+        .as_ref()
+        .filter(|state| state.return_screen == crate::app::state::Screen::Workspace);
+    let (task, task_color) = if app.workspace_git.preparing {
+        (
+            app.language
+                .text(
+                    "Preparing Workspace Git confirmation",
+                    "正在准备工作区 Git 确认",
+                )
+                .to_owned(),
+            Color::Yellow,
+        )
+    } else if repository.is_some_and(|state| state.loading) {
+        (
+            app.language
+                .text(
+                    "Loading current repository state...",
+                    "正在加载当前仓库状态...",
+                )
+                .to_owned(),
+            Color::Yellow,
+        )
+    } else if repository.is_some_and(|state| state.action_running) {
+        (
+            app.language
+                .text("Running repository operation...", "正在执行仓库操作...")
+                .to_owned(),
+            Color::Yellow,
+        )
+    } else if let Some((is_error, message)) = repository.and_then(|state| state.message.as_ref()) {
+        (
+            message.clone(),
+            if *is_error { Color::Red } else { Color::Green },
+        )
     } else if app.scanning > 0 {
-        format!(
-            "{} {}",
-            app.language.text("Scanning", "扫描中"),
-            app.scanning
+        (
+            format!(
+                "{} {}",
+                app.language.text("Scanning", "扫描中"),
+                app.scanning
+            ),
+            Color::Yellow,
         )
     } else {
-        app.language.text("Ready", "就绪").to_owned()
+        (app.language.text("Ready", "就绪").to_owned(), Color::Green)
     };
-    let keys = app.language.text(
-        "   Space Select  S Stage  Z Stash  D Discard  d Scope  t List/Tree  a Repo actions  / Search",
-        "   Space 选择  S 暂存  Z 储藏  D 丢弃  d 范围  t 列表/树形  a Repo 操作  / 搜索",
+    let abort = if app
+        .selected_project()
+        .is_some_and(|snapshot| snapshot.operation.is_some())
+    {
+        app.language.text("  x Abort operation", "  x 终止操作")
+    } else {
+        ""
+    };
+    let keys = format!(
+        "{}{}",
+        app.language.text(
+            "   Space Select  S Stage  Z Stash  D Discard  d Scope  t List/Tree  a Repo actions  / Search",
+            "   Space 选择  S 暂存  Z 储藏  D 丢弃  d 范围  t 列表/树形  a Repo 操作  / 搜索",
+        ),
+        abort
     );
     frame.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled(
-                task,
-                Style::default().fg(if app.scanning > 0 {
-                    Color::Yellow
-                } else {
-                    Color::Green
-                }),
-            ),
+            Span::styled(task, Style::default().fg(task_color)),
             Span::raw(keys),
         ])),
         area,
@@ -1188,6 +1249,7 @@ mod tests {
                 upstream: None,
                 worktree,
                 changes: Vec::new(),
+                operation: None,
                 scan,
                 generation: 0,
             };

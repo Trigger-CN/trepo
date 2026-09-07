@@ -52,9 +52,9 @@ M1 是所有后续里程碑的共同数据与交互基础。M4 可以在 M2 后�
 
 - 从任意子目录识别 Repo 工作区或单 Git 仓库，并并发扫描状态。
 - Workspace、完整 all-refs Graph、Changes 和 Repository 管理页面均已可用。
-- Workspace 支持稳定 ProjectId 多选、命名搜索；`d` 独立切换全部、仅改动、改动仓库及文件三种范围，`t` 独立切换每种范围的列表/树形布局并分别记忆。宽屏 Inspector 和 `S`/`Z`/`D` 冻结仓库 Stage/Stash/Discard 保持可用。
-- Graph 支持 commit/HEAD/local branch/remote branch/tag/stash 两级上下文操作及 typed form；Subject 按显示列宽多行渲染，Inspector 保留 body 原始换行，本地分支直接提供普通 Push 与 Force push with lease。
-- Changes 支持文件多选批量 Stage/Unstage、selected-path Stash 和完整 Discard；文件/hunk/changed-line、commit/stash/conflict、refs/integration 和 remotes 写操作受锁、token 和 generation 保护。
+- Workspace 支持稳定 ProjectId 多选、命名搜索；`d` 独立切换全部、仅改动、改动仓库及文件三种范围，`t` 独立切换每种范围的列表/树形布局并分别记忆。活动 merge/rebase/cherry-pick/revert 会显示在列表和 Inspector，并可经新鲜快照确认后终止。
+- Graph 支持 commit/HEAD/local branch/remote branch/tag/stash 两级上下文操作及 typed form；Commit 可从 commit/HEAD 对象进入，Amend 仅在 HEAD 对象提供。Subject 按显示列宽多行渲染，Inspector 保留 body 原始换行，本地分支直接提供普通 Push 与 Force push with lease。
+- Changes 支持文件多选批量 Stage/Unstage、selected-path Stash 和完整 Discard，提供 Commit/Amend/Reword 显式编辑入口，并展示及终止活动 Git 操作；文件/hunk/changed-line、commit/stash/conflict、refs/integration 和 remotes 写操作受锁、token 和 generation 保护。
 - Repo `sync/start/checkout/abandon/prune/rebase/upload/download` 和 pinned manifest export 具有 workspace lock、逐项目结果、流式日志、取消后复扫与失败重试。
 - Graph、Changes、Workspace Git 与 Repo overlay、confirmation 和结果状态均覆盖 80x24 与 120x40 TestBackend 渲染；四个主页面的数据行选中态另有 cell 前景、背景和粗体断言。
 - UI 默认英文，`-zh`/`--zh` 与 `-en`/`--en` 以实例级语言状态覆盖主要页面；长路径、diff 和外部文本按终端列宽安全处理，控制字符不能污染终端布局。选中行使用暗蓝灰色 `#262e3a` 背景并保留原有文本前景色，状态仍由颜色和字符或符号共同表达。
@@ -232,9 +232,9 @@ cargo run -- doctor .
 
 - Workspace Inspector 与 Changes 共享展开式文件树，目录连接符不改变稳定文件身份。
 - Changes 文件多选和批量 Stage/Unstage、selected-path Stash、完整 Discard；文件、hunk、changed-line 单目标 Stage/Unstage/Discard。
-- 多行 commit/amend 编辑器支持光标导航、当前位置输入与粘贴、signoff/signing、hook 输出和 message/cursor 恢复。
+- 多行 Commit/Amend/Reword 编辑器支持光标导航、当前位置输入与粘贴、HEAD message 预载、signoff/signing、hook 输出和 message/cursor 恢复；Reword 保留 staged index。
 - stash list/show/push/apply/pop/branch/drop/clear；push 支持 include-untracked、keep-index、staged-only，apply/pop 支持恢复 index。
-- operation state、冲突列表、ours/theirs/mark-resolved 和 continue/skip/abort。
+- operation state 在 Workspace、Changes 和 Repository 一致展示；冲突列表、ours/theirs/mark-resolved 和 continue/skip/abort 复用受保护执行路径。
 
 完成证据：
 
@@ -244,9 +244,10 @@ cargo run -- doctor .
 - destructive file/hunk/line discard 确认；失败保留选择与错误，成功自动刷新。
 - 文件批次使用稳定 `PathBuf` 集合，在写入前验证全部 diff token；Stash 保存 selected tracked/untracked，Discard 清理 tracked index/worktree、staged-added、untracked 和 rename 新旧路径，未选路径保持不变。
 - Workspace `S`/`Z`/`D` 在显式选择为空时冻结光标仓库，非空时仅冻结 stable multi-select，并在确认框展示最终仓库范围与改动统计；全批路径/token/index-lock 预检失败时零写入，Stage 暂存完整 tracked/untracked 改动并拒绝冲突仓库，执行结果按仓库保留且不承诺跨仓库回滚。
-- bracketed paste 保留提交正文换行；Unicode 光标移动、中间插入/删除、行首尾和跨行移动有状态测试覆盖。
-- 80x24/120x40 TestBackend 验证 Changes/Workspace Git 确认与结果、Message 边框、Options/Keys 分隔区和真实 cursor；Changes 文件名 cell 直接覆盖 staged、unstaged、mixed、untracked、conflict 状态色及选中态覆盖。
-- 真实临时仓库覆盖 selected-path Stash、完整 Discard、双仓库 Stage/Stash/Discard、冲突拒绝、stale 全批零写入，以及高级 stash 与 conflict 工作流。
+- bracketed paste 保留提交正文换行；Unicode 光标移动、中间插入/删除、行首尾和跨行移动有状态测试覆盖。Amend/Reword 预载 HEAD message，无 HEAD 时明确拒绝。
+- Workspace/Changes 的 Abort 在确认前重新读取 RepositorySnapshot 并校验 operation 类型，确认后以 snapshot token、workspace/project lock 和 index-lock 前置检查执行。
+- 80x24/120x40 TestBackend 验证 Changes/Workspace Git 确认与结果、活动 operation/abort 确认、Message 边框、Options/Keys 分隔区和真实 cursor；Changes 文件名 cell 直接覆盖 staged、unstaged、mixed、untracked、conflict 状态色及选中态覆盖。
+- 真实临时仓库覆盖 Reword 保留 staged index/tree、selected-path Stash、完整 Discard、双仓库 Stage/Stash/Discard、冲突拒绝、stale 全批零写入，以及高级 stash、conflict 和 operation abort 工作流。
 
 关键基础设施：
 

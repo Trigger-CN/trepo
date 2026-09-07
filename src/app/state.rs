@@ -8,12 +8,12 @@ use crate::app::repository::{
     choices, form_for, FormField, RepositoryChoice, RepositoryForm, RepositoryTab,
 };
 use crate::domain::{
-    BatchOperationItem, BatchOperationSpec, ChangeEntry, ChangePreview, Commit, CommitOutcome,
-    CommitSpec, HunkSource, OperationKind, OperationOutcome, OperationSpec, OperationTarget,
-    Project, ProjectId, ProjectSnapshot, RepoBatchAction, RepoBatchSpec, RepoProjectResult,
-    RepoProjectState, RepositoryAction, RepositoryActionOutcome, RepositoryActionSpec,
-    RepositorySnapshot, RiskLevel, Workspace, WorkspaceGitAction, WorkspaceGitSpec, WorkspaceKind,
-    WorkspaceSummary,
+    BatchOperationItem, BatchOperationSpec, ChangeEntry, ChangePreview, Commit, CommitMode,
+    CommitOutcome, CommitSpec, GitOperationKind, HunkSource, OperationKind, OperationOutcome,
+    OperationSpec, OperationTarget, Project, ProjectId, ProjectSnapshot, RepoBatchAction,
+    RepoBatchSpec, RepoProjectResult, RepoProjectState, RepositoryAction, RepositoryActionOutcome,
+    RepositoryActionSpec, RepositorySnapshot, RiskLevel, Workspace, WorkspaceGitAction,
+    WorkspaceGitSpec, WorkspaceKind, WorkspaceSummary,
 };
 use crate::i18n::Language;
 use crate::services::operations::OperationRunner;
@@ -212,7 +212,11 @@ impl GraphForm {
     fn commit_spec(&self) -> anyhow::Result<CommitSpec> {
         Ok(CommitSpec {
             message: self.text(0)?,
-            amend: matches!(self.choice, GraphActionChoice::Amend),
+            mode: if matches!(self.choice, GraphActionChoice::Amend) {
+                CommitMode::Amend
+            } else {
+                CommitMode::Commit
+            },
             signoff: self.toggle(1)?,
             signing: self.toggle(2)?,
         })
@@ -257,7 +261,18 @@ impl GraphForm {
 pub fn graph_actions(kind: GraphObjectKind) -> &'static [GraphActionChoice] {
     use GraphActionChoice as C;
     match kind {
-        GraphObjectKind::Commit | GraphObjectKind::Head => &[
+        GraphObjectKind::Commit => &[
+            C::Changes,
+            C::Commit,
+            C::StashCreate,
+            C::CreateBranch,
+            C::CreateTag,
+            C::CherryPick,
+            C::Revert,
+            C::Merge,
+            C::Rebase,
+        ],
+        GraphObjectKind::Head => &[
             C::Changes,
             C::Commit,
             C::Amend,
@@ -687,10 +702,17 @@ fn parse_graph_date(value: &str, label: &str) -> anyhow::Result<Option<i64>> {
     ))
 }
 #[derive(Debug)]
+pub struct ChangesLoad {
+    pub entries: Vec<ChangeEntry>,
+    pub operation: Option<GitOperationKind>,
+    pub head_message: Option<String>,
+}
+
+#[derive(Debug)]
 pub struct ChangesResult {
     pub project_id: ProjectId,
     pub generation: u64,
-    pub result: anyhow::Result<Vec<ChangeEntry>>,
+    pub result: anyhow::Result<ChangesLoad>,
 }
 
 #[derive(Debug)]
@@ -809,6 +831,8 @@ pub struct ChangesState {
     pub project: Project,
     pub return_screen: Screen,
     pub entries: Vec<ChangeEntry>,
+    pub operation: Option<GitOperationKind>,
+    pub head_message: Option<String>,
     pub selected: usize,
     pub selected_files: HashSet<PathBuf>,
     pub mode: ChangesMode,
@@ -831,7 +855,7 @@ pub struct ChangesState {
     pub commit_message: String,
     pub commit_cursor: usize,
     pub commit_editing: bool,
-    pub commit_amend: bool,
+    pub commit_mode: CommitMode,
     pub commit_signoff: bool,
     pub commit_signing: bool,
     pub commit_running: bool,
@@ -1133,7 +1157,9 @@ impl App {
             .iter()
             .enumerate()
             .filter(|(_, snapshot)| {
-                (!self.workspace_view.filters_changed() || snapshot.worktree.is_dirty())
+                (!self.workspace_view.filters_changed()
+                    || snapshot.worktree.is_dirty()
+                    || snapshot.operation.is_some())
                     && (query.is_empty()
                         || snapshot.project.name.to_lowercase().contains(&query)
                         || snapshot
@@ -2199,6 +2225,8 @@ impl App {
             project: project.clone(),
             return_screen,
             entries: Vec::new(),
+            operation: None,
+            head_message: None,
             selected: 0,
             selected_files: HashSet::new(),
             mode: ChangesMode::File,
@@ -2221,7 +2249,7 @@ impl App {
             commit_message: String::new(),
             commit_cursor: 0,
             commit_editing: false,
-            commit_amend: false,
+            commit_mode: CommitMode::Commit,
             commit_signoff: false,
             commit_signing: false,
             commit_running: false,
@@ -2229,7 +2257,17 @@ impl App {
         });
         let sender = self.changes_tx.clone();
         tokio::spawn(async move {
-            let result = git::changes(&project.path).await;
+            let result = async {
+                let entries = git::changes(&project.path).await?;
+                let operation = git::operation_state(&project.path).await?;
+                let head_message = git::head_commit_message(&project.path).await?;
+                Ok(ChangesLoad {
+                    entries,
+                    operation,
+                    head_message,
+                })
+            }
+            .await;
             let _ = sender.send(ChangesResult {
                 project_id: project.id,
                 generation,
@@ -2247,8 +2285,10 @@ impl App {
         }
         changes.loading = false;
         match result.result {
-            Ok(entries) => {
-                changes.entries = entries;
+            Ok(load) => {
+                changes.entries = load.entries;
+                changes.operation = load.operation;
+                changes.head_message = load.head_message;
                 changes.selected = changes
                     .selected
                     .min(changes.entries.len().saturating_sub(1));
@@ -2703,13 +2743,24 @@ impl App {
         }
     }
 
-    pub fn start_commit_editing(&mut self) {
+    pub fn start_commit_editing(&mut self, mode: CommitMode) {
         let Some(changes) = self.changes.as_mut() else {
             return;
         };
-        if changes.commit_running || changes.operation_running {
+        if changes.commit_running || changes.operation_running || changes.loading {
             return;
         }
+        if matches!(mode, CommitMode::Amend | CommitMode::Reword) {
+            let Some(message) = changes.head_message.clone() else {
+                changes.message = Some((
+                    true,
+                    format!("{} requires an existing HEAD commit", mode.label()),
+                ));
+                return;
+            };
+            changes.commit_message = message;
+        }
+        changes.commit_mode = mode;
         changes.commit_cursor = changes.commit_message.len();
         changes.commit_editing = true;
         changes.message = None;
@@ -2782,7 +2833,17 @@ impl App {
             CommitInput::MoveEnd => {
                 changes.commit_cursor = line_end(&changes.commit_message, changes.commit_cursor);
             }
-            CommitInput::ToggleAmend => changes.commit_amend = !changes.commit_amend,
+            CommitInput::ToggleAmend => {
+                changes.commit_mode = match changes.commit_mode {
+                    CommitMode::Commit if changes.head_message.is_some() => CommitMode::Amend,
+                    CommitMode::Commit => {
+                        changes.message =
+                            Some((true, "Amend requires an existing HEAD commit".to_owned()));
+                        CommitMode::Commit
+                    }
+                    CommitMode::Amend | CommitMode::Reword => CommitMode::Commit,
+                };
+            }
             CommitInput::ToggleSignoff => changes.commit_signoff = !changes.commit_signoff,
             CommitInput::ToggleSigning => changes.commit_signing = !changes.commit_signing,
         }
@@ -2809,7 +2870,7 @@ impl App {
         let project_id = project.id.clone();
         let spec = CommitSpec {
             message: changes.commit_message.clone(),
-            amend: changes.commit_amend,
+            mode: changes.commit_mode,
             signoff: changes.commit_signoff,
             signing: changes.commit_signing,
         };
@@ -3060,6 +3121,73 @@ impl App {
         }
     }
 
+    pub fn abort_active_operation(&mut self) {
+        let origin = self.screen;
+        let selected = match origin {
+            Screen::Workspace => self
+                .selected_project()
+                .map(|snapshot| (snapshot.project.clone(), snapshot.operation)),
+            Screen::Changes => self
+                .changes
+                .as_ref()
+                .map(|changes| (changes.project.clone(), changes.operation)),
+            Screen::Graph | Screen::Repository => None,
+        };
+        let Some((project, Some(operation))) = selected else {
+            match origin {
+                Screen::Workspace => {
+                    if let Some(state) = self.repository.as_mut() {
+                        state.message = Some((true, "No Git operation is active".to_owned()));
+                    }
+                }
+                Screen::Changes => {
+                    if let Some(changes) = self.changes.as_mut() {
+                        changes.message = Some((true, "No Git operation is active".to_owned()));
+                    }
+                }
+                Screen::Graph | Screen::Repository => {}
+            }
+            return;
+        };
+        if origin == Screen::Changes {
+            if let Some(changes) = self.changes.as_mut() {
+                if changes.operation_running || changes.commit_running {
+                    return;
+                }
+                changes.message = Some((false, "Loading current repository state...".to_owned()));
+            }
+        }
+        self.repository_intent = Some(RepositoryAction::Abort { operation });
+        self.load_repository(project, origin);
+    }
+
+    fn set_repository_origin_message(&mut self, is_error: bool, message: String) {
+        let origin = self
+            .repository
+            .as_ref()
+            .map_or(self.screen, |state| state.return_screen);
+        match origin {
+            Screen::Graph => {
+                if let Some(graph) = self.graph.as_mut() {
+                    graph.message = Some((is_error, message));
+                }
+                self.screen = Screen::Graph;
+            }
+            Screen::Changes => {
+                if let Some(changes) = self.changes.as_mut() {
+                    changes.message = Some((is_error, message));
+                }
+                self.screen = Screen::Changes;
+            }
+            Screen::Workspace | Screen::Repository => {
+                if let Some(state) = self.repository.as_mut() {
+                    state.message = Some((is_error, message));
+                }
+                self.screen = origin;
+            }
+        }
+    }
+
     pub fn open_repository(&mut self) {
         let return_screen = self.screen;
         let project = match self.screen {
@@ -3120,29 +3248,49 @@ impl App {
     }
 
     pub fn apply_repository_load(&mut self, result: RepositoryLoadResult) {
-        let Some(state) = self.repository.as_mut() else {
-            return;
-        };
-        if state.project.id != result.project_id || state.generation != result.generation {
-            return;
-        }
-        state.loading = false;
-        match result.result {
-            Ok(snapshot) => state.snapshot = Some(snapshot),
-            Err(error) => {
-                let message = error.to_string();
-                state.error = Some(message.clone());
-                if self.repository_intent.take().is_some() {
-                    if let Some(graph) = self.graph.as_mut() {
-                        graph.message = Some((true, message));
-                    }
-                }
+        let mut error_message = None;
+        {
+            let Some(state) = self.repository.as_mut() else {
+                return;
+            };
+            if state.project.id != result.project_id || state.generation != result.generation {
                 return;
             }
+            state.loading = false;
+            match result.result {
+                Ok(snapshot) => state.snapshot = Some(snapshot),
+                Err(error) => {
+                    let message = error.to_string();
+                    state.error = Some(message.clone());
+                    error_message = Some(message);
+                }
+            }
+            clamp_repository_selection(state);
         }
-        clamp_repository_selection(state);
+        if let Some(message) = error_message {
+            if self.repository_intent.take().is_some() {
+                self.set_repository_origin_message(true, message);
+            }
+            return;
+        }
         if let Some(action) = self.repository_intent.take() {
-            self.begin_repository_action(action);
+            if let RepositoryAction::Abort { operation } = action {
+                let current = self
+                    .repository
+                    .as_ref()
+                    .and_then(|state| state.snapshot.as_ref())
+                    .and_then(|snapshot| snapshot.operation);
+                if current != Some(operation) {
+                    self.set_repository_origin_message(
+                        true,
+                        format!("No active {} operation remains to abort", operation.label()),
+                    );
+                    return;
+                }
+                self.begin_repository_action(RepositoryAction::Abort { operation });
+            } else {
+                self.begin_repository_action(action);
+            }
         }
     }
 
@@ -3365,24 +3513,46 @@ impl App {
         {
             return;
         }
-        let graph_origin = state.return_screen == Screen::Graph;
+        let project = state.project.clone();
+        let origin = state.return_screen;
         match result.result {
             Ok(outcome) => {
-                let project = state.project.clone();
-                let return_screen = state.return_screen;
+                let message = outcome.message;
                 let detail = outcome.detail;
                 self.refresh();
-                if graph_origin {
-                    self.load_graph(project);
-                    if let Some(graph) = self.graph.as_mut() {
-                        graph.message = Some((false, outcome.message));
+                match origin {
+                    Screen::Graph => {
+                        self.load_graph(project);
+                        if let Some(graph) = self.graph.as_mut() {
+                            graph.message = Some((false, message));
+                        }
+                        self.screen = Screen::Graph;
                     }
-                    self.screen = Screen::Graph;
-                } else {
-                    self.load_repository(project, return_screen);
-                    if let Some(state) = self.repository.as_mut() {
-                        state.message = Some((false, outcome.message));
-                        state.detail = detail;
+                    Screen::Changes => {
+                        let return_screen = self
+                            .changes
+                            .as_ref()
+                            .map_or(Screen::Workspace, |changes| changes.return_screen);
+                        self.load_changes(project, return_screen);
+                        if let Some(changes) = self.changes.as_mut() {
+                            changes.message = Some((false, message));
+                        }
+                        self.screen = Screen::Changes;
+                    }
+                    Screen::Workspace => {
+                        if let Some(state) = self.repository.as_mut() {
+                            state.action_running = false;
+                            state.message = Some((false, message));
+                            state.detail = detail;
+                        }
+                        self.screen = Screen::Workspace;
+                    }
+                    Screen::Repository => {
+                        self.load_repository(project, Screen::Repository);
+                        if let Some(state) = self.repository.as_mut() {
+                            state.message = Some((false, message));
+                            state.detail = detail;
+                        }
                     }
                 }
             }
@@ -3392,12 +3562,7 @@ impl App {
                     state.action_running = false;
                     state.message = Some((true, message.clone()));
                 }
-                if graph_origin {
-                    if let Some(graph) = self.graph.as_mut() {
-                        graph.message = Some((true, message));
-                    }
-                    self.screen = Screen::Graph;
-                }
+                self.set_repository_origin_message(true, message);
             }
         }
     }
@@ -3598,11 +3763,12 @@ mod tests {
         app.projects[2].worktree.unstaged = 1;
         app.projects[3].worktree.untracked = 1;
         app.projects[4].worktree.conflicted = 1;
+        app.projects[0].operation = Some(GitOperationKind::Rebase);
         app.selected = 2;
 
         app.cycle_workspace_view();
         assert_eq!(app.workspace_view, WorkspaceView::Changed);
-        assert_eq!(app.filtered_indices(), vec![1, 2, 3, 4]);
+        assert_eq!(app.filtered_indices(), vec![0, 1, 2, 3, 4]);
         assert_eq!(app.selected_project().unwrap().project.name, "modified");
 
         app.search = "untracked".into();
@@ -3623,7 +3789,7 @@ mod tests {
         assert!(app.selected_project().is_some());
         assert_eq!(app.selected_project().unwrap().project.name, "clean");
         app.cycle_workspace_view();
-        assert!(app.selected_project().is_none());
+        assert_eq!(app.selected_project().unwrap().project.name, "clean");
         assert_eq!(app.selected, 0);
     }
 
@@ -3695,6 +3861,8 @@ mod tests {
             project: value.clone(),
             return_screen: Screen::Workspace,
             entries: Vec::new(),
+            operation: None,
+            head_message: None,
             selected: 0,
             selected_files: HashSet::new(),
             mode: ChangesMode::File,
@@ -3713,7 +3881,7 @@ mod tests {
             commit_message: String::new(),
             commit_cursor: 0,
             commit_editing: false,
-            commit_amend: false,
+            commit_mode: CommitMode::Commit,
             commit_signoff: false,
             commit_signing: false,
             commit_running: false,
@@ -3726,7 +3894,11 @@ mod tests {
         app.apply_changes(ChangesResult {
             project_id: value.id.clone(),
             generation: 1,
-            result: Ok(Vec::new()),
+            result: Ok(ChangesLoad {
+                entries: Vec::new(),
+                operation: None,
+                head_message: None,
+            }),
         });
         assert!(app.changes.as_ref().unwrap().loading);
         app.apply_preview(PreviewResult {
@@ -3767,6 +3939,8 @@ mod tests {
             project: value.clone(),
             return_screen: Screen::Workspace,
             entries: vec![entry.clone()],
+            operation: None,
+            head_message: None,
             selected: 0,
             selected_files: HashSet::new(),
             mode: ChangesMode::File,
@@ -3806,7 +3980,7 @@ mod tests {
             commit_message: String::new(),
             commit_cursor: 0,
             commit_editing: false,
-            commit_amend: false,
+            commit_mode: CommitMode::Commit,
             commit_signoff: false,
             commit_signing: false,
             commit_running: false,
@@ -3878,6 +4052,8 @@ mod tests {
             project: value.clone(),
             return_screen: Screen::Workspace,
             entries: entries.clone(),
+            operation: None,
+            head_message: None,
             selected: 0,
             selected_files: HashSet::new(),
             mode: ChangesMode::File,
@@ -3900,12 +4076,61 @@ mod tests {
             commit_message: String::new(),
             commit_cursor: 0,
             commit_editing: true,
-            commit_amend: false,
+            commit_mode: CommitMode::Commit,
             commit_signoff: false,
             commit_signing: false,
             commit_running: false,
             commit_generation: 0,
         });
+
+        {
+            let changes = app.changes.as_mut().unwrap();
+            changes.commit_editing = false;
+            changes.head_message = Some("HEAD subject\n\nHEAD body".into());
+        }
+        app.start_commit_editing(CommitMode::Commit);
+        assert_eq!(app.changes.as_ref().unwrap().commit_message, "");
+        app.edit_commit_message(CommitInput::Text("draft".into()));
+        app.cancel_commit_editing();
+        app.start_commit_editing(CommitMode::Commit);
+        assert_eq!(app.changes.as_ref().unwrap().commit_message, "draft");
+        app.cancel_commit_editing();
+        app.start_commit_editing(CommitMode::Amend);
+        let changes = app.changes.as_ref().unwrap();
+        assert_eq!(changes.commit_mode, CommitMode::Amend);
+        assert_eq!(changes.commit_message, "HEAD subject\n\nHEAD body");
+        app.cancel_commit_editing();
+        app.start_commit_editing(CommitMode::Reword);
+        let changes = app.changes.as_ref().unwrap();
+        assert_eq!(changes.commit_mode, CommitMode::Reword);
+        assert_eq!(changes.commit_message, "HEAD subject\n\nHEAD body");
+        app.cancel_commit_editing();
+        app.changes.as_mut().unwrap().head_message = None;
+        app.start_commit_editing(CommitMode::Amend);
+        let changes = app.changes.as_ref().unwrap();
+        assert!(!changes.commit_editing);
+        assert!(changes
+            .message
+            .as_ref()
+            .is_some_and(|(error, message)| *error && message.contains("existing HEAD")));
+        {
+            app.changes.as_mut().unwrap().head_message = Some("HEAD subject".into());
+            {
+                let changes = app.changes.as_mut().unwrap();
+                changes.commit_editing = true;
+                changes.commit_message = "edited draft".into();
+                changes.commit_mode = CommitMode::Commit;
+            }
+            app.edit_commit_message(CommitInput::ToggleAmend);
+            let changes = app.changes.as_ref().unwrap();
+            assert_eq!(changes.commit_mode, CommitMode::Amend);
+            assert_eq!(changes.commit_message, "edited draft");
+            let changes = app.changes.as_mut().unwrap();
+            changes.commit_editing = true;
+            changes.commit_mode = CommitMode::Commit;
+            changes.commit_message.clear();
+            changes.message = None;
+        }
 
         app.toggle_change_selected();
         app.move_change_selection(1);
