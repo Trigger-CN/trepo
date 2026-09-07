@@ -50,6 +50,7 @@ async fn scan_project(project: Project, generation: u64) -> ProjectSnapshot {
             snapshot.upstream = status.upstream;
             snapshot.worktree = status.worktree;
             snapshot.changes = status.changes;
+            snapshot.operation = status.operation;
             snapshot.scan = ScanState::Ready;
         }
         Err(error) => snapshot.scan = ScanState::Error(error.to_string()),

@@ -7,9 +7,9 @@ use tokio::sync::Mutex;
 
 use crate::adapters::git;
 use crate::domain::{
-    BatchOperationSpec, ChangeEntry, CommitOutcome, CommitSpec, HunkSource, OperationKind,
-    OperationOutcome, OperationSpec, OperationTarget, Project, RepositoryActionOutcome,
-    RepositoryActionSpec,
+    BatchOperationSpec, ChangeEntry, CommitMode, CommitOutcome, CommitSpec, HunkSource,
+    OperationKind, OperationOutcome, OperationSpec, OperationTarget, Project,
+    RepositoryActionOutcome, RepositoryActionSpec,
 };
 
 use crate::services::repo_batch::workspace_lock_for_project;
@@ -194,7 +194,7 @@ impl OperationRunner {
             .await?
             .iter()
             .all(|entry| entry.index.is_none())
-            && !spec.amend
+            && spec.mode == CommitMode::Commit
         {
             bail!("nothing is staged; stage at least one change before committing");
         }

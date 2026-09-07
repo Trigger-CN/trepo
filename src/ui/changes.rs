@@ -6,7 +6,7 @@ use ratatui::Frame;
 
 use super::change_tree::{change_tree_rows, ChangeTreeRow};
 use crate::app::state::{App, ChangesMode, ChangesState, PendingOperation};
-use crate::domain::{ChangeEntry, OperationKind, OperationTarget};
+use crate::domain::{ChangeEntry, CommitMode, OperationKind, OperationTarget};
 
 fn change_file_style(entry: &ChangeEntry) -> Style {
     if entry.conflicted {
@@ -78,12 +78,28 @@ pub fn render(frame: &mut Frame, app: &App) {
     if changes.confirmation.is_some() {
         render_confirmation(frame, app, changes);
     }
+    if app.repository.as_ref().is_some_and(|state| {
+        state.return_screen == crate::app::state::Screen::Changes && state.pending.is_some()
+    }) {
+        super::repository::render_confirmation(
+            frame,
+            app,
+            app.repository.as_ref().expect("repository state"),
+        );
+    }
     if changes.commit_editing {
         render_commit_dialog(frame, app, changes);
     }
 }
 
 fn render_header(frame: &mut Frame, app: &App, changes: &ChangesState, area: Rect) {
+    let operation = changes.operation.map_or_else(String::new, |operation| {
+        format!(
+            "  [{}: {}]",
+            app.language.text("operation", "操作"),
+            operation.label()
+        )
+    });
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled(
@@ -94,9 +110,10 @@ fn render_header(frame: &mut Frame, app: &App, changes: &ChangesState, area: Rec
                     .add_modifier(Modifier::BOLD),
             ),
             Span::raw(format!(
-                "  {}  /  {}",
+                "  {}  /  {}{}",
                 changes.project.name,
-                app.language.text("Changes", "改动")
+                app.language.text("Changes", "改动"),
+                operation
             )),
         ]))
         .block(Block::default().borders(Borders::BOTTOM)),
@@ -367,9 +384,18 @@ fn render_footer(frame: &mut Frame, app: &App, changes: &ChangesState, area: Rec
             Style::default().fg(if *is_error { Color::Red } else { Color::Green }),
         )
     } else {
-        Span::raw(app.language.text(
-            "Space Select   A All   z Stash   s Stage   u Unstage   d Discard   m Commit",
-            "Space 选择   A 全选   z 储藏   s 暂存   u 取消暂存   d 丢弃   m 提交",
+        let abort = if changes.operation.is_some() {
+            app.language.text("   x Abort operation", "   x 终止操作")
+        } else {
+            ""
+        };
+        Span::raw(format!(
+            "{}{}",
+            app.language.text(
+                "Space Select   A All   z Stash   s Stage   u Unstage   d Discard   m Commit   a Amend   w Reword",
+                "Space 选择   A 全选   z 储藏   s 暂存   u 取消暂存   d 丢弃   m 提交   a 修订   w 改写",
+            ),
+            abort
         ))
     };
     let mode = match changes.mode {
@@ -535,10 +561,10 @@ fn render_confirmation(frame: &mut Frame, app: &App, changes: &ChangesState) {
 fn render_commit_dialog(frame: &mut Frame, app: &App, changes: &ChangesState) {
     let area = centered_rect(84, 75, frame.area());
     frame.render_widget(Clear, area);
-    let title = if changes.commit_amend {
-        app.language.text(" Commit (amend) ", " 提交（修订） ")
-    } else {
-        app.language.text(" Commit ", " 提交 ")
+    let title = match changes.commit_mode {
+        CommitMode::Commit => app.language.text(" Commit ", " 提交 "),
+        CommitMode::Amend => app.language.text(" Amend HEAD ", " 修订 HEAD "),
+        CommitMode::Reword => app.language.text(" Reword HEAD ", " 改写 HEAD "),
     };
     let outer = Block::default().title(title).borders(Borders::ALL);
     let inner = outer.inner(area);
@@ -584,8 +610,8 @@ fn render_commit_dialog(frame: &mut Frame, app: &App, changes: &ChangesState) {
         Paragraph::new(vec![
             Line::raw(format!(
                 "{}: {}   {}: {}",
-                app.language.text("Ctrl-A amend", "Ctrl-A 修订"),
-                enabled(changes.commit_amend),
+                app.language.text("Mode", "模式"),
+                app.language.action(changes.commit_mode.label()),
                 app.language.text("Ctrl-U sign-off", "Ctrl-U 作者签署"),
                 enabled(changes.commit_signoff)
             )),

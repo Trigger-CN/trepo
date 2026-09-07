@@ -24,9 +24,10 @@
 - 多项目并发状态扫描和 Workspace 汇总；`d` 切换全部/仅改动/改动与文件范围，`t` 为每个范围独立切换并记忆列表/树形布局。
 - 包含本地分支、远端分支、tag、HEAD 与每条 stash 的全引用 commit graph。
 - Graph 两级对象菜单：从选中节点发现 commit/HEAD/local branch/remote branch/tag/stash，再进入固定对象动作或 typed form。
-- Graph 内可执行 commit/amend、stash 创建、branch/tag 创建、merge/rebase/cherry-pick/revert 和 stash 操作；本地与远端 branch 动作严格区分。
+- Graph 内可执行 commit、HEAD-only amend、stash 创建、branch/tag 创建、merge/rebase/cherry-pick/revert 和 stash 操作；本地与远端 branch 动作严格区分。
 - staged、worktree、untracked diff，以及文件、hunk、changed-line stage/unstage/discard。
-- commit/amend、sign-off、signing 与 hook 失败消息恢复。
+- Changes 提供 commit/amend/reword、HEAD message 预载、sign-off、signing 与 hook 失败消息恢复；reword 不消费 staged index。
+- Workspace/Changes/Repository 一致展示 merge/rebase/cherry-pick/revert；Workspace 和 Changes 可通过新鲜 snapshot、确认、锁和 token 终止活动操作。
 - stash、conflict/operation state、branch/tag、merge/rebase/cherry-pick/revert 和 remote 工作流。
 - Workspace 稳定项目多选；仓库树目录和文件展示行不可选择，导航与所有操作必须保持绑定稳定 `ProjectId`。Repo 批量动作受 workspace exclusive lock 保护，并支持流式日志、取消、复扫和失败重试。
 

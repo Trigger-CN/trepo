@@ -390,9 +390,24 @@ async fn run_command(
         .kill_on_drop(true);
     #[cfg(unix)]
     command.process_group(0);
-    let mut child = command
-        .spawn()
-        .with_context(|| format!("failed to run repo {}", args[0]))?;
+    let mut retries = 0;
+    let mut child = loop {
+        match command.spawn() {
+            Ok(child) => break child,
+            Err(error) => {
+                #[cfg(unix)]
+                let text_file_busy = error.raw_os_error() == Some(libc::ETXTBSY);
+                #[cfg(not(unix))]
+                let text_file_busy = false;
+                if text_file_busy && retries < 4 {
+                    retries += 1;
+                    sleep(Duration::from_millis(25)).await;
+                    continue;
+                }
+                return Err(error).with_context(|| format!("failed to run repo {}", args[0]));
+            }
+        }
+    };
     let pid = child.id();
     let stdout = child
         .stdout
@@ -621,6 +636,7 @@ pub(crate) fn workspace_lock(path: PathBuf) -> Arc<Mutex<()>> {
 #[cfg(all(test, unix))]
 mod tests {
     use std::fs;
+    use std::io::Write;
     use std::os::unix::fs::PermissionsExt;
 
     use tempfile::tempdir;
@@ -647,7 +663,11 @@ mod tests {
 
     fn fake_repo(root: &Path, body: &str) -> PathBuf {
         let path = root.join("fake-repo");
-        fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        {
+            let mut file = fs::File::create(&path).unwrap();
+            writeln!(file, "#!/bin/sh\n{body}").unwrap();
+            file.sync_all().unwrap();
+        }
         let mut permissions = fs::metadata(&path).unwrap().permissions();
         permissions.set_mode(0o755);
         fs::set_permissions(&path, permissions).unwrap();
