@@ -315,20 +315,7 @@ pub fn graph_actions(kind: GraphObjectKind) -> &'static [GraphActionChoice] {
 fn graph_form(choice: GraphActionChoice, object: GraphObject) -> Option<GraphForm> {
     use GraphActionChoice as C;
     let fields = match choice {
-        C::Commit | C::Amend => vec![
-            FormField::Text {
-                label: "Commit message",
-                value: String::new(),
-            },
-            FormField::Toggle {
-                label: "Sign off",
-                value: false,
-            },
-            FormField::Toggle {
-                label: "Sign commit",
-                value: false,
-            },
-        ],
+        C::Commit | C::Amend => return None,
         C::StashCreate => vec![
             FormField::Text {
                 label: "Message (optional)",
@@ -855,6 +842,7 @@ pub struct ChangesState {
     pub commit_message: String,
     pub commit_cursor: usize,
     pub commit_editing: bool,
+    pub pending_commit_mode: Option<CommitMode>,
     pub commit_mode: CommitMode,
     pub commit_signoff: bool,
     pub commit_signing: bool,
@@ -2043,11 +2031,8 @@ impl App {
         else {
             return;
         };
-        if matches!(
-            choice,
-            GraphActionChoice::Changes | GraphActionChoice::Commit | GraphActionChoice::Amend
-        ) {
-            if choice == GraphActionChoice::Changes {
+        match choice {
+            GraphActionChoice::Changes => {
                 if let Some(graph) = self.graph.as_mut() {
                     graph.action_menu = false;
                     graph.selected_object = None;
@@ -2055,13 +2040,20 @@ impl App {
                 self.open_changes();
                 return;
             }
-            if let Some(form) = graph_form(choice, object.clone()) {
+            GraphActionChoice::Commit | GraphActionChoice::Amend => {
                 if let Some(graph) = self.graph.as_mut() {
                     graph.action_menu = false;
-                    graph.form = Some(form);
+                    graph.selected_object = None;
                 }
+                self.open_changes();
+                self.start_commit_editing(if choice == GraphActionChoice::Amend {
+                    CommitMode::Amend
+                } else {
+                    CommitMode::Commit
+                });
                 return;
             }
+            _ => {}
         }
         if let Some(form) = graph_form(choice, object.clone()) {
             if let Some(graph) = self.graph.as_mut() {
@@ -2221,6 +2213,11 @@ impl App {
             .as_ref()
             .filter(|changes| changes.project.id == project.id)
             .map_or(1, |changes| changes.generation.wrapping_add(1));
+        let pending_commit_mode = self
+            .changes
+            .as_ref()
+            .filter(|changes| changes.project.id == project.id)
+            .and_then(|changes| changes.pending_commit_mode);
         self.changes = Some(ChangesState {
             project: project.clone(),
             return_screen,
@@ -2249,6 +2246,7 @@ impl App {
             commit_message: String::new(),
             commit_cursor: 0,
             commit_editing: false,
+            pending_commit_mode,
             commit_mode: CommitMode::Commit,
             commit_signoff: false,
             commit_signing: false,
@@ -2277,26 +2275,35 @@ impl App {
     }
 
     pub fn apply_changes(&mut self, result: ChangesResult) {
-        let Some(changes) = self.changes.as_mut() else {
-            return;
-        };
-        if changes.project.id != result.project_id || changes.generation != result.generation {
-            return;
-        }
-        changes.loading = false;
-        match result.result {
-            Ok(load) => {
-                changes.entries = load.entries;
-                changes.operation = load.operation;
-                changes.head_message = load.head_message;
-                changes.selected = changes
-                    .selected
-                    .min(changes.entries.len().saturating_sub(1));
-                changes
-                    .selected_files
-                    .retain(|path| changes.entries.iter().any(|entry| &entry.path == path));
+        let pending_commit_mode = {
+            let Some(changes) = self.changes.as_mut() else {
+                return;
+            };
+            if changes.project.id != result.project_id || changes.generation != result.generation {
+                return;
             }
-            Err(error) => changes.error = Some(error.to_string()),
+            changes.loading = false;
+            match result.result {
+                Ok(load) => {
+                    changes.entries = load.entries;
+                    changes.operation = load.operation;
+                    changes.head_message = load.head_message;
+                    changes.selected = changes
+                        .selected
+                        .min(changes.entries.len().saturating_sub(1));
+                    changes
+                        .selected_files
+                        .retain(|path| changes.entries.iter().any(|entry| &entry.path == path));
+                    changes.pending_commit_mode.take()
+                }
+                Err(error) => {
+                    changes.error = Some(error.to_string());
+                    None
+                }
+            }
+        };
+        if let Some(mode) = pending_commit_mode {
+            self.start_commit_editing(mode);
         }
         self.request_selected_preview();
     }
@@ -2747,7 +2754,15 @@ impl App {
         let Some(changes) = self.changes.as_mut() else {
             return;
         };
-        if changes.commit_running || changes.operation_running || changes.loading {
+        if changes.commit_running {
+            return;
+        }
+        if changes.operation_running || changes.loading {
+            changes.pending_commit_mode = Some(mode);
+            changes.message = Some((
+                false,
+                format!("{} will open when Changes finishes loading", mode.label()),
+            ));
             return;
         }
         if matches!(mode, CommitMode::Amend | CommitMode::Reword) {
@@ -2764,6 +2779,7 @@ impl App {
         changes.commit_cursor = changes.commit_message.len();
         changes.commit_editing = true;
         changes.message = None;
+        changes.pending_commit_mode = None;
     }
 
     pub fn cancel_commit_editing(&mut self) {
@@ -3881,6 +3897,7 @@ mod tests {
             commit_message: String::new(),
             commit_cursor: 0,
             commit_editing: false,
+            pending_commit_mode: None,
             commit_mode: CommitMode::Commit,
             commit_signoff: false,
             commit_signing: false,
@@ -3980,6 +3997,7 @@ mod tests {
             commit_message: String::new(),
             commit_cursor: 0,
             commit_editing: false,
+            pending_commit_mode: None,
             commit_mode: CommitMode::Commit,
             commit_signoff: false,
             commit_signing: false,
@@ -4076,6 +4094,7 @@ mod tests {
             commit_message: String::new(),
             commit_cursor: 0,
             commit_editing: true,
+            pending_commit_mode: None,
             commit_mode: CommitMode::Commit,
             commit_signoff: false,
             commit_signing: false,
@@ -4230,6 +4249,154 @@ mod tests {
             .message
             .as_ref()
             .is_some_and(|(error, message)| *error && message == "hook failed"));
+    }
+
+    #[tokio::test]
+    async fn queues_amend_during_changes_reload_and_uses_fresh_head_message() {
+        let value = project("alpha");
+        let workspace = Workspace {
+            root: PathBuf::from("/tmp"),
+            kind: WorkspaceKind::Git,
+            projects: vec![value.clone()],
+        };
+        let mut app = App::new(workspace, 1);
+
+        app.open_changes();
+        app.start_commit_editing(CommitMode::Amend);
+        let changes = app.changes.as_ref().unwrap();
+        assert_eq!(changes.pending_commit_mode, Some(CommitMode::Amend));
+        assert!(!changes.commit_editing);
+
+        let generation = changes.generation;
+        app.apply_changes(ChangesResult {
+            project_id: value.id.clone(),
+            generation,
+            result: Ok(ChangesLoad {
+                entries: Vec::new(),
+                operation: None,
+                head_message: Some("old HEAD message".into()),
+            }),
+        });
+        {
+            let changes = app.changes.as_mut().unwrap();
+            changes.commit_editing = false;
+            changes.operation_running = true;
+            changes.operation_generation = 7;
+        }
+        app.start_commit_editing(CommitMode::Amend);
+        assert_eq!(
+            app.changes.as_ref().unwrap().pending_commit_mode,
+            Some(CommitMode::Amend)
+        );
+
+        app.apply_operation(OperationResult {
+            project_id: value.id.clone(),
+            changes_generation: generation,
+            operation_generation: 7,
+            result: Ok(OperationOutcome {
+                kind: OperationKind::Stage,
+                path: PathBuf::from("src/main.rs"),
+                message: "Staged src/main.rs".into(),
+            }),
+        });
+        let refreshed_generation = app.changes.as_ref().unwrap().generation;
+        assert!(app.changes.as_ref().unwrap().loading);
+        assert_eq!(
+            app.changes.as_ref().unwrap().pending_commit_mode,
+            Some(CommitMode::Amend)
+        );
+
+        app.apply_changes(ChangesResult {
+            project_id: value.id,
+            generation: refreshed_generation,
+            result: Ok(ChangesLoad {
+                entries: Vec::new(),
+                operation: None,
+                head_message: Some("fresh HEAD subject\n\nfresh body".into()),
+            }),
+        });
+        let changes = app.changes.as_ref().unwrap();
+        assert!(changes.commit_editing);
+        assert_eq!(changes.commit_mode, CommitMode::Amend);
+        assert_eq!(changes.commit_message, "fresh HEAD subject\n\nfresh body");
+        assert_eq!(changes.pending_commit_mode, None);
+    }
+
+    #[tokio::test]
+    async fn graph_head_amend_opens_shared_changes_editor_with_head_message() {
+        let value = project("alpha");
+        let workspace = Workspace {
+            root: PathBuf::from("/tmp"),
+            kind: WorkspaceKind::Git,
+            projects: vec![value.clone()],
+        };
+        let mut app = App::new(workspace, 1);
+        app.screen = Screen::Graph;
+        app.graph = Some(GraphState {
+            project: value.clone(),
+            commits: Vec::new(),
+            selected: 0,
+            loading: false,
+            error: None,
+            generation: 1,
+            object_menu: false,
+            object_selected: 0,
+            action_menu: true,
+            action_selected: 2,
+            selected_object: Some(GraphObject {
+                kind: GraphObjectKind::Head,
+                name: "HEAD".into(),
+                oid: "aaaaaaaa".into(),
+            }),
+            form: None,
+            message: None,
+            selected_oid: None,
+            filter: GraphFilter::default(),
+            filter_form: None,
+            filter_error: None,
+            commit_message: String::new(),
+            commit_amend: false,
+            commit_running: false,
+            commit_generation: 0,
+        });
+
+        app.select_graph_action();
+        assert_eq!(app.screen, Screen::Changes);
+        let changes = app.changes.as_ref().unwrap();
+        assert_eq!(changes.return_screen, Screen::Graph);
+        assert_eq!(changes.pending_commit_mode, Some(CommitMode::Amend));
+        assert!(changes.loading);
+        let generation = changes.generation;
+        let graph = app.graph.as_ref().unwrap();
+        assert!(!graph.action_menu);
+        assert!(graph.selected_object.is_none());
+        assert!(graph.form.is_none());
+
+        app.apply_changes(ChangesResult {
+            project_id: value.id,
+            generation,
+            result: Ok(ChangesLoad {
+                entries: Vec::new(),
+                operation: None,
+                head_message: Some("Graph HEAD subject\n\nGraph body".into()),
+            }),
+        });
+        let changes = app.changes.as_ref().unwrap();
+        assert!(changes.commit_editing);
+        assert_eq!(changes.commit_mode, CommitMode::Amend);
+        assert_eq!(changes.commit_message, "Graph HEAD subject\n\nGraph body");
+        assert_eq!(changes.pending_commit_mode, None);
+    }
+
+    #[test]
+    fn graph_commit_and_amend_do_not_create_legacy_empty_message_forms() {
+        let head = GraphObject {
+            kind: GraphObjectKind::Head,
+            name: "HEAD".into(),
+            oid: "aaaaaaaa".into(),
+        };
+        assert!(graph_form(GraphActionChoice::Commit, head.clone()).is_none());
+        assert!(graph_form(GraphActionChoice::Amend, head).is_none());
     }
 
     #[test]

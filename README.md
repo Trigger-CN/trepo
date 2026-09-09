@@ -85,7 +85,7 @@ git push origin v0.5.0
 | `s` / `u` | Stage / unstage selected Changes files, or the active file, hunk, or line when no file selection exists |
 | `d` | Workspace: cycle the data scope through all projects → changed projects → changed projects with files; Changes: confirm complete Discard for selected files or discard the active file/hunk/line |
 | `t` | Workspace: toggle List / Tree layout for the current scope; each scope remembers its own layout |
-| `m` / `a` / `w` | Changes: open Commit / Amend `HEAD` / Reword `HEAD`; Amend and Reword preload the current message |
+| `m` / `a` / `w` | Changes: open Commit / Amend `HEAD` / Reword `HEAD` directly; Amend and Reword preload the current message, and a key pressed during Stage refresh opens the editor as soon as loading finishes |
 | `Ctrl-A` / `Ctrl-U` / `Ctrl-G` | Toggle Commit/Amend compatibility mode / sign-off / signing in the Changes commit dialog |
 | `o` | Open Repository management from Workspace, Graph, or Changes |
 | `PageUp` / `PageDown` | Scroll the selected diff |
@@ -109,8 +109,8 @@ Implemented:
 - responsive Graph columns preserve topology, wrapped subject text, and important refs first; rows use their real visual height, commit body keeps original line breaks, and dense remote/tag badges fold into `R:+N`/`T:+N` while Inspector/object menus retain every ref
 - in-memory Graph filtering by local/remote branch history, commit OID/subject/body/ref text, author, and inclusive UTC date range; conditions combine with AND while selection remains bound to commit OID
 - Graph two-level object menu: select a commit node, choose its commit/HEAD/local branch/remote branch/tag/stash object, then choose a fixed contextual action
-- Graph contextual commit on commit/HEAD objects and amend only on the current HEAD object, plus advanced stash creation, branch/tag creation, integration, stash, and local-branch Push/Force Push actions
-- Graph forms and confirmations reuse the protected RepositoryAction/OperationRunner workflow; local branches expose separate Push and force-with-lease actions while remote branches expose only valid local operations
+- Graph contextual Commit/Amend actions route into the same multiline Changes editor instead of a separate empty-message form; Amend remains limited to the current HEAD object and preloads its message
+- Graph repository forms and confirmations reuse the protected RepositoryAction/OperationRunner workflow; local branches expose separate Push and force-with-lease actions while remote branches expose only valid local operations
 - stable project multi-selection and name/path filtering in Workspace
 - selected-repository Workspace Git Stash/Discard with frozen per-repository change counts, full-batch path/token/index-lock preflight, and per-repository pending/running/success/failure results; cross-repository execution makes no rollback claim
 - fixed Repo batch actions for `sync/start/checkout/abandon/prune/rebase/upload/download` and pinned manifest export; Sync runs once as `repo sync -c -j8` when no project is selected, or `repo sync -c -j8 -- <projects...>` for the frozen selection
@@ -123,7 +123,7 @@ Implemented:
 - stable Changes file multi-selection with all-token-preflight batch Stage/Unstage, confirmed selected-path Stash, and confirmed complete Discard of tracked index/worktree plus untracked paths
 - guarded file-, hunk-, and changed-line stage, unstage, and discard with lock-time patch reconstruction
 - `git apply --check`, stale token/fingerprint rejection, destructive confirmation, and failure-state preservation
-- multiline Commit/Amend/Reword input and paste, current-message preload for Amend/Reword, sign-off, signing, hook output, and message recovery; Reword uses `--amend --only` so staged changes remain staged
+- multiline Commit/Amend/Reword input and paste directly from Changes, always-visible commit shortcuts at supported terminal widths, queued editor entry during Stage refresh, current-message preload for Amend/Reword, sign-off, signing, hook output, and message recovery; Reword uses `--amend --only` so staged changes remain staged
 - Workspace and Changes expose active merge/rebase/cherry-pick/revert state and guarded abort through a fresh repository snapshot, destructive confirmation, project lock, and snapshot token
 - Repository page with Status, Stashes, Branches & Tags, and Remotes tabs
 - structured Stash workflows for include-untracked, keep-index, staged-only, apply/pop index restore, branch creation, drop, and clear; staged-only rejects incompatible modes before execution

@@ -29,7 +29,7 @@ cargo run -- update
 3. 按 `S` 暂存（Stage）、按 `Z` 储藏（Stash），或按 `D` 丢弃（Discard）最终目标仓库的全部改动；检查确认框中的冻结仓库和每仓库统计后按 `y` 确认。
 4. 按 `Enter` 查看完整提交图，按 `c` 查看和处理文件改动，按 `o` 管理储藏、分支、标签和远端。
 5. 在 Changes 用 `Space`/`A` 多选文件，按 `z/s/u/d` 执行储藏/暂存/取消暂存/丢弃；`Tab` 切换 file/hunk/line 单目标作用域。
-6. 暂存完成后按 `m` 输入提交信息，按 `Ctrl-Enter` 或 `Ctrl-S` 提交。
+6. 暂存完成后无需离开 Changes：直接按 `m` 提交，或按 `a` 修订当前 HEAD；Amend 会自动载入原提交消息。若在 Stage 完成后的刷新期间按键，编辑器会在刷新结束后自动打开。按 `Ctrl-Enter` 或 `Ctrl-S` 提交。
 7. 需要推送时按 `o`，切换到 Remotes，按 `a` 选择 Push；也可在 Graph 选中本地分支对象后推送。
 8. 出现确认框时，仔细检查冻结目标和参数，按 `y` 执行，按 `n` 或 `Esc` 取消。
 
@@ -289,20 +289,22 @@ flowchart TD
 | `u` | Unstage 当前作用域；有文件多选时批量 Unstage |
 | `d` | 有文件多选时完整 Discard 所选 tracked index/worktree 与 untracked；否则丢弃当前 file/hunk/line；必须确认 |
 | `PageUp/PageDown` | 滚动 diff |
-| `m` | 打开 Commit 编辑器，提交暂存区 |
-| `a` | 打开 Amend 编辑器并预载当前 HEAD message，可同时包含暂存改动 |
-| `w` | 打开 Reword 编辑器并预载当前 HEAD message，只改写 HEAD message，不消费暂存区 |
+| `m` | 在 Changes 原地打开 Commit 编辑器，提交暂存区；若正在 Stage/刷新则排队自动打开 |
+| `a` | 在 Changes 原地打开 Amend 编辑器并预载当前 HEAD message，可同时包含刚暂存的改动 |
+| `w` | 在 Changes 原地打开 Reword 编辑器并预载当前 HEAD message，只改写 HEAD message，不消费暂存区 |
 | `x` | 当前操作存在时，重新读取状态并确认终止 |
 
 某个动作不适用于当前来源时会被拒绝，例如 staged hunk 不能再次 Stage，worktree hunk不能 Unstage。二进制文件或没有可选择文本 hunk 的文件不能进入对应细粒度模式。
+
+Graph 中 HEAD 对象的 Commit/Amend 也会进入同一个 Changes 多行编辑器，不再显示需要重新填写消息的独立空表单。
 
 ### Commit/Amend/Reword 流程
 
 ```mermaid
 flowchart TD
-    C[Changes] -->|m| M[Commit: 空消息编辑器]
-    C -->|a| A[Amend: 预载 HEAD message]
-    C -->|w| W[Reword: 预载 HEAD message]
+    C[Changes/Graph HEAD] -->|m/Commit| M[Commit: 保留草稿的消息编辑器]
+    C -->|a/Amend| A[Amend: 自动预载 HEAD message]
+    C -->|w| W[Reword: 自动预载 HEAD message]
     M --> E[输入或粘贴多行消息]
     A --> E
     W --> E

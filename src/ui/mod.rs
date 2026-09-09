@@ -1027,6 +1027,7 @@ mod tests {
             commit_message: "subject\n\nbody".into(),
             commit_cursor: "subject\n\nbody".len(),
             commit_editing: false,
+            pending_commit_mode: None,
             commit_mode: CommitMode::Commit,
             commit_signoff: false,
             commit_signing: false,
@@ -1039,7 +1040,28 @@ mod tests {
             assert!(text.contains("main.rs"));
             assert!(text.contains("1 selected"));
             assert!(text.contains("[x]"));
+            assert!(text.contains("m Commit"));
+            assert!(text.contains("a Amend HEAD"));
         }
+        app.changes.as_mut().unwrap().operation_running = true;
+        for (width, height) in [(80, 24), (120, 40)] {
+            let text = draw_text(&app, width, height);
+            assert!(text.contains("m Commit"));
+            assert!(text.contains("a Amend HEAD"));
+            assert!(text.contains("Writing..."));
+        }
+        {
+            let changes = app.changes.as_mut().unwrap();
+            changes.operation_running = false;
+            changes.message = Some((false, "Staged src/main.rs".into()));
+        }
+        for (width, height) in [(80, 24), (120, 40)] {
+            let text = draw_text(&app, width, height);
+            assert!(text.contains("m Commit"));
+            assert!(text.contains("a Amend HEAD"));
+            assert!(text.contains("Staged src/main.rs"));
+        }
+        app.changes.as_mut().unwrap().message = None;
         assert_text_foreground(&app, 120, 40, "staged.rs", Color::LightGreen);
         assert_text_foreground(&app, 120, 40, "unstaged.rs", Color::LightRed);
         assert_text_foreground(&app, 120, 40, "mixed.rs", Color::LightMagenta);
@@ -1216,6 +1238,7 @@ mod tests {
             commit_message: String::new(),
             commit_cursor: 0,
             commit_editing: false,
+            pending_commit_mode: None,
             commit_mode: CommitMode::Commit,
             commit_signoff: false,
             commit_signing: false,
