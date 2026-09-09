@@ -368,54 +368,45 @@ fn render_preview(frame: &mut Frame, app: &App, changes: &ChangesState, area: Re
 }
 
 fn render_footer(frame: &mut Frame, app: &App, changes: &ChangesState, area: Rect) {
-    let first = if changes.commit_running {
-        Span::styled(
+    let primary = Line::raw(app.language.text(
+        "m Commit   a Amend HEAD   w Reword HEAD   |   s Stage   u Unstage   z Stash   d Discard",
+        "m 提交   a 修订 HEAD   w 改写 HEAD   |   s 暂存   u 取消暂存   z 储藏   d 丢弃",
+    ));
+    let status = if changes.commit_running {
+        Line::styled(
             app.language.text("Committing...", "正在提交..."),
             Style::default().fg(Color::Yellow),
         )
     } else if changes.operation_running {
-        Span::styled(
+        Line::styled(
             app.language.text("Writing...", "正在写入..."),
             Style::default().fg(Color::Yellow),
         )
     } else if let Some((is_error, message)) = &changes.message {
-        Span::styled(
+        Line::styled(
             message.clone(),
             Style::default().fg(if *is_error { Color::Red } else { Color::Green }),
         )
     } else {
+        let mode = match changes.mode {
+            ChangesMode::File => app.language.label("file"),
+            ChangesMode::Hunk => app.language.label("hunk"),
+            ChangesMode::Line => app.language.label("line"),
+        };
         let abort = if changes.operation.is_some() {
-            app.language.text("   x Abort operation", "   x 终止操作")
+            app.language.text("x Abort   ", "x 终止   ")
         } else {
             ""
         };
-        Span::raw(format!(
-            "{}{}",
+        Line::raw(format!(
+            "{abort}[{mode}] {}",
             app.language.text(
-                "Space Select   A All   z Stash   s Stage   u Unstage   d Discard   m Commit   a Amend   w Reword",
-                "Space 选择   A 全选   z 储藏   s 暂存   u 取消暂存   d 丢弃   m 提交   a 修订   w 改写",
-            ),
-            abort
+                "Space Select   A All   Tab Mode   j/k Move   r Refresh   Esc Back   ? Help",
+                "Space 选择   A 全选   Tab 模式   j/k 移动   r 刷新   Esc 返回   ? 帮助",
+            )
         ))
     };
-    let mode = match changes.mode {
-        ChangesMode::File => app.language.label("file"),
-        ChangesMode::Hunk => app.language.label("hunk"),
-        ChangesMode::Line => app.language.label("line"),
-    };
-    frame.render_widget(
-        Paragraph::new(vec![
-            Line::from(first),
-            Line::raw(format!(
-                "[{mode}] {}",
-                app.language.text(
-                    "Tab Mode   j/k Move   g/G First/last   r Refresh   Esc Back   ? Help",
-                    "Tab 模式   j/k 移动   g/G 首/末   r 刷新   Esc 返回   ? 帮助",
-                )
-            )),
-        ]),
-        area,
-    );
+    frame.render_widget(Paragraph::new(vec![primary, status]), area);
 }
 
 fn render_confirmation(frame: &mut Frame, app: &App, changes: &ChangesState) {
