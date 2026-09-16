@@ -261,6 +261,7 @@ Changes 页面分为文件树、hunk 列表、diff 检查器和提交对话框�
 - editor 根据光标逻辑行和显示宽度进行垂直、水平滚动，并使用 Ratatui 真实终端光标；`Enter` 插入换行，`Ctrl-Enter` 或 `Ctrl-S` 提交，amend/signoff/GPG signing 使用独立开关，默认不跳过 hooks。
 - 提交使用 project 级写锁并在锁内检查 `index.lock`；普通 commit 要求存在 staged 内容，amend 遵循 Git 当前 HEAD 语义。
 - commit 失败时合并 hook stdout/stderr，保留多行输入、光标、选项和错误状态，允许修正后重试；成功后刷新 Changes 与 Workspace。
+- 提交消息模板保存在仓库本地 Git 配置键 `trepo.commitTemplate`，通过 Changes 的 `t` 打开同一个 bordered 多行编辑器；写完用 `git config --local --replace-all`，清空用 `--unset-all`（键不存在视为成功），读取用 `--null --get` 并把退出码 1 当作未设置。模板只预填全新的 Commit 草稿，已输入内容不被覆盖，Amend/Reword 仍使用 HEAD message。
 
 - diff 预览保持一个源行对应一个终端行，超宽文本在面板 inner width 内安全截断，禁止 Ratatui 自动 wrap 导致内容跨过边框或折回终端左侧。
 - 文件路径、diff、commit/ref 文本和外部命令消息先转义控制字符，再按 `unicode-width` 终端列宽处理；中文等双宽字符不会被截断到半个 cell。
@@ -287,11 +288,14 @@ Tags：
 
 Remotes：
 
-- 当前列出 fetch/push URL，并提供 add、set-url、remove、fetch、prune、pull、pull-rebase、普通 Push、Force push with lease 和 set-upstream。
+- 当前列出 fetch/push URL，并提供 add、set-url、remove、fetch、prune、pull、pull-rebase、普通 Push、Push refspec、Force push with lease 和 set-upstream。
 - 普通 Push 与 Force Push 是独立可发现入口，但共享 `RepositoryAction::Push` 与同一安全执行链路；Graph 的本地分支对象菜单也提供两个入口。
 - RemoteWrite 确认展示 remote、`branch:branch` refspec、远端到本地 OID range、set-upstream 和 force-with-lease 状态；Force Push 额外明确提示可能改写远端历史。
 - URL 只在显示层隐藏 `scheme://userinfo@host` 的 userinfo；真实 URL 仍作为单独 argv 传给 Git。
 - UI 不提供裸 `--force`，只提供 `--force-with-lease`；Git 以本地 remote-tracking ref 作为 lease，远端在未 fetch 时被其他客户端推进会使推送失败。确认后任何本地可见 ref/remote 状态变化也会使 snapshot token 失效并拒绝执行。
+- Push refspec 是独立于 `Push` 的 `RepositoryAction::PushRefspec { remote, refspec }`，argv 固定为 `push <remote> <refspec>`，每部分都是独立 `OsString`，用于 Gerrit 风格 `HEAD:refs/for/master`。refspec 在使用前做本地校验：拒绝空值、前导 `-`、NUL、空白、超过一个 `:`，以及任一侧为空、以 `/` 开头/结尾、含 `..`、`//`、`\` 或空/`.`/`..` 路径段的值。
+- Push refspec 的预览列出 Remote、Refspec、远端 ref 和可解析的提交范围（`<远端 OID>..<本地 OID>`、`new remote ref -> <OID>` 或 `unresolved until execution`），并使用与 Push 相同的 RemoteWrite 确认、项目锁和 snapshot token。
+- Workspace `p` 是同一动作的快捷入口，但不信任已有页面数据：先通过 `workspace_push_intent` 异步重载最新 repository snapshot，再从中取当前分支和 remote（优先 `origin`，否则第一个已配置 remote），最后才进入确认流程；没有 checkout 分支、没有 remote 或快照加载失败时只报错，不发送任何写操作。
 
 Stashes：
 

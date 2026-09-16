@@ -256,6 +256,9 @@ fn drain_background_messages(app: &mut App) {
     while let Ok(result) = app.graph_commit_rx.try_recv() {
         app.apply_graph_commit(result);
     }
+    while let Ok(result) = app.template_rx.try_recv() {
+        app.apply_template(result);
+    }
     while let Ok(result) = app.repository_rx.try_recv() {
         app.apply_repository_load(result);
     }
@@ -443,6 +446,39 @@ fn handle_key(app: &mut App, key: KeyEvent) {
     if app
         .changes
         .as_ref()
+        .is_some_and(|changes| changes.template_editing)
+    {
+        match key.code {
+            KeyCode::Esc => app.cancel_template_editing(),
+            KeyCode::Enter if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                app.submit_template()
+            }
+            KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                app.submit_template()
+            }
+            KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                // Ctrl-D clears the stored template and saves immediately.
+                app.clear_template()
+            }
+            KeyCode::Enter => app.edit_template(trepo::app::state::CommitInput::Newline),
+            KeyCode::Backspace => app.edit_template(trepo::app::state::CommitInput::Backspace),
+            KeyCode::Delete => app.edit_template(trepo::app::state::CommitInput::Delete),
+            KeyCode::Left => app.edit_template(trepo::app::state::CommitInput::MoveLeft),
+            KeyCode::Right => app.edit_template(trepo::app::state::CommitInput::MoveRight),
+            KeyCode::Up => app.edit_template(trepo::app::state::CommitInput::MoveUp),
+            KeyCode::Down => app.edit_template(trepo::app::state::CommitInput::MoveDown),
+            KeyCode::Home => app.edit_template(trepo::app::state::CommitInput::MoveHome),
+            KeyCode::End => app.edit_template(trepo::app::state::CommitInput::MoveEnd),
+            KeyCode::Char(character) => {
+                app.edit_template(trepo::app::state::CommitInput::Character(character))
+            }
+            _ => {}
+        }
+        return;
+    }
+    if app
+        .changes
+        .as_ref()
         .is_some_and(|changes| changes.commit_editing)
     {
         match key.code {
@@ -519,6 +555,7 @@ fn handle_key(app: &mut App, key: KeyEvent) {
             KeyCode::Char('r') => app.refresh(),
             KeyCode::Char('c') => app.open_changes(),
             KeyCode::Char('o') => app.open_repository(),
+            KeyCode::Char('p') => app.begin_workspace_refspec_push(),
             KeyCode::Char('x') => app.abort_active_operation(),
             KeyCode::Enter => app.open_graph(),
             KeyCode::Down | KeyCode::Char('j') => app.move_selection(1),
@@ -566,6 +603,7 @@ fn handle_key(app: &mut App, key: KeyEvent) {
             KeyCode::Char('m') => app.start_commit_editing(CommitMode::Commit),
             KeyCode::Char('a') => app.start_commit_editing(CommitMode::Amend),
             KeyCode::Char('w') => app.start_commit_editing(CommitMode::Reword),
+            KeyCode::Char('t') => app.start_template_editing(),
             KeyCode::Char('x') => app.abort_active_operation(),
             _ => {}
         },

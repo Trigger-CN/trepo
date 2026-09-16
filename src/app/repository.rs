@@ -55,6 +55,7 @@ pub enum RepositoryChoice {
     Fetch,
     Pull,
     Push,
+    PushRefspec,
     ForcePush,
     SetUpstream,
     RemotePrune,
@@ -92,6 +93,7 @@ impl RepositoryChoice {
             Self::Fetch => "Fetch remote",
             Self::Pull => "Pull branch",
             Self::Push => "Push branch",
+            Self::PushRefspec => "Push refspec",
             Self::ForcePush => "Force push with lease",
             Self::SetUpstream => "Set upstream",
             Self::RemotePrune => "Prune remote",
@@ -137,6 +139,7 @@ pub fn choices(tab: RepositoryTab) -> &'static [RepositoryChoice] {
             RepositoryChoice::Fetch,
             RepositoryChoice::Pull,
             RepositoryChoice::Push,
+            RepositoryChoice::PushRefspec,
             RepositoryChoice::ForcePush,
             RepositoryChoice::SetUpstream,
             RepositoryChoice::RemotePrune,
@@ -189,6 +192,33 @@ pub fn action_preview_with_language(
                     language.label("Force with lease"),
                     language.label(on_off(*force_with_lease))
                 ),
+            ]
+        }
+        RepositoryAction::PushRefspec { remote, refspec } => {
+            let target = refspec
+                .split_once(':')
+                .map_or_else(|| refspec.clone(), |(_, target)| target.to_owned());
+            let source = refspec_source_oid(refspec, snapshot);
+            let remote_ref = snapshot
+                .remote_branches
+                .iter()
+                .find(|entry| entry.name == format!("{remote}/{target}"))
+                .map(|entry| entry.oid.clone());
+            let range = match (source, remote_ref) {
+                (Some(source), Some(remote_ref)) => format!("{remote_ref}..{source}"),
+                (Some(source), None) => format!(
+                    "{} -> {source}",
+                    language.text("new remote ref", "新远程引用")
+                ),
+                (None, _) => language
+                    .text("unresolved until execution", "执行时解析")
+                    .to_owned(),
+            };
+            vec![
+                format!("{}: {remote}", language.label("Remote")),
+                format!("{}: {refspec}", language.label("Refspec")),
+                format!("{}: {target}", language.label("Remote ref")),
+                format!("{}: {range}", language.label("Commit range")),
             ]
         }
         RepositoryAction::StashPush {
@@ -281,6 +311,34 @@ fn on_off(value: bool) -> &'static str {
     } else {
         "off"
     }
+}
+
+fn current_branch_name(snapshot: &RepositorySnapshot) -> Option<String> {
+    snapshot
+        .branches
+        .iter()
+        .find(|entry| entry.current)
+        .map(|entry| entry.name.clone())
+}
+
+/// Resolves the local side of a refspec to a commit OID when it names a
+/// branch this snapshot knows about.
+fn refspec_source_oid(refspec: &str, snapshot: &RepositorySnapshot) -> Option<String> {
+    let source = refspec
+        .split_once(':')
+        .map_or(refspec, |(source, _)| source);
+    if source == "HEAD" {
+        return snapshot
+            .branches
+            .iter()
+            .find(|entry| entry.current)
+            .map(|entry| entry.oid.clone());
+    }
+    snapshot
+        .branches
+        .iter()
+        .find(|entry| entry.name == source)
+        .map(|entry| entry.oid.clone())
 }
 
 fn redact_url(url: &str) -> String {
@@ -468,6 +526,10 @@ impl RepositoryForm {
                 set_upstream: self.toggle_value(2)?,
                 force_with_lease: matches!(self.choice, C::ForcePush),
             },
+            C::PushRefspec => A::PushRefspec {
+                remote: self.text(0)?,
+                refspec: self.text(1)?,
+            },
             C::SetUpstream => A::SetUpstream {
                 branch: self.text(0)?,
                 upstream: self.text(1)?,
@@ -517,11 +579,7 @@ pub fn form_for(
         .remotes
         .get(selected)
         .map(|entry| entry.name.clone());
-    let current_branch = snapshot
-        .branches
-        .iter()
-        .find(|entry| entry.current)
-        .map(|entry| entry.name.clone());
+    let current_branch = current_branch_name(snapshot);
     let fields = match choice {
         C::TakeOurs | C::TakeTheirs | C::MarkResolved => {
             vec![text_field("Path", conflict.unwrap_or_default())]
@@ -585,6 +643,16 @@ pub fn form_for(
             text_field("Branch", current_branch.clone().unwrap_or_default()),
             toggle_field("Set upstream", false),
         ],
+        C::PushRefspec => vec![
+            text_field("Remote", remote.unwrap_or_else(|| "origin".to_owned())),
+            text_field(
+                "Refspec",
+                format!(
+                    "HEAD:refs/for/{}",
+                    current_branch.unwrap_or_else(|| "master".to_owned())
+                ),
+            ),
+        ],
         C::SetUpstream => vec![
             text_field("Branch", current_branch.unwrap_or_default()),
             text_field("Upstream", "origin/"),
@@ -630,6 +698,70 @@ mod tests {
             worktree_token: 0,
             token: 1,
         }
+    }
+
+    #[test]
+    fn push_refspec_preview_resolves_head_to_the_remote_magic_ref() {
+        let lines = action_preview(
+            &RepositoryAction::PushRefspec {
+                remote: "origin".into(),
+                refspec: "HEAD:refs/for/main".into(),
+            },
+            &snapshot(),
+        );
+        assert_eq!(lines[0], "Remote: origin");
+        assert_eq!(lines[1], "Refspec: HEAD:refs/for/main");
+        assert_eq!(lines[2], "Remote ref: refs/for/main");
+        // `refs/for/main` has no tracking ref yet, so the local oid is shown.
+        assert_eq!(lines[3], "Commit range: new remote ref -> bbbbbbbb");
+
+        let mut snapshot = snapshot();
+        snapshot.remote_branches.push(RemoteBranchEntry {
+            name: "origin/refs/for/main".into(),
+            oid: "cccccccc".into(),
+        });
+        let lines = action_preview(
+            &RepositoryAction::PushRefspec {
+                remote: "origin".into(),
+                refspec: "HEAD:refs/for/main".into(),
+            },
+            &snapshot,
+        );
+        assert_eq!(lines[3], "Commit range: cccccccc..bbbbbbbb");
+    }
+
+    #[test]
+    fn push_refspec_form_defaults_to_the_current_branch_and_stays_editable() {
+        let form = form_for(RepositoryChoice::PushRefspec, &snapshot(), 0)
+            .unwrap()
+            .unwrap();
+        assert_eq!(form.fields.len(), 2);
+        assert!(matches!(
+            form.action().unwrap(),
+            RepositoryAction::PushRefspec {
+                ref remote,
+                ref refspec,
+            } if remote == "origin" && refspec == "HEAD:refs/for/main"
+        ));
+        assert_eq!(
+            RepositoryAction::PushRefspec {
+                remote: "origin".into(),
+                refspec: "HEAD:refs/for/main".into(),
+            }
+            .risk(),
+            crate::domain::RiskLevel::RemoteWrite
+        );
+
+        let mut without_branch = snapshot();
+        without_branch.branches.clear();
+        let form = form_for(RepositoryChoice::PushRefspec, &without_branch, 0)
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            form.action().unwrap(),
+            RepositoryAction::PushRefspec { ref refspec, .. }
+                if refspec == "HEAD:refs/for/master"
+        ));
     }
 
     #[test]
