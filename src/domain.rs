@@ -696,6 +696,11 @@ pub enum RepositoryAction {
         set_upstream: bool,
         force_with_lease: bool,
     },
+    /// Pushes an explicit refspec, such as `HEAD:refs/for/master`.
+    PushRefspec {
+        remote: String,
+        refspec: String,
+    },
     SetUpstream {
         branch: String,
         upstream: String,
@@ -737,6 +742,7 @@ impl RepositoryAction {
             Self::Fetch { .. } => "Fetch",
             Self::Pull { .. } => "Pull",
             Self::Push { .. } => "Push",
+            Self::PushRefspec { .. } => "Push refspec",
             Self::SetUpstream { .. } => "Set upstream",
             Self::RemotePrune { .. } => "Prune remote",
         }
@@ -754,7 +760,7 @@ impl RepositoryAction {
             | Self::BranchDelete { .. }
             | Self::TagDelete { .. }
             | Self::RemoteRemove { .. } => RiskLevel::Destructive,
-            Self::Push { .. } => RiskLevel::RemoteWrite,
+            Self::Push { .. } | Self::PushRefspec { .. } => RiskLevel::RemoteWrite,
             Self::StashShow { .. } => RiskLevel::ReadOnly,
             _ => RiskLevel::ReversibleWrite,
         }

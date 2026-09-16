@@ -30,8 +30,9 @@ cargo run -- update
 4. 按 `Enter` 查看完整提交图，按 `c` 查看和处理文件改动，按 `o` 管理储藏、分支、标签和远端。
 5. 在 Changes 用 `Space`/`A` 多选文件，按 `z/s/u/d` 执行储藏/暂存/取消暂存/丢弃；`Tab` 切换 file/hunk/line 单目标作用域。
 6. 暂存完成后无需离开 Changes：直接按 `m` 提交，或按 `a` 修订当前 HEAD；Amend 会自动载入原提交消息。若在 Stage 完成后的刷新期间按键，编辑器会在刷新结束后自动打开。按 `Ctrl-Enter` 或 `Ctrl-S` 提交。
-7. 需要推送时按 `o`，切换到 Remotes，按 `a` 选择 Push；也可在 Graph 选中本地分支对象后推送。
-8. 出现确认框时，仔细检查冻结目标和参数，按 `y` 执行，按 `n` 或 `Esc` 取消。
+7. 想固定提交格式时，在 Changes 按 `t` 编辑提交消息模板（存于仓库本地 `trepo.commitTemplate`），`Ctrl-Enter`/`Ctrl-S` 保存后，之后空草稿的 Commit 会自动预填该模板；空草稿保存或 `Ctrl-D` 会清除模板。
+8. 需要推送时按 `o`，切换到 Remotes，按 `a` 选择 Push；也可在 Graph 选中本地分支对象后推送。需要 Gerrit 风格的 `HEAD:refs/for/<branch>` 推送时，在 Remotes 选择 Push refspec 填写 refspec，或直接回到 Workspace 对光标仓库按 `p`（自动推导当前分支与 remote 后进入同一确认框）。
+9. 出现确认框时，仔细检查冻结目标和参数，按 `y` 执行，按 `n` 或 `Esc` 取消。
 
 ## 3. 通用交互规则
 
@@ -289,6 +290,7 @@ flowchart TD
 | `u` | Unstage 当前作用域；有文件多选时批量 Unstage |
 | `d` | 有文件多选时完整 Discard 所选 tracked index/worktree 与 untracked；否则丢弃当前 file/hunk/line；必须确认 |
 | `PageUp/PageDown` | 滚动 diff |
+| `t` | 在 Changes 打开仓库提交消息模板编辑器（存于仓库本地 `trepo.commitTemplate`） |
 | `m` | 在 Changes 原地打开 Commit 编辑器，提交暂存区；若正在 Stage/刷新则排队自动打开 |
 | `a` | 在 Changes 原地打开 Amend 编辑器并预载当前 HEAD message，可同时包含刚暂存的改动 |
 | `w` | 在 Changes 原地打开 Reword 编辑器并预载当前 HEAD message，只改写 HEAD message，不消费暂存区 |
@@ -321,6 +323,15 @@ flowchart TD
 ```
 
 Amend 与 Reword 要求存在 HEAD。Amend 执行 `git commit --amend`，可将当前暂存内容纳入提交；Reword 执行 `git commit --amend --only`，只改写当前 HEAD message，原有暂存内容仍留在 index。编辑器支持多行粘贴、方向键、Home/End、Backspace/Delete。普通 `Enter` 只插入换行，不会提交。
+
+### 提交消息模板
+
+按 `t` 打开模板编辑器：
+
+- 模板保存在仓库本地 Git 配置键 `trepo.commitTemplate`（写在 `.git/config`，只属于当前仓库、不影响其他仓库），因此 `git config --local trepo.commitTemplate` 能直接读到同一份值；
+- `Ctrl-Enter` 或 `Ctrl-S` 保存；开启 Commit（`m`）时，若草稿为空则用模板预填，已输入内容绝不被覆盖；Amend/Reword 仍预载 HEAD message；
+- 空草稿保存或 `Ctrl-D` 会删除 `trepo.commitTemplate`（删除不存在的键视为成功）；模板可以包含多行内容；
+- 保存失败时保留原有模板并显示 Git 的错误输出。
 
 ## 8. Repository 管理页
 
@@ -402,11 +413,20 @@ Merge/Rebase/Cherry-pick/Revert 发生冲突后，转到 Status 标签页使用�
 | Fetch remote | Remote、Prune 开关 | 否 |
 | Pull branch | Remote、Branch、Rebase 开关 | 否 |
 | Push branch | Remote、Branch、Set upstream | 是，远端写 |
+| Push refspec | Remote、Refspec（默认 `HEAD:refs/for/<当前分支>`） | 是，远端写 |
 | Force push with lease | Remote、Branch、Set upstream | 是，可能改写历史 |
 | Set upstream | Branch、Upstream | 否 |
 | Prune remote | Remote | 否 |
 
 Push 固定使用 `branch:branch` refspec。Force Push 只使用 `--force-with-lease`；确认框会显示 remote、精确 refspec、本地/远端 OID range、Set upstream 和 lease 状态。
+
+Push refspec 把输入作为单个 Git argv 传给 `git push <remote> <refspec>`，用于 Gerrit 风格的 `HEAD:refs/for/master`。编辑器会拒绝空值、以 `-` 开头、含空白/NUL、超过一个 `:` 或路径含 `.`/`..`/`//` 的 refspec；确认框显示 Remote、Refspec、远端 ref 和可解析的提交范围（新远端 ref 会标注 `new remote ref`）。
+
+### 工作区 refspec 推送
+
+在 Workspace 按 `p` 会对光标仓库执行同样的推送：trepo 先重新加载最新仓库快照，再从快照推导当前分支与 remote（优先 `origin`，否则第一个已配置 remote），然后走 Repository 同样的预览与 `y` 确认。待确认的 refspec 为 `HEAD:refs/for/<当前分支>`。
+
+快照加载完成前不会发送任何写操作；没有 checkout 分支、没有配置 remote 或快照加载失败时只在 Workspace footer 显示错误，不会猜测目标。
 
 ## 9. 确认与失败恢复
 

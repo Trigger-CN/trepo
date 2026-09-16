@@ -87,7 +87,9 @@ pub fn render(frame: &mut Frame, app: &App) {
             app.repository.as_ref().expect("repository state"),
         );
     }
-    if changes.commit_editing {
+    if changes.template_editing {
+        render_template_dialog(frame, app, changes);
+    } else if changes.commit_editing {
         render_commit_dialog(frame, app, changes);
     }
 }
@@ -369,8 +371,8 @@ fn render_preview(frame: &mut Frame, app: &App, changes: &ChangesState, area: Re
 
 fn render_footer(frame: &mut Frame, app: &App, changes: &ChangesState, area: Rect) {
     let primary = Line::raw(app.language.text(
-        "m Commit   a Amend HEAD   w Reword HEAD   |   s Stage   u Unstage   z Stash   d Discard",
-        "m 提交   a 修订 HEAD   w 改写 HEAD   |   s 暂存   u 取消暂存   z 储藏   d 丢弃",
+        "m Commit   a Amend HEAD   w Reword HEAD   t Template   |   s Stage   u Unstage   z Stash   d Discard",
+        "m 提交   a 修订 HEAD   w 改写 HEAD   t 模板   |   s 暂存   u 取消暂存   z 储藏   d 丢弃",
     ));
     let status = if changes.commit_running {
         Line::styled(
@@ -549,6 +551,111 @@ fn render_confirmation(frame: &mut Frame, app: &App, changes: &ChangesState) {
     );
 }
 
+fn render_template_dialog(frame: &mut Frame, app: &App, changes: &ChangesState) {
+    let area = centered_rect(84, 75, frame.area());
+    frame.render_widget(Clear, area);
+    let outer = Block::default()
+        .title(app.language.text(" Commit template ", " 提交模板 "))
+        .borders(Borders::ALL);
+    let inner = outer.inner(area);
+    frame.render_widget(outer, area);
+    let sections = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Min(5),
+            Constraint::Length(3),
+            Constraint::Length(3),
+        ])
+        .split(inner);
+
+    let editor_block = Block::default()
+        .title(format!(" {} ", app.language.label("Template")))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan));
+    let editor_inner = editor_block.inner(sections[0]);
+    let (cursor_line, cursor_byte) =
+        message_cursor_position(&changes.template_draft, changes.template_cursor);
+    let visible_height = usize::from(editor_inner.height.max(1));
+    let vertical_scroll = cursor_line.saturating_sub(visible_height.saturating_sub(1));
+    let line_start = changes.template_draft[..cursor_byte]
+        .rfind('\n')
+        .map_or(0, |index| index + 1);
+    let cursor_width = Line::raw(&changes.template_draft[line_start..cursor_byte]).width();
+    let visible_width = usize::from(editor_inner.width.max(1));
+    let horizontal_scroll = cursor_width.saturating_sub(visible_width.saturating_sub(1));
+    let text = changes
+        .template_draft
+        .split('\n')
+        .map(Line::raw)
+        .collect::<Vec<_>>();
+    frame.render_widget(
+        Paragraph::new(text).block(editor_block).scroll((
+            u16::try_from(vertical_scroll).unwrap_or(u16::MAX),
+            u16::try_from(horizontal_scroll).unwrap_or(u16::MAX),
+        )),
+        sections[0],
+    );
+
+    let stored = if changes.commit_template.is_some() {
+        app.language.text("stored", "已存储")
+    } else {
+        app.language.text("not set", "未设置")
+    };
+    let state = if changes.template_running {
+        app.language.text("saving...", "保存中...")
+    } else {
+        stored
+    };
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::raw(format!(
+                "{}: {state}",
+                app.language.text("Template", "模板")
+            )),
+            Line::raw(app.language.text(
+                "Saving an empty draft clears the stored template",
+                "保存空草稿会清除已存模板",
+            )),
+        ])
+        .block(
+            Block::default()
+                .title(format!(" {} ", app.language.label("Options")))
+                .borders(Borders::TOP),
+        ),
+        sections[1],
+    );
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::raw(app.language.text(
+                "Arrows move   Home/End line   Backspace/Delete edit",
+                "方向键移动   Home/End 行首/行尾   Backspace/Delete 编辑",
+            )),
+            Line::raw(app.language.text(
+                "Enter newline   Ctrl-Enter/Ctrl-S save   Ctrl-D clear   Esc cancel",
+                "Enter 换行   Ctrl-Enter/Ctrl-S 保存   Ctrl-D 清除   Esc 取消",
+            )),
+        ])
+        .block(
+            Block::default()
+                .title(format!(" {} ", app.language.label("Keys")))
+                .borders(Borders::TOP),
+        ),
+        sections[2],
+    );
+
+    if editor_inner.width > 0 && editor_inner.height > 0 {
+        let x = editor_inner.x
+            + u16::try_from(cursor_width.saturating_sub(horizontal_scroll))
+                .unwrap_or(u16::MAX)
+                .min(editor_inner.width - 1);
+        let y = editor_inner.y
+            + u16::try_from(cursor_line.saturating_sub(vertical_scroll))
+                .unwrap_or(u16::MAX)
+                .min(editor_inner.height - 1);
+        frame.set_cursor_position((x, y));
+    }
+}
+
 fn render_commit_dialog(frame: &mut Frame, app: &App, changes: &ChangesState) {
     let area = centered_rect(84, 75, frame.area());
     frame.render_widget(Clear, area);
@@ -652,11 +759,15 @@ fn render_commit_dialog(frame: &mut Frame, app: &App, changes: &ChangesState) {
 }
 
 fn commit_cursor_position(changes: &ChangesState) -> (usize, usize) {
-    let mut cursor = changes.commit_cursor.min(changes.commit_message.len());
-    while !changes.commit_message.is_char_boundary(cursor) {
+    message_cursor_position(&changes.commit_message, changes.commit_cursor)
+}
+
+fn message_cursor_position(message: &str, cursor: usize) -> (usize, usize) {
+    let mut cursor = cursor.min(message.len());
+    while !message.is_char_boundary(cursor) {
         cursor -= 1;
     }
-    let before = &changes.commit_message[..cursor];
+    let before = &message[..cursor];
     let line = before.bytes().filter(|byte| *byte == b'\n').count();
     (line, cursor)
 }

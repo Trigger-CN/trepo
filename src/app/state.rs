@@ -693,6 +693,7 @@ pub struct ChangesLoad {
     pub entries: Vec<ChangeEntry>,
     pub operation: Option<GitOperationKind>,
     pub head_message: Option<String>,
+    pub commit_template: Option<String>,
 }
 
 #[derive(Debug)]
@@ -741,6 +742,14 @@ pub struct GraphCommitResult {
     pub generation: u64,
     pub commit_generation: u64,
     pub result: anyhow::Result<CommitOutcome>,
+}
+
+#[derive(Debug)]
+pub struct TemplateResult {
+    pub project_id: ProjectId,
+    pub changes_generation: u64,
+    pub template_generation: u64,
+    pub result: anyhow::Result<Option<String>>,
 }
 
 #[derive(Debug)]
@@ -843,6 +852,13 @@ pub struct ChangesState {
     pub commit_cursor: usize,
     pub commit_editing: bool,
     pub pending_commit_mode: Option<CommitMode>,
+    /// Current repository-local `trepo.commitTemplate` value, if any.
+    pub commit_template: Option<String>,
+    pub template_editing: bool,
+    pub template_draft: String,
+    pub template_cursor: usize,
+    pub template_running: bool,
+    pub template_generation: u64,
     pub commit_mode: CommitMode,
     pub commit_signoff: bool,
     pub commit_signing: bool,
@@ -999,7 +1015,12 @@ pub struct App {
     pub commit_rx: mpsc::UnboundedReceiver<CommitResult>,
     graph_commit_tx: mpsc::UnboundedSender<GraphCommitResult>,
     pub graph_commit_rx: mpsc::UnboundedReceiver<GraphCommitResult>,
+    template_tx: mpsc::UnboundedSender<TemplateResult>,
+    pub template_rx: mpsc::UnboundedReceiver<TemplateResult>,
     repository_intent: Option<RepositoryAction>,
+    /// Set when Workspace requested a `HEAD:refs/for/<branch>` push; the refspec
+    /// is derived from the freshly loaded snapshot once it arrives.
+    workspace_push_intent: bool,
     repository_tx: mpsc::UnboundedSender<RepositoryLoadResult>,
     pub repository_rx: mpsc::UnboundedReceiver<RepositoryLoadResult>,
     repository_action_tx: mpsc::UnboundedSender<RepositoryActionResult>,
@@ -1030,6 +1051,7 @@ impl App {
         let (preview_tx, preview_rx) = mpsc::unbounded_channel();
         let (commit_tx, commit_rx) = mpsc::unbounded_channel();
         let (graph_commit_tx, graph_commit_rx) = mpsc::unbounded_channel();
+        let (template_tx, template_rx) = mpsc::unbounded_channel();
         let (repository_tx, repository_rx) = mpsc::unbounded_channel();
         let (repository_action_tx, repository_action_rx) = mpsc::unbounded_channel();
         let (repo_batch_tx, repo_batch_rx) = mpsc::unbounded_channel();
@@ -1081,6 +1103,8 @@ impl App {
             commit_rx,
             graph_commit_tx,
             graph_commit_rx,
+            template_tx,
+            template_rx,
             repository_tx,
             repository_rx,
             repository_action_tx,
@@ -1097,6 +1121,7 @@ impl App {
             operation_runner: OperationRunner,
             concurrency: concurrency.max(1),
             repository_intent: None,
+            workspace_push_intent: false,
         }
     }
 
@@ -1409,6 +1434,35 @@ impl App {
 
     pub fn scroll_workspace_git(&mut self, delta: isize) {
         self.workspace_git.scroll = self.workspace_git.scroll.saturating_add_signed(delta);
+    }
+
+    /// Starts a Gerrit-style push of the cursor repository as
+    /// `git push <remote> HEAD:refs/for/<branch>`.
+    pub fn begin_workspace_refspec_push(&mut self) {
+        if self.screen != Screen::Workspace {
+            return;
+        }
+        if self
+            .workspace_git
+            .task
+            .as_ref()
+            .is_some_and(|task| task.running)
+            || self.workspace_git.preparing
+        {
+            self.workspace_git.message =
+                Some((true, "A Workspace Git task is already active".into()));
+            return;
+        }
+        let Some(project) = self
+            .selected_project()
+            .map(|snapshot| snapshot.project.clone())
+        else {
+            self.workspace_git.message = Some((true, "No repository is under the cursor".into()));
+            return;
+        };
+        self.workspace_git.message = None;
+        self.workspace_push_intent = true;
+        self.load_repository(project, Screen::Workspace);
     }
 
     pub fn workspace_git_overlay_active(&self) -> bool {
@@ -2247,6 +2301,12 @@ impl App {
             commit_cursor: 0,
             commit_editing: false,
             pending_commit_mode,
+            commit_template: None,
+            template_editing: false,
+            template_draft: String::new(),
+            template_cursor: 0,
+            template_running: false,
+            template_generation: 0,
             commit_mode: CommitMode::Commit,
             commit_signoff: false,
             commit_signing: false,
@@ -2259,10 +2319,12 @@ impl App {
                 let entries = git::changes(&project.path).await?;
                 let operation = git::operation_state(&project.path).await?;
                 let head_message = git::head_commit_message(&project.path).await?;
+                let commit_template = git::commit_template(&project.path).await?;
                 Ok(ChangesLoad {
                     entries,
                     operation,
                     head_message,
+                    commit_template,
                 })
             }
             .await;
@@ -2288,6 +2350,7 @@ impl App {
                     changes.entries = load.entries;
                     changes.operation = load.operation;
                     changes.head_message = load.head_message;
+                    changes.commit_template = load.commit_template;
                     changes.selected = changes
                         .selected
                         .min(changes.entries.len().saturating_sub(1));
@@ -2774,6 +2837,12 @@ impl App {
                 return;
             };
             changes.commit_message = message;
+        } else if changes.commit_message.is_empty() {
+            // A fresh Commit draft starts from the stored template, while an
+            // existing draft is never overwritten.
+            if let Some(template) = changes.commit_template.clone() {
+                changes.commit_message = template;
+            }
         }
         changes.commit_mode = mode;
         changes.commit_cursor = changes.commit_message.len();
@@ -2786,6 +2855,195 @@ impl App {
         if let Some(changes) = self.changes.as_mut() {
             changes.commit_editing = false;
             changes.message = None;
+        }
+    }
+
+    /// Opens the repository-local commit message template editor.
+    pub fn start_template_editing(&mut self) {
+        let Some(changes) = self.changes.as_mut() else {
+            return;
+        };
+        if changes.commit_running || changes.template_running || changes.operation_running {
+            return;
+        }
+        if changes.loading {
+            changes.message = Some((true, "Wait for Changes to finish loading".to_owned()));
+            return;
+        }
+        changes.template_draft = changes.commit_template.clone().unwrap_or_default();
+        changes.template_cursor = changes.template_draft.len();
+        changes.template_editing = true;
+        changes.commit_editing = false;
+        changes.message = None;
+    }
+
+    pub fn cancel_template_editing(&mut self) {
+        if let Some(changes) = self.changes.as_mut() {
+            changes.template_editing = false;
+            changes.template_draft.clear();
+            changes.template_cursor = 0;
+            changes.message = None;
+        }
+    }
+
+    pub fn edit_template(&mut self, input: CommitInput) {
+        let Some(changes) = self.changes.as_mut() else {
+            return;
+        };
+        if !changes.template_editing || changes.template_running {
+            return;
+        }
+        changes.template_cursor =
+            clamp_char_boundary(&changes.template_draft, changes.template_cursor);
+        match input {
+            CommitInput::Character(value) => {
+                changes
+                    .template_draft
+                    .insert(changes.template_cursor, value);
+                changes.template_cursor += value.len_utf8();
+            }
+            CommitInput::Text(value) => {
+                let value = value.replace("\r\n", "\n").replace('\r', "\n");
+                changes
+                    .template_draft
+                    .insert_str(changes.template_cursor, &value);
+                changes.template_cursor += value.len();
+            }
+            CommitInput::Newline => {
+                changes.template_draft.insert(changes.template_cursor, '\n');
+                changes.template_cursor += 1;
+            }
+            CommitInput::Backspace => {
+                let previous =
+                    previous_char_boundary(&changes.template_draft, changes.template_cursor);
+                changes
+                    .template_draft
+                    .replace_range(previous..changes.template_cursor, "");
+                changes.template_cursor = previous;
+            }
+            CommitInput::Delete => {
+                let next = next_char_boundary(&changes.template_draft, changes.template_cursor);
+                changes
+                    .template_draft
+                    .replace_range(changes.template_cursor..next, "");
+            }
+            CommitInput::MoveLeft => {
+                changes.template_cursor =
+                    previous_char_boundary(&changes.template_draft, changes.template_cursor);
+            }
+            CommitInput::MoveRight => {
+                changes.template_cursor =
+                    next_char_boundary(&changes.template_draft, changes.template_cursor);
+            }
+            CommitInput::MoveUp => {
+                changes.template_cursor =
+                    move_cursor_vertical(&changes.template_draft, changes.template_cursor, -1);
+            }
+            CommitInput::MoveDown => {
+                changes.template_cursor =
+                    move_cursor_vertical(&changes.template_draft, changes.template_cursor, 1);
+            }
+            CommitInput::MoveHome => {
+                changes.template_cursor =
+                    line_start(&changes.template_draft, changes.template_cursor);
+            }
+            CommitInput::MoveEnd => {
+                changes.template_cursor =
+                    line_end(&changes.template_draft, changes.template_cursor);
+            }
+            CommitInput::ToggleAmend | CommitInput::ToggleSignoff | CommitInput::ToggleSigning => {}
+        }
+    }
+
+    /// Persists the draft template. An empty draft clears the stored value.
+    pub fn submit_template(&mut self) {
+        let Some(changes) = self.changes.as_mut() else {
+            return;
+        };
+        if !changes.template_editing || changes.template_running {
+            return;
+        }
+        let project = changes.project.clone();
+        let project_id = project.id.clone();
+        let changes_generation = changes.generation;
+        let draft = changes.template_draft.clone();
+        changes.template_editing = false;
+        changes.template_running = true;
+        changes.message = None;
+        changes.template_generation = changes.template_generation.wrapping_add(1);
+        let template_generation = changes.template_generation;
+        let clear = draft.is_empty();
+        let sender = self.template_tx.clone();
+        tokio::spawn(async move {
+            let result = if clear {
+                git::clear_commit_template(&project.path)
+                    .await
+                    .map(|()| None)
+            } else {
+                git::set_commit_template(&project.path, &draft)
+                    .await
+                    .map(|()| Some(draft))
+            };
+            let _ = sender.send(TemplateResult {
+                project_id,
+                changes_generation,
+                template_generation,
+                result,
+            });
+        });
+    }
+
+    /// Clears the stored template immediately, discarding the current draft.
+    pub fn clear_template(&mut self) {
+        let Some(changes) = self.changes.as_mut() else {
+            return;
+        };
+        if changes.template_running {
+            return;
+        }
+        changes.template_draft.clear();
+        changes.template_cursor = 0;
+        changes.template_editing = false;
+        changes.template_running = true;
+        changes.message = None;
+        changes.template_generation = changes.template_generation.wrapping_add(1);
+        let template_generation = changes.template_generation;
+        let project = changes.project.clone();
+        let project_id = project.id.clone();
+        let changes_generation = changes.generation;
+        let sender = self.template_tx.clone();
+        tokio::spawn(async move {
+            let result = git::clear_commit_template(&project.path)
+                .await
+                .map(|()| None);
+            let _ = sender.send(TemplateResult {
+                project_id,
+                changes_generation,
+                template_generation,
+                result,
+            });
+        });
+    }
+
+    pub fn apply_template(&mut self, result: TemplateResult) {
+        let Some(changes) = self.changes.as_mut() else {
+            return;
+        };
+        if changes.project.id != result.project_id
+            || changes.generation != result.changes_generation
+            || changes.template_generation != result.template_generation
+        {
+            return;
+        }
+        changes.template_running = false;
+        match result.result {
+            Ok(template) => {
+                changes.commit_template = template;
+                changes.message = Some((false, "Commit template saved".to_owned()));
+            }
+            Err(error) => {
+                changes.message = Some((true, error.to_string()));
+            }
         }
     }
 
@@ -3284,9 +3542,15 @@ impl App {
             clamp_repository_selection(state);
         }
         if let Some(message) = error_message {
-            if self.repository_intent.take().is_some() {
+            if self.repository_intent.take().is_some() || self.workspace_push_intent {
+                self.workspace_push_intent = false;
                 self.set_repository_origin_message(true, message);
             }
+            return;
+        }
+        if self.workspace_push_intent {
+            self.workspace_push_intent = false;
+            self.begin_workspace_refspec_action();
             return;
         }
         if let Some(action) = self.repository_intent.take() {
@@ -3462,6 +3726,46 @@ impl App {
             }
             None => {}
         }
+    }
+
+    /// Builds `HEAD:refs/for/<branch>` from the freshly loaded snapshot and
+    /// routes it through the protected confirmation flow.
+    fn begin_workspace_refspec_action(&mut self) {
+        let Some(state) = self.repository.as_ref() else {
+            return;
+        };
+        let Some(snapshot) = state.snapshot.as_ref() else {
+            return;
+        };
+        let Some(branch) = snapshot
+            .branches
+            .iter()
+            .find(|entry| entry.current)
+            .map(|entry| entry.name.clone())
+        else {
+            self.set_repository_origin_message(
+                true,
+                "Refspec push requires a checked-out branch".to_owned(),
+            );
+            return;
+        };
+        let remote = snapshot
+            .remotes
+            .iter()
+            .find(|entry| entry.name == "origin")
+            .or_else(|| snapshot.remotes.first())
+            .map(|entry| entry.name.clone());
+        let Some(remote) = remote else {
+            self.set_repository_origin_message(
+                true,
+                "Refspec push requires a configured remote".to_owned(),
+            );
+            return;
+        };
+        self.begin_repository_action(RepositoryAction::PushRefspec {
+            remote,
+            refspec: format!("HEAD:refs/for/{branch}"),
+        });
     }
 
     fn begin_repository_action(&mut self, action: RepositoryAction) {
@@ -3729,7 +4033,10 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
-    use crate::domain::{ChangeHunk, CommitRef, CommitRefKind, WorkspaceKind, WorktreeSummary};
+    use crate::domain::{
+        BranchEntry, ChangeHunk, CommitRef, CommitRefKind, RemoteEntry, WorkspaceKind,
+        WorktreeSummary,
+    };
 
     fn project(name: &str) -> Project {
         let path = PathBuf::from(format!("/tmp/{name}"));
@@ -3898,6 +4205,12 @@ mod tests {
             commit_cursor: 0,
             commit_editing: false,
             pending_commit_mode: None,
+            commit_template: None,
+            template_editing: false,
+            template_draft: String::new(),
+            template_cursor: 0,
+            template_running: false,
+            template_generation: 0,
             commit_mode: CommitMode::Commit,
             commit_signoff: false,
             commit_signing: false,
@@ -3915,6 +4228,7 @@ mod tests {
                 entries: Vec::new(),
                 operation: None,
                 head_message: None,
+                commit_template: None,
             }),
         });
         assert!(app.changes.as_ref().unwrap().loading);
@@ -3998,6 +4312,12 @@ mod tests {
             commit_cursor: 0,
             commit_editing: false,
             pending_commit_mode: None,
+            commit_template: None,
+            template_editing: false,
+            template_draft: String::new(),
+            template_cursor: 0,
+            template_running: false,
+            template_generation: 0,
             commit_mode: CommitMode::Commit,
             commit_signoff: false,
             commit_signing: false,
@@ -4095,6 +4415,12 @@ mod tests {
             commit_cursor: 0,
             commit_editing: true,
             pending_commit_mode: None,
+            commit_template: None,
+            template_editing: false,
+            template_draft: String::new(),
+            template_cursor: 0,
+            template_running: false,
+            template_generation: 0,
             commit_mode: CommitMode::Commit,
             commit_signoff: false,
             commit_signing: false,
@@ -4252,6 +4578,222 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn commit_template_editor_persists_clears_and_seeds_only_empty_drafts() {
+        let value = project("alpha");
+        let workspace = Workspace {
+            root: PathBuf::from("/tmp"),
+            kind: WorkspaceKind::Git,
+            projects: vec![value.clone()],
+        };
+        let mut app = App::new(workspace, 1);
+        let entries = ["src/main.rs"]
+            .into_iter()
+            .map(|path| ChangeEntry {
+                path: PathBuf::from(path),
+                original_path: None,
+                index: None,
+                worktree: Some(crate::domain::ChangeCode::Modified),
+                untracked: false,
+                conflicted: false,
+            })
+            .collect::<Vec<_>>();
+        app.changes = Some(ChangesState {
+            project: value.clone(),
+            return_screen: Screen::Workspace,
+            entries,
+            operation: None,
+            head_message: None,
+            selected: 0,
+            selected_files: HashSet::new(),
+            mode: ChangesMode::File,
+            selected_hunk: 0,
+            selected_hunk_identity: None,
+            selected_line: 0,
+            selected_line_identity: None,
+            loading: false,
+            error: None,
+            generation: 1,
+            preview: None,
+            preview_path: None,
+            preview_loading: false,
+            preview_generation: 0,
+            preview_scroll: 0,
+            operation_running: false,
+            operation_generation: 0,
+            confirmation: None,
+            message: None,
+            commit_message: String::new(),
+            commit_cursor: 0,
+            commit_editing: false,
+            pending_commit_mode: None,
+            commit_template: None,
+            template_editing: false,
+            template_draft: String::new(),
+            template_cursor: 0,
+            template_running: false,
+            template_generation: 0,
+            commit_mode: CommitMode::Commit,
+            commit_signoff: false,
+            commit_signing: false,
+            commit_running: false,
+            commit_generation: 0,
+        });
+
+        app.start_template_editing();
+        let changes = app.changes.as_ref().unwrap();
+        assert!(changes.template_editing);
+        assert!(changes.template_draft.is_empty());
+        app.edit_template(CommitInput::Text("subject\r\n\r\nbody".into()));
+        app.edit_template(CommitInput::Newline);
+        app.edit_template(CommitInput::Character('x'));
+        let changes = app.changes.as_ref().unwrap();
+        assert_eq!(changes.template_draft, "subject\n\nbody\nx");
+        assert_eq!(changes.template_cursor, changes.template_draft.len());
+        app.edit_template(CommitInput::MoveUp);
+        app.edit_template(CommitInput::MoveHome);
+        app.edit_template(CommitInput::MoveRight);
+        assert_eq!(app.changes.as_ref().unwrap().template_cursor, 10);
+        app.edit_template(CommitInput::Backspace);
+        assert_eq!(
+            app.changes.as_ref().unwrap().template_draft,
+            "subject\n\nody\nx"
+        );
+        app.edit_template(CommitInput::Delete);
+        assert_eq!(
+            app.changes.as_ref().unwrap().template_draft,
+            "subject\n\ndy\nx"
+        );
+
+        app.submit_template();
+        let changes = app.changes.as_ref().unwrap();
+        assert!(!changes.template_editing);
+        assert!(changes.template_running);
+        let template_generation = changes.template_generation;
+        app.apply_template(TemplateResult {
+            project_id: value.id.clone(),
+            changes_generation: 1,
+            template_generation,
+            result: Ok(Some("stored template".into())),
+        });
+        let changes = app.changes.as_ref().unwrap();
+        assert!(!changes.template_running);
+        assert_eq!(changes.commit_template.as_deref(), Some("stored template"));
+        assert!(changes
+            .message
+            .as_ref()
+            .is_some_and(|(error, message)| !*error && message == "Commit template saved"));
+
+        // A stale template result must be ignored.
+        app.changes.as_mut().unwrap().template_running = true;
+        app.apply_template(TemplateResult {
+            project_id: value.id.clone(),
+            changes_generation: 1,
+            template_generation: template_generation.wrapping_sub(1),
+            result: Ok(Some("stale".into())),
+        });
+        assert!(app.changes.as_ref().unwrap().template_running);
+        app.changes.as_mut().unwrap().template_running = false;
+
+        // A brand-new Commit draft is seeded from the stored template...
+        app.start_commit_editing(CommitMode::Commit);
+        assert_eq!(
+            app.changes.as_ref().unwrap().commit_message,
+            "stored template"
+        );
+        // ...while an existing draft is never overwritten.
+        app.changes.as_mut().unwrap().commit_message = "typed draft".into();
+        app.start_commit_editing(CommitMode::Commit);
+        assert_eq!(app.changes.as_ref().unwrap().commit_message, "typed draft");
+        app.cancel_commit_editing();
+
+        // Clearing saves immediately and drops the stored value.
+        app.changes.as_mut().unwrap().commit_template = Some("stored template".into());
+        app.clear_template();
+        let changes = app.changes.as_ref().unwrap();
+        assert!(changes.template_running);
+        let template_generation = changes.template_generation;
+        app.apply_template(TemplateResult {
+            project_id: value.id.clone(),
+            changes_generation: 1,
+            template_generation,
+            result: Ok(None),
+        });
+        assert_eq!(app.changes.as_ref().unwrap().commit_template, None);
+
+        // An empty draft submitted through the editor also clears.
+        app.changes.as_mut().unwrap().commit_template = Some("again".into());
+        app.changes.as_mut().unwrap().template_editing = true;
+        app.submit_template();
+        let changes = app.changes.as_ref().unwrap();
+        assert!(changes.template_running);
+        let template_generation = changes.template_generation;
+        app.apply_template(TemplateResult {
+            project_id: value.id.clone(),
+            changes_generation: 1,
+            template_generation,
+            result: Ok(None),
+        });
+        assert_eq!(app.changes.as_ref().unwrap().commit_template, None);
+
+        // Failures surface verbatim and keep the previous value.
+        app.changes.as_mut().unwrap().commit_template = Some("kept".into());
+        app.changes.as_mut().unwrap().template_editing = true;
+        app.changes.as_mut().unwrap().template_draft = "draft".into();
+        app.submit_template();
+        let template_generation = app.changes.as_ref().unwrap().template_generation;
+        app.apply_template(TemplateResult {
+            project_id: value.id.clone(),
+            changes_generation: 1,
+            template_generation,
+            result: Err(anyhow::anyhow!("git config failed")),
+        });
+        let changes = app.changes.as_ref().unwrap();
+        assert!(!changes.template_running);
+        assert_eq!(changes.commit_template.as_deref(), Some("kept"));
+        assert!(changes
+            .message
+            .as_ref()
+            .is_some_and(|(error, message)| *error && message == "git config failed"));
+    }
+
+    #[tokio::test]
+    async fn changes_load_delivers_the_commit_template_for_new_drafts() {
+        let value = project("alpha");
+        let workspace = Workspace {
+            root: PathBuf::from("/tmp"),
+            kind: WorkspaceKind::Git,
+            projects: vec![value.clone()],
+        };
+        let mut app = App::new(workspace, 1);
+        app.open_changes();
+        let generation = app.changes.as_ref().unwrap().generation;
+        app.apply_changes(ChangesResult {
+            project_id: value.id.clone(),
+            generation,
+            result: Ok(ChangesLoad {
+                entries: Vec::new(),
+                operation: None,
+                head_message: Some("HEAD subject".into()),
+                commit_template: Some("templated subject\n\ntemplated body".into()),
+            }),
+        });
+        assert_eq!(
+            app.changes.as_ref().unwrap().commit_template.as_deref(),
+            Some("templated subject\n\ntemplated body")
+        );
+        app.start_commit_editing(CommitMode::Commit);
+        assert_eq!(
+            app.changes.as_ref().unwrap().commit_message,
+            "templated subject\n\ntemplated body"
+        );
+        // Amend keeps using HEAD instead of the template.
+        app.cancel_commit_editing();
+        app.changes.as_mut().unwrap().commit_message.clear();
+        app.start_commit_editing(CommitMode::Amend);
+        assert_eq!(app.changes.as_ref().unwrap().commit_message, "HEAD subject");
+    }
+
+    #[tokio::test]
     async fn queues_amend_during_changes_reload_and_uses_fresh_head_message() {
         let value = project("alpha");
         let workspace = Workspace {
@@ -4275,6 +4817,7 @@ mod tests {
                 entries: Vec::new(),
                 operation: None,
                 head_message: Some("old HEAD message".into()),
+                commit_template: None,
             }),
         });
         {
@@ -4313,6 +4856,7 @@ mod tests {
                 entries: Vec::new(),
                 operation: None,
                 head_message: Some("fresh HEAD subject\n\nfresh body".into()),
+                commit_template: None,
             }),
         });
         let changes = app.changes.as_ref().unwrap();
@@ -4379,6 +4923,7 @@ mod tests {
                 entries: Vec::new(),
                 operation: None,
                 head_message: Some("Graph HEAD subject\n\nGraph body".into()),
+                commit_template: None,
             }),
         });
         let changes = app.changes.as_ref().unwrap();
@@ -4918,5 +5463,147 @@ mod tests {
             app.workspace_git.task.as_ref().unwrap().results[0].state,
             RepoProjectState::Succeeded
         );
+    }
+
+    fn repository_snapshot(branch: bool, remote: bool) -> RepositorySnapshot {
+        RepositorySnapshot {
+            operation: None,
+            conflicts: Vec::new(),
+            stashes: Vec::new(),
+            branches: if branch {
+                vec![BranchEntry {
+                    name: "main".into(),
+                    oid: "bbbbbbbb".into(),
+                    upstream: None,
+                    ahead: 0,
+                    behind: 0,
+                    current: true,
+                }]
+            } else {
+                Vec::new()
+            },
+            tags: Vec::new(),
+            remotes: if remote {
+                vec![RemoteEntry {
+                    name: "origin".into(),
+                    fetch_url: "https://example.com/repo.git".into(),
+                    push_url: "https://example.com/repo.git".into(),
+                }]
+            } else {
+                Vec::new()
+            },
+            remote_branches: Vec::new(),
+            worktree_token: 0,
+            token: 3,
+        }
+    }
+
+    fn workspace_app() -> (App, Project) {
+        let value = project("alpha");
+        let workspace = Workspace {
+            root: PathBuf::from("/tmp"),
+            kind: WorkspaceKind::Repo,
+            projects: vec![value.clone()],
+        };
+        (App::new(workspace, 1), value)
+    }
+
+    #[tokio::test]
+    async fn workspace_refspec_push_requires_the_workspace_screen_and_a_loaded_project() {
+        let (mut app, _) = workspace_app();
+        app.screen = Screen::Graph;
+        app.begin_workspace_refspec_push();
+        assert!(!app.workspace_push_intent);
+        assert!(app.repository.is_none());
+
+        app.screen = Screen::Workspace;
+        app.projects.clear();
+        app.begin_workspace_refspec_push();
+        assert!(!app.workspace_push_intent);
+        assert!(app.repository.is_none());
+        assert!(app
+            .workspace_git
+            .message
+            .as_ref()
+            .is_some_and(|(error, message)| *error && message.contains("under the cursor")));
+    }
+
+    #[tokio::test]
+    async fn workspace_refspec_push_derives_the_target_from_the_fresh_snapshot() {
+        let (mut app, value) = workspace_app();
+        app.begin_workspace_refspec_push();
+        assert!(app.workspace_push_intent);
+        let state = app.repository.as_ref().unwrap();
+        assert!(state.loading);
+        assert_eq!(state.return_screen, Screen::Workspace);
+        let generation = state.generation;
+
+        app.apply_repository_load(RepositoryLoadResult {
+            project_id: value.id.clone(),
+            generation,
+            result: Ok(repository_snapshot(true, true)),
+        });
+        assert!(!app.workspace_push_intent);
+        let state = app.repository.as_ref().unwrap();
+        assert_eq!(
+            state.pending,
+            Some(RepositoryAction::PushRefspec {
+                remote: "origin".into(),
+                refspec: "HEAD:refs/for/main".into(),
+            })
+        );
+        assert_eq!(app.screen, Screen::Workspace);
+    }
+
+    #[tokio::test]
+    async fn workspace_refspec_push_reports_missing_branch_or_remote() {
+        let (mut app, value) = workspace_app();
+        app.begin_workspace_refspec_push();
+        let generation = app.repository.as_ref().unwrap().generation;
+        app.apply_repository_load(RepositoryLoadResult {
+            project_id: value.id.clone(),
+            generation,
+            result: Ok(repository_snapshot(false, true)),
+        });
+        let state = app.repository.as_ref().unwrap();
+        assert!(state.pending.is_none());
+        assert!(state
+            .message
+            .as_ref()
+            .is_some_and(|(error, message)| *error && message.contains("checked-out branch")));
+
+        app.begin_workspace_refspec_push();
+        let generation = app.repository.as_ref().unwrap().generation;
+        app.apply_repository_load(RepositoryLoadResult {
+            project_id: value.id,
+            generation,
+            result: Ok(repository_snapshot(true, false)),
+        });
+        let state = app.repository.as_ref().unwrap();
+        assert!(state.pending.is_none());
+        assert!(state
+            .message
+            .as_ref()
+            .is_some_and(|(error, message)| *error && message.contains("configured remote")));
+    }
+
+    #[tokio::test]
+    async fn workspace_refspec_push_surfaces_snapshot_load_failures() {
+        let (mut app, value) = workspace_app();
+        app.begin_workspace_refspec_push();
+        let generation = app.repository.as_ref().unwrap().generation;
+        app.apply_repository_load(RepositoryLoadResult {
+            project_id: value.id,
+            generation,
+            result: Err(anyhow::anyhow!("snapshot failed")),
+        });
+        assert!(!app.workspace_push_intent);
+        // A Workspace-originated failure reports through the repository state
+        // so the Workspace footer shows it.
+        assert!(app
+            .repository
+            .as_ref()
+            .and_then(|state| state.message.as_ref())
+            .is_some_and(|(error, message)| *error && message == "snapshot failed"));
     }
 }

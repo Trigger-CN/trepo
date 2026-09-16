@@ -56,6 +56,7 @@ fn render_help(frame: &mut Frame, app: &App) {
             Line::raw("Tab             切换改动模式或表单字段"),
             Line::raw("z/s/u           储藏 / 暂存 / 取消暂存"),
             Line::raw("m/a/w           提交 / 修订 HEAD / 改写 HEAD；Ctrl-Enter/S 确认"),
+            Line::raw("t / p           Git 配置模板 / 按 HEAD:refs/for/<branch> 推送"),
             Line::raw("r               刷新当前页面"),
             Line::raw("Esc / q / ?     返回 / 退出 / 切换帮助"),
             Line::raw(""),
@@ -84,6 +85,7 @@ fn render_help(frame: &mut Frame, app: &App) {
             Line::raw("Tab            Toggle Changes mode or active form field"),
             Line::raw("z/s/u          Stash files / Stage / Unstage in Changes"),
             Line::raw("m/a/w          Commit / Amend HEAD / Reword HEAD; Ctrl-Enter/S submit"),
+            Line::raw("t / p          Commit template / push HEAD:refs/for/<branch>"),
             Line::raw("r              Refresh current page"),
             Line::raw("Esc / q / ?    Back / quit Workspace / toggle help"),
             Line::raw(""),
@@ -1028,6 +1030,12 @@ mod tests {
             commit_cursor: "subject\n\nbody".len(),
             commit_editing: false,
             pending_commit_mode: None,
+            commit_template: None,
+            template_editing: false,
+            template_draft: String::new(),
+            template_cursor: 0,
+            template_running: false,
+            template_generation: 0,
             commit_mode: CommitMode::Commit,
             commit_signoff: false,
             commit_signing: false,
@@ -1191,6 +1199,145 @@ mod tests {
     }
 
     #[test]
+    fn renders_commit_template_dialog_at_both_sizes() {
+        let mut app = app();
+        let project = app.workspace.projects[0].clone();
+        app.screen = Screen::Changes;
+        app.changes = Some(ChangesState {
+            project,
+            return_screen: Screen::Workspace,
+            entries: Vec::new(),
+            operation: None,
+            head_message: None,
+            selected: 0,
+            selected_files: Default::default(),
+            mode: ChangesMode::File,
+            selected_hunk: 0,
+            selected_hunk_identity: None,
+            selected_line: 0,
+            selected_line_identity: None,
+            loading: false,
+            error: None,
+            generation: 1,
+            preview: None,
+            preview_path: None,
+            preview_loading: false,
+            preview_generation: 0,
+            preview_scroll: 0,
+            operation_running: false,
+            operation_generation: 0,
+            confirmation: None,
+            message: None,
+            commit_message: String::new(),
+            commit_cursor: 0,
+            commit_editing: false,
+            pending_commit_mode: None,
+            commit_template: Some("feat: subject\n\n1. item one".into()),
+            template_editing: true,
+            template_draft: "feat: subject\n\n1. item one".into(),
+            template_cursor: "feat: subject\n\n1. item one".len(),
+            template_running: false,
+            template_generation: 0,
+            commit_mode: CommitMode::Commit,
+            commit_signoff: false,
+            commit_signing: false,
+            commit_running: false,
+            commit_generation: 0,
+        });
+
+        for (width, height) in [(80, 24), (120, 40)] {
+            let (text, cursor) = draw_text_and_cursor(&app, width, height);
+            assert!(text.contains(" Commit template "));
+            assert!(text.contains(" Template "));
+            assert!(text.contains("feat: subject"));
+            assert!(text.contains("1. item one"));
+            assert!(text.contains(" Options "));
+            assert!(text.contains(" Keys "));
+            assert!(text.contains("Ctrl-Enter/Ctrl-S save"));
+            assert!(text.contains("Ctrl-D clear"));
+            // The commit dialog must not render on top of the template editor.
+            let lines = text.lines().collect::<Vec<_>>();
+            let title_y = lines
+                .iter()
+                .position(|line| line.contains(" Commit template "))
+                .unwrap();
+            let keys_y = lines
+                .iter()
+                .position(|line| line.contains(" Keys "))
+                .unwrap();
+            assert!(title_y < usize::from(cursor.y));
+            assert!(usize::from(cursor.y) < keys_y);
+            assert!(cursor.x < width);
+        }
+
+        app.language = crate::i18n::Language::Zh;
+        for (width, height) in [(80, 24), (120, 40)] {
+            let raw = draw_text(&app, width, height);
+            let text = compact_text(&raw);
+            assert!(text.contains("提交模板"));
+            assert!(text.contains("模板"));
+            assert!(text.contains("选项"));
+            assert!(text.contains("按键"));
+            assert!(text.contains("Ctrl-Enter/Ctrl-S保存"));
+            assert!(text.contains("Ctrl-D清除"));
+            assert!(raw.contains("feat: subject"));
+        }
+    }
+
+    #[test]
+    fn commit_template_footers_advertise_the_new_keys() {
+        let mut app = app();
+        let text = draw_text(&app, 120, 40);
+        assert!(text.contains("p Push refs/for"));
+        app.screen = Screen::Changes;
+        app.changes = Some(ChangesState {
+            project: app.workspace.projects[0].clone(),
+            return_screen: Screen::Workspace,
+            entries: Vec::new(),
+            operation: None,
+            head_message: None,
+            selected: 0,
+            selected_files: Default::default(),
+            mode: ChangesMode::File,
+            selected_hunk: 0,
+            selected_hunk_identity: None,
+            selected_line: 0,
+            selected_line_identity: None,
+            loading: false,
+            error: None,
+            generation: 1,
+            preview: None,
+            preview_path: None,
+            preview_loading: false,
+            preview_generation: 0,
+            preview_scroll: 0,
+            operation_running: false,
+            operation_generation: 0,
+            confirmation: None,
+            message: None,
+            commit_message: String::new(),
+            commit_cursor: 0,
+            commit_editing: false,
+            pending_commit_mode: None,
+            commit_template: None,
+            template_editing: false,
+            template_draft: String::new(),
+            template_cursor: 0,
+            template_running: false,
+            template_generation: 0,
+            commit_mode: CommitMode::Commit,
+            commit_signoff: false,
+            commit_signing: false,
+            commit_running: false,
+            commit_generation: 0,
+        });
+        for (width, height) in [(80, 24), (120, 40)] {
+            let text = draw_text(&app, width, height);
+            assert!(text.contains("t Template"));
+        }
+    }
+
+    #[test]
     fn changes_long_lines_are_clipped_sanitized_and_cleared_on_redraw() {
         let mut app = app();
         let project = app.workspace.projects[0].clone();
@@ -1239,6 +1386,12 @@ mod tests {
             commit_cursor: 0,
             commit_editing: false,
             pending_commit_mode: None,
+            commit_template: None,
+            template_editing: false,
+            template_draft: String::new(),
+            template_cursor: 0,
+            template_running: false,
+            template_generation: 0,
             commit_mode: CommitMode::Commit,
             commit_signoff: false,
             commit_signing: false,

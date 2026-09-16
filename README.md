@@ -84,8 +84,9 @@ git push origin v0.5.0
 | `z` | Changes: confirm stashing the selected files, including untracked files |
 | `s` / `u` | Stage / unstage selected Changes files, or the active file, hunk, or line when no file selection exists |
 | `d` | Workspace: cycle the data scope through all projects → changed projects → changed projects with files; Changes: confirm complete Discard for selected files or discard the active file/hunk/line |
-| `t` | Workspace: toggle List / Tree layout for the current scope; each scope remembers its own layout |
+| `t` | Workspace: toggle List / Tree layout for the current scope; each scope remembers its own layout; Changes: edit the repository-local commit message template |
 | `m` / `a` / `w` | Changes: open Commit / Amend `HEAD` / Reword `HEAD` directly; Amend and Reword preload the current message, and a key pressed during Stage refresh opens the editor as soon as loading finishes |
+| `p` | Workspace: push the cursor repository as `git push <remote> HEAD:refs/for/<current-branch>` after a fresh snapshot, scope preview, and confirmation |
 | `Ctrl-A` / `Ctrl-U` / `Ctrl-G` | Toggle Commit/Amend compatibility mode / sign-off / signing in the Changes commit dialog |
 | `o` | Open Repository management from Workspace, Graph, or Changes |
 | `PageUp` / `PageDown` | Scroll the selected diff |
@@ -127,7 +128,9 @@ Implemented:
 - Workspace and Changes expose active merge/rebase/cherry-pick/revert state and guarded abort through a fresh repository snapshot, destructive confirmation, project lock, and snapshot token
 - Repository page with Status, Stashes, Branches & Tags, and Remotes tabs
 - structured Stash workflows for include-untracked, keep-index, staged-only, apply/pop index restore, branch creation, drop, and clear; staged-only rejects incompatible modes before execution
-- separate Push and Force Push entries in Repository and Graph; force updates always use `--force-with-lease`, with exact refspec/OID-range preview and explicit remote-history warning
+- separate Push, Push refspec, and Force Push entries in Repository and Graph; force updates always use `--force-with-lease`, with exact refspec/OID-range preview and explicit remote-history warning; the refspec entry runs `git push <remote> <refspec>` with strict single-argument validation
+- repository-local commit message template stored as `trepo.commitTemplate` in the repository Git config, editable from Changes through `t`, clearing on an empty draft or `Ctrl-D`, seeding only a brand-new Commit draft while Amend/Reword keep the current `HEAD` message
+- Workspace `p` derives `HEAD:refs/for/<current-branch>` and the `origin` remote (or the first configured remote) from a freshly loaded repository snapshot, then reports through the existing remote-write confirmation, project lock, and snapshot token
 - project locks, worktree-aware index-lock checks, snapshot tokens, generation checks, and automatic scoped refresh
 - `doctor` diagnostics and parser/real Git/TestBackend-focused tests
 - English UI by default, with instance-scoped Chinese/English selection through exact `-zh`/`-en` compatibility flags or standard `--zh`/`--en` flags

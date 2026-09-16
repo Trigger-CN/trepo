@@ -1102,6 +1102,81 @@ pub async fn head_commit_message(root: &Path) -> Result<Option<String>> {
     Ok(Some(message.trim_end_matches(['\r', '\n']).to_owned()))
 }
 
+/// Repository-local config key that stores the multiline commit message template.
+const COMMIT_TEMPLATE_KEY: &str = "trepo.commitTemplate";
+
+pub async fn commit_template(root: &Path) -> Result<Option<String>> {
+    let output = Command::new("git")
+        .args(["config", "--local", "--null", "--get", COMMIT_TEMPLATE_KEY])
+        .current_dir(root)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .output()
+        .await
+        .with_context(|| format!("failed to read the commit template in {}", root.display()))?;
+    match output.status.code() {
+        Some(0) => {
+            let trimmed = output.stdout.strip_suffix(b"\0").unwrap_or(&output.stdout);
+            let value =
+                String::from_utf8(trimmed.to_vec()).context("commit template is not UTF-8")?;
+            Ok(Some(value))
+        }
+        // Exit code 1 means the key is not set in the local config.
+        Some(1) => Ok(None),
+        _ => {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+            bail!(
+                "git exited with {}{}",
+                output.status,
+                if stderr.is_empty() {
+                    String::new()
+                } else {
+                    format!(": {stderr}")
+                }
+            );
+        }
+    }
+}
+
+pub async fn set_commit_template(root: &Path, template: &str) -> Result<()> {
+    if template.contains('\0') {
+        bail!("commit template cannot contain a NUL byte");
+    }
+    if template.is_empty() {
+        return clear_commit_template(root).await;
+    }
+    git_output(
+        root,
+        [
+            OsString::from("config"),
+            OsString::from("--local"),
+            OsString::from("--replace-all"),
+            OsString::from(COMMIT_TEMPLATE_KEY),
+            OsString::from(template),
+        ],
+    )
+    .await
+    .map(|_| ())
+}
+
+pub async fn clear_commit_template(root: &Path) -> Result<()> {
+    // `--unset-all` exits with code 5 when the key is absent, which is already
+    // the desired end state.
+    git_output_allow(
+        root,
+        [
+            OsString::from("config"),
+            OsString::from("--local"),
+            OsString::from("--unset-all"),
+            OsString::from(COMMIT_TEMPLATE_KEY),
+        ],
+        &[0, 5],
+    )
+    .await
+    .map(|_| ())
+}
 fn parse_path_list(bytes: &[u8]) -> Result<Vec<PathBuf>> {
     bytes
         .split(|byte| *byte == 0)
@@ -1388,6 +1463,11 @@ fn validate_repository_action_values(action: &RepositoryAction) -> Result<()> {
             values.push(("remote", remote));
             values.push(("branch", branch));
         }
+        RepositoryAction::PushRefspec { remote, refspec } => {
+            validate_refspec(refspec)?;
+            values.push(("remote", remote));
+            values.push(("refspec", refspec));
+        }
         RepositoryAction::SetUpstream { branch, upstream } => {
             values.push(("branch", branch));
             values.push(("upstream", upstream));
@@ -1417,6 +1497,30 @@ fn validate_repository_action_values(action: &RepositoryAction) -> Result<()> {
         if value.is_empty() || value.starts_with('-') || value.contains('\0') {
             bail!("invalid {label}: {value:?}");
         }
+    }
+    Ok(())
+}
+
+/// Rejects refspecs that cannot be a single Git push argument.
+fn validate_refspec(refspec: &str) -> Result<()> {
+    let valid = !refspec.is_empty()
+        && !refspec.starts_with('-')
+        && !refspec.contains('\0')
+        && !refspec.chars().any(char::is_whitespace)
+        && refspec.split(':').count() <= 2
+        && refspec.split(':').all(|side| {
+            !side.is_empty()
+                && !side.starts_with('/')
+                && !side.ends_with('/')
+                && !side.contains("..")
+                && !side.contains("//")
+                && !side.contains('\\')
+                && side
+                    .split('/')
+                    .all(|part| !part.is_empty() && part != "." && part != "..")
+        });
+    if !valid {
+        bail!("invalid refspec: {refspec:?}");
     }
     Ok(())
 }
@@ -1591,6 +1695,9 @@ fn action_args(action: &RepositoryAction) -> Result<(Vec<OsString>, bool)> {
                 args.push("--force-with-lease".into());
             }
             args.extend([remote.into(), format!("{branch}:{branch}").into()]);
+        }
+        RepositoryAction::PushRefspec { remote, refspec } => {
+            args.extend(["push".into(), remote.into(), refspec.into()]);
         }
         RepositoryAction::SetUpstream { branch, upstream } => {
             args.extend([
@@ -3355,5 +3462,173 @@ u UU N... 100644 100644 100644 100644 a b c conflict.txt\x00\
     #[test]
     fn rejects_incomplete_log_record() {
         assert!(parse_log(b"oid\0parent\0").is_err());
+    }
+
+    #[test]
+    fn refspec_validation_accepts_gerrit_style_targets_and_rejects_ambiguous_values() {
+        for refspec in [
+            "HEAD:refs/for/master",
+            "main:main",
+            "HEAD",
+            "refs/heads/main",
+        ] {
+            assert!(
+                validate_repository_action_values(&RepositoryAction::PushRefspec {
+                    remote: "origin".into(),
+                    refspec: refspec.into(),
+                })
+                .is_ok(),
+                "{refspec} should be accepted"
+            );
+        }
+        for refspec in [
+            "",
+            "-x",
+            "a b",
+            "a:b:c",
+            "/a",
+            "a/",
+            "a..b",
+            "a//b",
+            "..",
+            "refs/for/../secret",
+            "HEAD:",
+            ":refs/for/master",
+        ] {
+            assert!(
+                validate_repository_action_values(&RepositoryAction::PushRefspec {
+                    remote: "origin".into(),
+                    refspec: refspec.into(),
+                })
+                .is_err(),
+                "{refspec:?} should be rejected"
+            );
+        }
+        assert!(
+            validate_repository_action_values(&RepositoryAction::PushRefspec {
+                remote: "--all".into(),
+                refspec: "HEAD:refs/for/master".into(),
+            })
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn push_refspec_argv_is_a_single_explicit_argument() {
+        let (args, detail) = action_args(&RepositoryAction::PushRefspec {
+            remote: "origin".into(),
+            refspec: "HEAD:refs/for/master".into(),
+        })
+        .unwrap();
+        assert!(!detail);
+        let args = args
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(args, ["push", "origin", "HEAD:refs/for/master"]);
+    }
+
+    #[tokio::test]
+    async fn commit_template_round_trips_multiline_values_and_clears() {
+        let temp = tempdir().unwrap();
+        run_git(temp.path(), &["init", "-q", "-b", "main"]);
+        assert_eq!(commit_template(temp.path()).await.unwrap(), None);
+
+        let template = "feat: summary\n\n1. item one\n2. item two\n";
+        set_commit_template(temp.path(), template).await.unwrap();
+        assert_eq!(
+            commit_template(temp.path()).await.unwrap().as_deref(),
+            Some(template)
+        );
+        // The value lives in the repository-local config, not the global one.
+        assert_eq!(
+            run_git(
+                temp.path(),
+                &["config", "--local", "--get", "trepo.commitTemplate"]
+            ),
+            "feat: summary\n\n1. item one\n2. item two"
+        );
+
+        set_commit_template(temp.path(), "fix: only one line")
+            .await
+            .unwrap();
+        assert_eq!(
+            commit_template(temp.path()).await.unwrap().as_deref(),
+            Some("fix: only one line")
+        );
+
+        clear_commit_template(temp.path()).await.unwrap();
+        assert_eq!(commit_template(temp.path()).await.unwrap(), None);
+        // Clearing an absent key is already the desired end state.
+        clear_commit_template(temp.path()).await.unwrap();
+        // An empty write also clears.
+        set_commit_template(temp.path(), template).await.unwrap();
+        set_commit_template(temp.path(), "").await.unwrap();
+        assert_eq!(commit_template(temp.path()).await.unwrap(), None);
+
+        assert!(set_commit_template(temp.path(), "bad\0value")
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn push_refspec_creates_and_updates_the_remote_ref() {
+        let root = tempdir().unwrap();
+        let remote = root.path().join("remote.git");
+        let client = root.path().join("client");
+        run_git(
+            root.path(),
+            &["init", "--bare", "-q", remote.to_str().unwrap()],
+        );
+        run_git(
+            root.path(),
+            &["init", "-q", "-b", "main", client.to_str().unwrap()],
+        );
+        run_git(&client, &["config", "user.name", "Test"]);
+        run_git(&client, &["config", "user.email", "test@example.com"]);
+        commit_file(&client, "review.txt", "first\n", "first");
+        run_git(
+            &client,
+            &["remote", "add", "origin", remote.to_str().unwrap()],
+        );
+
+        let push = RepositoryAction::PushRefspec {
+            remote: "origin".into(),
+            refspec: "HEAD:refs/for/main".into(),
+        };
+        assert_eq!(push.label(), "Push refspec");
+        assert_eq!(push.risk(), crate::domain::RiskLevel::RemoteWrite);
+        execute_repository_action(&client, &push, false)
+            .await
+            .unwrap();
+        assert_eq!(
+            run_git(&remote, &["rev-parse", "refs/for/main"]),
+            run_git(&client, &["rev-parse", "HEAD"])
+        );
+
+        // A repeat push of unchanged history succeeds without moving the ref.
+        execute_repository_action(&client, &push, false)
+            .await
+            .unwrap();
+        assert_eq!(
+            run_git(&remote, &["rev-parse", "refs/for/main"]),
+            run_git(&client, &["rev-parse", "HEAD"])
+        );
+
+        commit_file(&client, "review.txt", "second\n", "second");
+        execute_repository_action(&client, &push, false)
+            .await
+            .unwrap();
+        assert_eq!(
+            run_git(&remote, &["rev-parse", "refs/for/main"]),
+            run_git(&client, &["rev-parse", "HEAD"])
+        );
+        // The push targets the magic ref only; no branch was created on the remote.
+        let branch = std::process::Command::new("git")
+            .args(["show-ref", "--verify", "refs/heads/main"])
+            .current_dir(&remote)
+            .status()
+            .unwrap();
+        assert!(!branch.success());
     }
 }

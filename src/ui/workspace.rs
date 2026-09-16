@@ -445,8 +445,8 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
     let keys = format!(
         "{}{}",
         app.language.text(
-            "   Space Select  S Stage  Z Stash  D Discard  d Scope  t List/Tree  a Repo actions  / Search",
-            "   Space 选择  S 暂存  Z 储藏  D 丢弃  d 范围  t 列表/树形  a Repo 操作  / 搜索",
+            "   Space Select  S Stage  Z Stash  D Discard  d Scope  t List/Tree  p Push refs/for  a Repo actions  / Search",
+            "   Space 选择  S 暂存  Z 储藏  D 丢弃  d 范围  t 列表/树形  p 推送 refs/for  a Repo 操作  / 搜索",
         ),
         abort
     );
