@@ -105,7 +105,7 @@ Implemented:
 - Concurrent porcelain v2 status scanning
 - staged, unstaged, untracked, conflict, HEAD, ahead/behind, and active merge/rebase/cherry-pick/revert state captured during status scans
 - searchable responsive Workspace page where `d` cycles all projects, changed projects, and changed projects with files while `t` independently switches each scope between List and Tree; the first two scopes can render repository path trees, the third can render a change tree or flat full-path file list, and repository selection remains bound to stable project identity
-- complete all-refs commit graph covering local branches, remote branches, tags, HEAD, and every stash entry, ordered with pure topological order and showing UTC calendar dates
+- complete all-refs commit graph covering local branches, remote branches, tags, HEAD, and every stash entry, ordered with commit-date order (newest first, parents always after their children) and showing UTC calendar dates
 - compact pipe-based topology lanes with left-shifting continuations, solid split/merge connectors, explicit `~N` hidden-lane markers, and `◉` missing-parent boundaries
 - responsive Graph columns preserve topology, wrapped subject text, and important refs first; rows use their real visual height, commit body keeps original line breaks, and dense remote/tag badges fold into `R:+N`/`T:+N` while Inspector/object menus retain every ref
 - in-memory Graph filtering by local/remote branch history, commit OID/subject/body/ref text, author, and inclusive UTC date range; conditions combine with AND while selection remains bound to commit OID

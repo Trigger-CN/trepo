@@ -231,7 +231,7 @@ Graph 是仓库操作的首要发现入口。用户在提交树中选中节点�
 
 Git 提供提交及 parent 关系，`trepo` 的纯数据 `graph_layout` 模块负责布局，Ratatui 层只将 cell 投影为颜色和字符：
 
-1. 只使用 `git log --topo-order --all` 获取提交，避免后置 date-order 让平行开发线按日期交错，同时保证父提交不会出现在子提交之前。
+1. 使用 `git log --date-order --all` 获取提交：按提交时间降序优先排列平行开发线，同时保证父提交不会出现在子提交之前。
 2. 输入先转换为 `GraphNode { oid, edges }`，edge 显式区分 `Direct`、`Indirect` 和 `Missing`；缺失 parent 不伪装为普通直接连接，并用 `◉` 标记 boundary。
 3. 每行根据旧 lanes 和新 lanes 生成 `Pipe { from_lane, to_lane, Starts | Continues | Terminates }`；continuing pipe 优先复用 ancestry color，左侧 lane 终止后右侧 continuation 安全向左收缩。
 4. parent 优先占用当前节点释放的最左位置，first parent 继承当前颜色，其余 parent 分配稳定颜色；每个 cell 根据上、下、左、右连接位选择 `─`、`│`、`├`、`┤`、`┬`、`┴`、`┼`、`┌`、`┐`、`└`、`┘`。
@@ -465,7 +465,7 @@ Upload 执行前展示 project 和准确 argv。M4 capture 模式只执行 `--cu
 | 仓库状态、branch、ahead/behind | `git status --porcelain=v2 --branch -z` |
 | Git dir/worktree/common dir | `git rev-parse --path-format=absolute ...` |
 | refs 与 upstream | `git for-each-ref` + 自定义 NUL/字段格式 |
-| commit DAG | `git log --topo-order --parents` + 显式记录/字段分隔符 |
+| commit DAG | `git log --date-order --parents` + 显式记录/字段分隔符 |
 | commit detail | `git show --no-patch` + 显式格式 |
 | diff/name status | `git diff --raw/-z`、`--numstat -z`、`--patch` |
 | unmerged stages | `git ls-files -u -z` |

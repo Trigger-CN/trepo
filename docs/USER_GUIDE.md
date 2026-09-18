@@ -165,7 +165,7 @@ flowchart TD
 
 ## 6. Commit Graph
 
-Graph 使用纯拓扑顺序加载所有本地分支、远端分支、tag、HEAD 和 stash 的可达历史。平行开发线尽量连续显示，不再按提交日期互相穿插。
+Graph 按提交时间优先加载所有本地分支、远端分支、tag、HEAD 和 stash 的可达历史：提交按时间降序排列，同时保证父提交不会出现在子提交之前。
 
 主列表优先保留 Graph、Subject 和重要 refs。HEAD、本地分支和 stash 直接显示；同一提交有多个 remote/tag 时，各显示一个并用 `R:+N`/`T:+N`表示其余数量。宽屏右侧 Inspector 会按 HEAD、Local branches、Remote branches、Tags、Stashes 分组列出全部 refs，按 `Enter` 打开的对象菜单也不会丢失被摘要隐藏的对象。
 

@@ -1906,7 +1906,10 @@ pub async fn log_all(path: &Path) -> Result<Vec<Commit>> {
     let pretty = format!("--pretty={LOG_FORMAT}");
     let mut args = vec![
         OsString::from("log"),
-        OsString::from("--topo-order"),
+        // Commit-date order interleaves parallel lines by time while still
+        // keeping every parent after its children, which the lane layout
+        // depends on.
+        OsString::from("--date-order"),
         OsString::from("--all"),
         OsString::from(pretty),
     ];
@@ -2430,7 +2433,7 @@ u UU N... 100644 100644 100644 100644 a b c conflict.txt\x00\
     }
 
     #[tokio::test]
-    async fn loads_parallel_histories_in_pure_topological_order() {
+    async fn loads_parallel_histories_in_commit_date_order() {
         let temp = tempdir().unwrap();
         run_git(temp.path(), &["init", "-q", "-b", "main"]);
         commit_file_at(
@@ -2491,11 +2494,11 @@ u UU N... 100644 100644 100644 100644 a b c conflict.txt\x00\
         .lines()
         .map(str::to_owned)
         .collect::<Vec<_>>();
-        assert_eq!(actual, topo);
-        assert_ne!(actual, date);
+        assert_eq!(actual, date);
+        assert_ne!(actual, topo);
         assert_eq!(
             actual,
-            vec!["main-two", "main-one", "feature-two", "feature-one", "base"]
+            vec!["main-two", "feature-two", "main-one", "feature-one", "base"]
         );
     }
 
