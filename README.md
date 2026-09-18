@@ -86,7 +86,7 @@ git push origin v0.5.0
 | `d` | Workspace: cycle the data scope through all projects → changed projects → changed projects with files; Changes: confirm complete Discard for selected files or discard the active file/hunk/line |
 | `t` | Workspace: toggle List / Tree layout for the current scope; each scope remembers its own layout; Changes: edit the repository-local commit message template |
 | `m` / `a` / `w` | Changes: open Commit / Amend `HEAD` / Reword `HEAD` directly; Amend and Reword preload the current message, and a key pressed during Stage refresh opens the editor as soon as loading finishes |
-| `p` | Workspace: push the cursor repository as `git push <remote> HEAD:refs/for/<current-branch>` after a fresh snapshot, scope preview, and confirmation |
+| `p` | Workspace: open a prefilled Push refspec form for the cursor repository after a fresh snapshot — Remote defaults to `origin` or the first remote, Refspec to `HEAD:refs/for/<current-branch>` (`master` when detached) — then confirm `git push <remote> <refspec>` |
 | `Ctrl-A` / `Ctrl-U` / `Ctrl-G` | Toggle Commit/Amend compatibility mode / sign-off / signing in the Changes commit dialog |
 | `o` | Open Repository management from Workspace, Graph, or Changes |
 | `PageUp` / `PageDown` | Scroll the selected diff |
@@ -124,13 +124,13 @@ Implemented:
 - stable Changes file multi-selection with all-token-preflight batch Stage/Unstage, confirmed selected-path Stash, and confirmed complete Discard of tracked index/worktree plus untracked paths
 - guarded file-, hunk-, and changed-line stage, unstage, and discard with lock-time patch reconstruction
 - `git apply --check`, stale token/fingerprint rejection, destructive confirmation, and failure-state preservation
-- multiline Commit/Amend/Reword input and paste directly from Changes, always-visible commit shortcuts at supported terminal widths, queued editor entry during Stage refresh, current-message preload for Amend/Reword, sign-off, signing, hook output, and message recovery; Reword uses `--amend --only` so staged changes remain staged
+- multiline Commit/Amend/Reword input and paste directly from Changes, with bracketed paste delivered to whichever editor or form currently has focus (commit template, commit dialog, Graph filter/action, Repository, Repo batch, Workspace search), always-visible commit shortcuts at supported terminal widths, queued editor entry during Stage refresh, current-message preload for Amend/Reword, sign-off, signing, hook output, and message recovery; Reword uses `--amend --only` so staged changes remain staged
 - Workspace and Changes expose active merge/rebase/cherry-pick/revert state and guarded abort through a fresh repository snapshot, destructive confirmation, project lock, and snapshot token
 - Repository page with Status, Stashes, Branches & Tags, and Remotes tabs
 - structured Stash workflows for include-untracked, keep-index, staged-only, apply/pop index restore, branch creation, drop, and clear; staged-only rejects incompatible modes before execution
 - separate Push, Push refspec, and Force Push entries in Repository and Graph; force updates always use `--force-with-lease`, with exact refspec/OID-range preview and explicit remote-history warning; the refspec entry runs `git push <remote> <refspec>` with strict single-argument validation
 - repository-local commit message template stored as `trepo.commitTemplate` in the repository Git config, editable from Changes through `t`, clearing on an empty draft or `Ctrl-D`, seeding only a brand-new Commit draft while Amend/Reword keep the current `HEAD` message
-- Workspace `p` derives `HEAD:refs/for/<current-branch>` and the `origin` remote (or the first configured remote) from a freshly loaded repository snapshot, then reports through the existing remote-write confirmation, project lock, and snapshot token
+- Workspace `p` reloads a fresh repository snapshot and opens an editable Push refspec form prefilled with the `origin` remote (or the first configured remote) and `HEAD:refs/for/<current-branch>` (`master` when HEAD is detached), so the target can be retyped before the existing remote-write confirmation, project lock, and snapshot token
 - project locks, worktree-aware index-lock checks, snapshot tokens, generation checks, and automatic scoped refresh
 - `doctor` diagnostics and parser/real Git/TestBackend-focused tests
 - English UI by default, with instance-scoped Chinese/English selection through exact `-zh`/`-en` compatibility flags or standard `--zh`/`--en` flags

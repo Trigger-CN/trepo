@@ -278,7 +278,7 @@ fn render_action_menu(frame: &mut Frame, app: &App, state: &RepositoryState) {
     );
 }
 
-fn render_form(frame: &mut Frame, app: &App, state: &RepositoryState) {
+pub(super) fn render_form(frame: &mut Frame, app: &App, state: &RepositoryState) {
     let Some(form) = state.form.as_ref() else {
         return;
     };

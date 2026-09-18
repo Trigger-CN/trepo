@@ -47,14 +47,20 @@ pub fn render(frame: &mut Frame, app: &App) {
     render_footer(frame, app, vertical[2]);
     render_repo_batch_overlay(frame, app);
     render_workspace_git_overlay(frame, app);
-    if app.repository.as_ref().is_some_and(|state| {
-        state.return_screen == crate::app::state::Screen::Workspace && state.pending.is_some()
-    }) {
-        super::repository::render_confirmation(
-            frame,
-            app,
-            app.repository.as_ref().expect("repository state"),
-        );
+    if app
+        .repository
+        .as_ref()
+        .is_some_and(|state| state.return_screen == crate::app::state::Screen::Workspace)
+    {
+        let state = app.repository.as_ref().expect("repository state");
+        // Workspace-originated pushes need an editable target, so the form is
+        // rendered on this screen instead of only inside the Repository page.
+        if state.form.is_some() {
+            super::repository::render_form(frame, app, state);
+        }
+        if state.pending.is_some() {
+            super::repository::render_confirmation(frame, app, state);
+        }
     }
 }
 

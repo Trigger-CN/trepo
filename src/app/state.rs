@@ -188,8 +188,14 @@ impl GraphForm {
                     text.push(value);
                 }
             }
-            CommitInput::Text(_)
-            | CommitInput::Newline
+            CommitInput::Text(value) => {
+                if let Some(FormField::Text { value: text, .. }) =
+                    self.fields.get_mut(self.selected)
+                {
+                    text.push_str(&value.replace(['\r', '\n'], ""));
+                }
+            }
+            CommitInput::Newline
             | CommitInput::Delete
             | CommitInput::MoveLeft
             | CommitInput::MoveRight
@@ -528,6 +534,9 @@ impl GraphFilterForm {
     fn edit(&mut self, input: CommitInput) {
         match input {
             CommitInput::Character(value) => self.selected_value_mut().push(value),
+            CommitInput::Text(value) => self
+                .selected_value_mut()
+                .push_str(&value.replace(['\r', '\n'], "")),
             CommitInput::Backspace => {
                 self.selected_value_mut().pop();
             }
@@ -1531,6 +1540,7 @@ impl App {
         };
         match input {
             CommitInput::Character(value) => form.value.push(value),
+            CommitInput::Text(value) => form.value.push_str(&value.replace(['\r', '\n'], "")),
             CommitInput::Backspace => {
                 form.value.pop();
             }
@@ -3678,8 +3688,8 @@ impl App {
         };
         match input {
             CommitInput::Character(value) => form.edit_char(value),
-            CommitInput::Text(_)
-            | CommitInput::Newline
+            CommitInput::Text(value) => form.insert_text(&value),
+            CommitInput::Newline
             | CommitInput::Delete
             | CommitInput::MoveLeft
             | CommitInput::MoveRight
@@ -3737,18 +3747,15 @@ impl App {
         let Some(snapshot) = state.snapshot.as_ref() else {
             return;
         };
-        let Some(branch) = snapshot
+        // A detached HEAD is fine here: the local side is always `HEAD`, so only
+        // the remote target needs a value. Prefill it from the checked-out branch
+        // when there is one, otherwise fall back to `master`.
+        let branch = snapshot
             .branches
             .iter()
             .find(|entry| entry.current)
             .map(|entry| entry.name.clone())
-        else {
-            self.set_repository_origin_message(
-                true,
-                "Refspec push requires a checked-out branch".to_owned(),
-            );
-            return;
-        };
+            .unwrap_or_else(|| "master".to_owned());
         let remote = snapshot
             .remotes
             .iter()
@@ -3762,10 +3769,22 @@ impl App {
             );
             return;
         };
-        self.begin_repository_action(RepositoryAction::PushRefspec {
-            remote,
-            refspec: format!("HEAD:refs/for/{branch}"),
-        });
+        if let Some(state) = self.repository.as_mut() {
+            state.form = Some(RepositoryForm {
+                choice: RepositoryChoice::PushRefspec,
+                fields: vec![
+                    FormField::Text {
+                        label: "Remote",
+                        value: remote,
+                    },
+                    FormField::Text {
+                        label: "Refspec",
+                        value: format!("HEAD:refs/for/{branch}"),
+                    },
+                ],
+                selected: 1,
+            });
+        }
     }
 
     fn begin_repository_action(&mut self, action: RepositoryAction) {
@@ -5545,18 +5564,47 @@ mod tests {
         });
         assert!(!app.workspace_push_intent);
         let state = app.repository.as_ref().unwrap();
-        assert_eq!(
-            state.pending,
-            Some(RepositoryAction::PushRefspec {
-                remote: "origin".into(),
-                refspec: "HEAD:refs/for/main".into(),
-            })
-        );
+        // The target is offered as an editable form instead of a fixed refspec,
+        // so the branch can still be changed before the confirmation step.
+        assert!(state.pending.is_none());
+        let form = state.form.as_ref().unwrap();
+        assert_eq!(form.choice, RepositoryChoice::PushRefspec);
+        assert_eq!(form.fields[0].display_value(), "origin");
+        assert_eq!(form.fields[1].display_value(), "HEAD:refs/for/main");
+        assert_eq!(form.selected, 1);
         assert_eq!(app.screen, Screen::Workspace);
     }
 
     #[tokio::test]
-    async fn workspace_refspec_push_reports_missing_branch_or_remote() {
+    async fn workspace_refspec_push_accepts_a_typed_target_branch() {
+        let (mut app, value) = workspace_app();
+        app.begin_workspace_refspec_push();
+        let generation = app.repository.as_ref().unwrap().generation;
+        app.apply_repository_load(RepositoryLoadResult {
+            project_id: value.id.clone(),
+            generation,
+            result: Ok(repository_snapshot(true, true)),
+        });
+
+        // Clear the prefilled refspec and type a different target branch.
+        for _ in 0.."HEAD:refs/for/main".len() {
+            app.edit_repository_form(CommitInput::Backspace);
+        }
+        app.edit_repository_form(CommitInput::Text("HEAD:refs/for/master".into()));
+        app.submit_repository_form();
+        let state = app.repository.as_ref().unwrap();
+        assert!(state.form.is_none());
+        assert_eq!(
+            state.pending,
+            Some(RepositoryAction::PushRefspec {
+                remote: "origin".into(),
+                refspec: "HEAD:refs/for/master".into(),
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn workspace_refspec_push_prefills_master_for_a_detached_head() {
         let (mut app, value) = workspace_app();
         app.begin_workspace_refspec_push();
         let generation = app.repository.as_ref().unwrap().generation;
@@ -5565,13 +5613,16 @@ mod tests {
             generation,
             result: Ok(repository_snapshot(false, true)),
         });
+        // Without a checked-out branch the target defaults instead of failing.
         let state = app.repository.as_ref().unwrap();
-        assert!(state.pending.is_none());
-        assert!(state
-            .message
-            .as_ref()
-            .is_some_and(|(error, message)| *error && message.contains("checked-out branch")));
+        assert!(state.message.is_none());
+        let form = state.form.as_ref().unwrap();
+        assert_eq!(form.fields[1].display_value(), "HEAD:refs/for/master");
+    }
 
+    #[tokio::test]
+    async fn workspace_refspec_push_reports_a_missing_remote() {
+        let (mut app, value) = workspace_app();
         app.begin_workspace_refspec_push();
         let generation = app.repository.as_ref().unwrap().generation;
         app.apply_repository_load(RepositoryLoadResult {
@@ -5580,6 +5631,7 @@ mod tests {
             result: Ok(repository_snapshot(true, false)),
         });
         let state = app.repository.as_ref().unwrap();
+        assert!(state.form.is_none());
         assert!(state.pending.is_none());
         assert!(state
             .message

@@ -219,9 +219,7 @@ async fn run_tui(app: &mut App) -> Result<()> {
         if event::poll(Duration::from_millis(50)).context("failed to poll terminal input")? {
             match event::read().context("failed to read terminal input")? {
                 Event::Key(key) if key.kind == KeyEventKind::Press => handle_key(app, key),
-                Event::Paste(text) => {
-                    app.edit_commit_message(trepo::app::state::CommitInput::Text(text))
-                }
+                Event::Paste(text) => handle_paste(app, text),
                 Event::Resize(_, _) => {}
                 _ => {}
             }
@@ -229,6 +227,57 @@ async fn run_tui(app: &mut App) -> Result<()> {
         drain_background_messages(app);
     }
     Ok(())
+}
+
+fn handle_paste(app: &mut App, text: String) {
+    // Route the paste to whichever editor currently owns the keyboard, matching
+    // the precedence of `handle_key` so bracketed paste never lands in a hidden
+    // buffer or gets dropped by a closed editor.
+    if app
+        .changes
+        .as_ref()
+        .is_some_and(|changes| changes.template_editing)
+    {
+        app.edit_template(trepo::app::state::CommitInput::Text(text));
+        return;
+    }
+    if app
+        .changes
+        .as_ref()
+        .is_some_and(|changes| changes.commit_editing)
+    {
+        app.edit_commit_message(trepo::app::state::CommitInput::Text(text));
+        return;
+    }
+    if app
+        .graph
+        .as_ref()
+        .is_some_and(|graph| graph.filter_form.is_some())
+    {
+        app.edit_graph_filter(trepo::app::state::CommitInput::Text(text));
+        return;
+    }
+    if app.graph.as_ref().is_some_and(|graph| graph.form.is_some()) {
+        app.edit_graph_form(trepo::app::state::CommitInput::Text(text));
+        return;
+    }
+    if app
+        .repository
+        .as_ref()
+        .is_some_and(|state| state.form.is_some())
+    {
+        app.edit_repository_form(trepo::app::state::CommitInput::Text(text));
+        return;
+    }
+    if app.repo_batch.form.is_some() {
+        app.edit_repo_batch_form(trepo::app::state::CommitInput::Text(text));
+        return;
+    }
+    if app.search_mode {
+        app.search
+            .extend(text.chars().filter(|character| !character.is_control()));
+        app.selected = 0;
+    }
 }
 
 fn drain_background_messages(app: &mut App) {

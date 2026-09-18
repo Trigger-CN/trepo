@@ -56,7 +56,7 @@ M1 是所有后续里程碑的共同数据与交互基础。M4 可以在 M2 后�
 - Graph 支持 commit/HEAD/local branch/remote branch/tag/stash 两级上下文操作及 typed form；Commit 可从 commit/HEAD 对象进入，Amend 仅在 HEAD 对象提供。Subject 按显示列宽多行渲染，Inspector 保留 body 原始换行，本地分支直接提供普通 Push 与 Force push with lease。
 - Changes 支持文件多选批量 Stage/Unstage、selected-path Stash 和完整 Discard，提供 Commit/Amend/Reword 显式编辑入口，并展示及终止活动 Git 操作；文件/hunk/changed-line、commit/stash/conflict、refs/integration 和 remotes 写操作受锁、token 和 generation 保护。
 - 提交消息模板存于仓库本地 `trepo.commitTemplate`，可在 Changes 按 `t` 编辑；模板只预填全新的 Commit 草稿，Amend/Reword 仍预载 HEAD message。
-- Repository → Remotes 提供独立 Push refspec 入口，Workspace 按 `p` 会先从最新快照推导当前分支与 remote，再以 `HEAD:refs/for/<branch>` 进入同一 RemoteWrite 确认流程。
+- Repository → Remotes 提供独立 Push refspec 入口；Workspace 按 `p` 先从最新快照预填 Remote 与 `HEAD:refs/for/<branch>`（detached HEAD 回退 `master`），在可编辑表单中修改目标后才进入同一 RemoteWrite 确认流程。
 - Repo `sync/start/checkout/abandon/prune/rebase/upload/download` 和 pinned manifest export 具有 workspace lock、逐项目结果、流式日志、取消后复扫与失败重试。
 - Graph、Changes、Workspace Git 与 Repo overlay、confirmation 和结果状态均覆盖 80x24 与 120x40 TestBackend 渲染；四个主页面的数据行选中态另有 cell 前景、背景和粗体断言。
 - UI 默认英文，`-zh`/`--zh` 与 `-en`/`--en` 以实例级语言状态覆盖主要页面；长路径、diff 和外部文本按终端列宽安全处理，控制字符不能污染终端布局。选中行使用暗蓝灰色 `#262e3a` 背景并保留原有文本前景色，状态仍由颜色和字符或符号共同表达。
@@ -246,7 +246,7 @@ cargo run -- doctor .
 - destructive file/hunk/line discard 确认；失败保留选择与错误，成功自动刷新。
 - 文件批次使用稳定 `PathBuf` 集合，在写入前验证全部 diff token；Stash 保存 selected tracked/untracked，Discard 清理 tracked index/worktree、staged-added、untracked 和 rename 新旧路径，未选路径保持不变。
 - Workspace `S`/`Z`/`D` 在显式选择为空时冻结光标仓库，非空时仅冻结 stable multi-select，并在确认框展示最终仓库范围与改动统计；全批路径/token/index-lock 预检失败时零写入，Stage 暂存完整 tracked/untracked 改动并拒绝冲突仓库，执行结果按仓库保留且不承诺跨仓库回滚。
-- bracketed paste 保留提交正文换行；Unicode 光标移动、中间插入/删除、行首尾和跨行移动有状态测试覆盖。Amend/Reword 预载 HEAD message，无 HEAD 时明确拒绝。
+- bracketed paste 保留提交正文换行，并按与按键相同的优先级路由到提交模板、commit 编辑器、Graph filter/action、Repository、Repo 批量表单和 Workspace 搜索；Unicode 光标移动、中间插入/删除、行首尾和跨行移动有状态测试覆盖。Amend/Reword 预载 HEAD message，无 HEAD 时明确拒绝。
 - Workspace/Changes 的 Abort 在确认前重新读取 RepositorySnapshot 并校验 operation 类型，确认后以 snapshot token、workspace/project lock 和 index-lock 前置检查执行。
 - 80x24/120x40 TestBackend 验证 Changes/Workspace Git 确认与结果、活动 operation/abort 确认、Message 边框、Options/Keys 分隔区和真实 cursor；Changes 文件名 cell 直接覆盖 staged、unstaged、mixed、untracked、conflict 状态色及选中态覆盖。
 - 真实临时仓库覆盖 Reword 保留 staged index/tree、selected-path Stash、完整 Discard、双仓库 Stage/Stash/Discard、冲突拒绝、stale 全批零写入，以及高级 stash、conflict 和 operation abort 工作流。
@@ -283,7 +283,7 @@ cargo run -- doctor .
 - 真实临时仓库完成 branch/tag、merge/rebase/cherry-pick/revert 和 operation control 矩阵。
 - workspace-local seed/client/peer/bare remote 完成 fetch/pull/push/upstream/prune 与 remote 管理闭环，并验证普通非快进拒绝、陈旧 lease 拒绝和更新 tracking ref 后 lease 强推成功。
 - remote write 显示准确 `branch:branch` refspec、OID range、upstream 和 lease 状态，Force Push 显示历史重写警告，URL userinfo 脱敏。
-- Push refspec 以单个独立 argv 执行 `git push <remote> <refspec>`，在真实 bare remote 上创建并更新 `refs/for/main`；refspec 校验矩阵拒选项式与模糊输入，Workspace `p` 的 fresh-snapshot 推导、缺分支/缺 remote 分支均有状态机测试。
+- Push refspec 以单个独立 argv 执行 `git push <remote> <refspec>`，在真实 bare remote 上创建并更新 `refs/for/main`；refspec 校验矩阵拒选项式与模糊输入，Workspace `p` 的 fresh-snapshot 预填、改打目标分支、detached HEAD 回退 `master` 与缺 remote 均有状态机测试。
 - repository snapshot token 在锁内拒绝确认后发生的 refs/stash/conflict/remote 状态变化。
 - 外部 mergetool/editor 依赖 M5 PTY takeover，明确不在 M3 后台任务中启动。
 

@@ -391,6 +391,13 @@ impl RepositoryForm {
         }
     }
 
+    /// Inserts pasted text into the active text field as one value.
+    pub fn insert_text(&mut self, value: &str) {
+        if let Some(FormField::Text { value: text, .. }) = self.fields.get_mut(self.selected) {
+            text.push_str(&single_line(value));
+        }
+    }
+
     pub fn backspace(&mut self) {
         if let Some(FormField::Text { value, .. }) = self.fields.get_mut(self.selected) {
             value.pop();
@@ -546,6 +553,15 @@ fn text_field(label: &'static str, value: impl Into<String>) -> FormField {
         label,
         value: value.into(),
     }
+}
+
+/// Collapses a pasted value into one line, because these fields are single-line
+/// inputs and an embedded newline would be stored but never rendered.
+fn single_line(value: &str) -> String {
+    value
+        .chars()
+        .filter(|character| !matches!(character, '\r' | '\n'))
+        .collect()
 }
 
 fn toggle_field(label: &'static str, value: bool) -> FormField {

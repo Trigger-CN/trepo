@@ -31,7 +31,7 @@ cargo run -- update
 5. 在 Changes 用 `Space`/`A` 多选文件，按 `z/s/u/d` 执行储藏/暂存/取消暂存/丢弃；`Tab` 切换 file/hunk/line 单目标作用域。
 6. 暂存完成后无需离开 Changes：直接按 `m` 提交，或按 `a` 修订当前 HEAD；Amend 会自动载入原提交消息。若在 Stage 完成后的刷新期间按键，编辑器会在刷新结束后自动打开。按 `Ctrl-Enter` 或 `Ctrl-S` 提交。
 7. 想固定提交格式时，在 Changes 按 `t` 编辑提交消息模板（存于仓库本地 `trepo.commitTemplate`），`Ctrl-Enter`/`Ctrl-S` 保存后，之后空草稿的 Commit 会自动预填该模板；空草稿保存或 `Ctrl-D` 会清除模板。
-8. 需要推送时按 `o`，切换到 Remotes，按 `a` 选择 Push；也可在 Graph 选中本地分支对象后推送。需要 Gerrit 风格的 `HEAD:refs/for/<branch>` 推送时，在 Remotes 选择 Push refspec 填写 refspec，或直接回到 Workspace 对光标仓库按 `p`（自动推导当前分支与 remote 后进入同一确认框）。
+8. 需要推送时按 `o`，切换到 Remotes，按 `a` 选择 Push；也可在 Graph 选中本地分支对象后推送。需要 Gerrit 风格的 `HEAD:refs/for/<branch>` 推送时，在 Remotes 选择 Push refspec 填写 refspec；或回到 Workspace 对光标仓库按 `p`，在预填的 Push refspec 输入框中直接修改目标（Remote 预填 `origin` 或第一个远端，Refspec 预填 `HEAD:refs/for/<当前分支>`，detached HEAD 时为 `master`）后确认。
 9. 出现确认框时，仔细检查冻结目标和参数，按 `y` 执行，按 `n` 或 `Esc` 取消。
 
 ## 3. 通用交互规则
@@ -49,7 +49,7 @@ cargo run -- update
 | `r` | 刷新当前页面 |
 | `q` | 仅在 Workspace 退出程序 |
 
-表单中的文本直接键入；`Space` 只在当前字段是开关时切换开关。Repository/Graph 的普通单行表单目前不支持左右移动光标，只能在末尾输入或用 `Backspace` 删除。
+表单中的文本直接键入；`Space` 只在当前字段是开关时切换开关。表单与搜索框支持粘贴：单行字段会把多行内容折叠为一行，提交消息和提交模板编辑器保留换行。Repository/Graph 的普通单行表单目前不支持左右移动光标，只能在末尾输入或用 `Backspace` 删除。
 
 ## 4. 总体页面流程
 
@@ -330,7 +330,7 @@ Amend 与 Reword 要求存在 HEAD。Amend 执行 `git commit --amend`，可将�
 
 - 模板保存在仓库本地 Git 配置键 `trepo.commitTemplate`（写在 `.git/config`，只属于当前仓库、不影响其他仓库），因此 `git config --local trepo.commitTemplate` 能直接读到同一份值；
 - `Ctrl-Enter` 或 `Ctrl-S` 保存；开启 Commit（`m`）时，若草稿为空则用模板预填，已输入内容绝不被覆盖；Amend/Reword 仍预载 HEAD message；
-- 空草稿保存或 `Ctrl-D` 会删除 `trepo.commitTemplate`（删除不存在的键视为成功）；模板可以包含多行内容；
+- 空草稿保存或 `Ctrl-D` 会删除 `trepo.commitTemplate`（删除不存在的键视为成功）；模板可以包含多行内容，并支持直接粘贴；
 - 保存失败时保留原有模板并显示 Git 的错误输出。
 
 ## 8. Repository 管理页
@@ -424,9 +424,9 @@ Push refspec 把输入作为单个 Git argv 传给 `git push <remote> <refspec>`
 
 ### 工作区 refspec 推送
 
-在 Workspace 按 `p` 会对光标仓库执行同样的推送：trepo 先重新加载最新仓库快照，再从快照推导当前分支与 remote（优先 `origin`，否则第一个已配置 remote），然后走 Repository 同样的预览与 `y` 确认。待确认的 refspec 为 `HEAD:refs/for/<当前分支>`。
+在 Workspace 按 `p` 会对光标仓库打开同一个 Push refspec 输入框：trepo 先重新加载最新仓库快照，再预填 Remote（优先 `origin`，否则第一个已配置 remote）与 Refspec（`HEAD:refs/for/<当前分支>`，detached HEAD 时回退 `HEAD:refs/for/master`），光标直接落在 Refspec 字段；可直接修改目标后提交，随后走 Repository 同样的预览与 `y` 确认。
 
-快照加载完成前不会发送任何写操作；没有 checkout 分支、没有配置 remote 或快照加载失败时只在 Workspace footer 显示错误，不会猜测目标。
+快照加载完成前不会显示表单，也不会发送任何写操作；没有配置 remote 或快照加载失败时只在 Workspace footer 显示错误，不会猜测目标。
 
 ## 9. 确认与失败恢复
 
