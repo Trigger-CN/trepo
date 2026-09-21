@@ -49,7 +49,7 @@ cargo run -- update
 | `r` | 刷新当前页面 |
 | `q` | 仅在 Workspace 退出程序 |
 
-表单中的文本直接键入；`Space` 只在当前字段是开关时切换开关。表单与搜索框支持粘贴：单行字段会把多行内容折叠为一行，提交消息和提交模板编辑器保留换行。Repository/Graph 的普通单行表单目前不支持左右移动光标，只能在末尾输入或用 `Backspace` 删除。
+表单中的文本直接键入；`Space` 只在当前字段是开关时切换开关。表单与搜索框支持粘贴：单行字段会把多行内容折叠为一行，提交消息和提交模板编辑器保留换行。在任一输入位置可用 `Ctrl-V` 主动读取系统剪贴板，也可直接用终端自带的粘贴（如 `Ctrl-Shift-V` 或中键）；两者结果一致。剪贴板助手不可用（例如既无 `wl-paste` 也无 `xclip`/`xsel`）时会在编辑器内提示改用终端粘贴，而不是插入一个 `v` 字符。Repository/Graph 的普通单行表单目前不支持左右移动光标，只能在末尾输入或用 `Backspace` 删除。
 
 ## 4. 总体页面流程
 
@@ -346,7 +346,7 @@ Amend 与 Reword 要求存在 HEAD。Amend 执行 `git commit --amend`，可将�
 
 - 模板保存在仓库本地 Git 配置键 `trepo.commitTemplate`（写在 `.git/config`，只属于当前仓库、不影响其他仓库），因此 `git config --local trepo.commitTemplate` 能直接读到同一份值；
 - `Ctrl-Enter` 或 `Ctrl-S` 保存；开启 Commit（`m`）时，若草稿为空则用模板预填，已输入内容绝不被覆盖；Amend/Reword 仍预载 HEAD message；
-- 空草稿保存或 `Ctrl-D` 会删除 `trepo.commitTemplate`（删除不存在的键视为成功）；模板可以包含多行内容，并支持直接粘贴；
+- 空草稿保存或 `Ctrl-D` 会删除 `trepo.commitTemplate`（删除不存在的键视为成功）；模板可以包含多行内容，并支持直接粘贴（`Ctrl-V` 或终端自带粘贴）；
 - 保存失败时保留原有模板并显示 Git 的错误输出。
 
 ## 8. Repository 管理页

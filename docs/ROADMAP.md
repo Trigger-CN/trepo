@@ -247,7 +247,7 @@ cargo run -- doctor .
 - destructive file/hunk/line discard 确认；失败保留选择与错误，成功自动刷新。
 - 文件批次使用稳定 `PathBuf` 集合，在写入前验证全部 diff token；Stash 保存 selected tracked/untracked，Discard 清理 tracked index/worktree、staged-added、untracked 和 rename 新旧路径，未选路径保持不变。
 - Workspace `S`/`Z`/`D` 在显式选择为空时冻结光标仓库，非空时仅冻结 stable multi-select，并在确认框展示最终仓库范围与改动统计；全批路径/token/index-lock 预检失败时零写入，Stage 暂存完整 tracked/untracked 改动并拒绝冲突仓库，执行结果按仓库保留且不承诺跨仓库回滚。
-- bracketed paste 保留提交正文换行，并按与按键相同的优先级路由到提交模板、commit 编辑器、Graph filter/action、Repository、Repo 批量表单和 Workspace 搜索；Unicode 光标移动、中间插入/删除、行首尾和跨行移动有状态测试覆盖。Amend/Reword 预载 HEAD message，无 HEAD 时明确拒绝。
+- bracketed paste 与显式 `Ctrl-V` 剪贴板读取保留提交正文换行，并按与按键相同的优先级路由到提交模板、commit 编辑器、Graph filter/action、Repository、Repo 批量表单和 Workspace 搜索；Unicode 光标移动、中间插入/删除、行首尾和跨行移动有状态测试覆盖。`Ctrl-V` 读取在后台任务中完成且不阻塞输入循环，助手按平台固定 argv 依次尝试并带超时，全部不可用时在编辑器内提示改用终端粘贴。Amend/Reword 预载 HEAD message，无 HEAD 时明确拒绝。
 - Workspace/Changes 的 Abort 在确认前重新读取 RepositorySnapshot 并校验 operation 类型，确认后以 snapshot token、workspace/project lock 和 index-lock 前置检查执行。
 - 80x24/120x40 TestBackend 验证 Changes/Workspace Git 确认与结果、活动 operation/abort 确认、Message 边框、Options/Keys 分隔区和真实 cursor；Changes 文件名 cell 直接覆盖 staged、unstaged、mixed、untracked、conflict 状态色及选中态覆盖。
 - 真实临时仓库覆盖 Reword 保留 staged index/tree、selected-path Stash、完整 Discard、双仓库 Stage/Stash/Discard、冲突拒绝、stale 全批零写入，以及高级 stash、conflict 和 operation abort 工作流。

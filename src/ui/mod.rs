@@ -1258,6 +1258,7 @@ mod tests {
             assert!(text.contains(" Keys "));
             assert!(text.contains("Ctrl-Enter/Ctrl-S save"));
             assert!(text.contains("Ctrl-D clear"));
+            assert!(text.contains("Ctrl-V paste"));
             // The commit dialog must not render on top of the template editor.
             let lines = text.lines().collect::<Vec<_>>();
             let title_y = lines
@@ -1283,6 +1284,7 @@ mod tests {
             assert!(text.contains("按键"));
             assert!(text.contains("Ctrl-Enter/Ctrl-S保存"));
             assert!(text.contains("Ctrl-D清除"));
+            assert!(text.contains("Ctrl-V粘贴"));
             assert!(raw.contains("feat: subject"));
         }
     }

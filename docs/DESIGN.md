@@ -272,7 +272,7 @@ Changes 页面分为文件树、hunk 列表、diff 检查器和提交对话框�
 - 提交使用 project 级写锁并在锁内检查 `index.lock`；普通 commit 要求存在 staged 内容，amend 遵循 Git 当前 HEAD 语义。
 - commit 失败时合并 hook stdout/stderr，保留多行输入、光标、选项和错误状态，允许修正后重试；成功后刷新 Changes 与 Workspace。
 - 提交消息模板保存在仓库本地 Git 配置键 `trepo.commitTemplate`，通过 Changes 的 `t` 打开同一个 bordered 多行编辑器；写完用 `git config --local --replace-all`，清空用 `--unset-all`（键不存在视为成功），读取用 `--null --get` 并把退出码 1 当作未设置。模板只预填全新的 Commit 草稿，已输入内容不被覆盖，Amend/Reword 仍使用 HEAD message。
-- bracketed paste 不属于单一编辑器：按键与粘贴按同一优先级路由到当前活动的输入目标（提交模板、commit 编辑器、Graph filter/action、Repository、Repo 批量表单、Workspace 搜索）；单行字段折叠输入中的换行，提交消息与模板保留换行。
+- bracketed paste 不属于单一编辑器：按键与粘贴按同一优先级路由到当前活动的输入目标（提交模板、commit 编辑器、Graph filter/action、Repository、Repo 批量表单、Workspace 搜索）；单行字段折叠输入中的换行，提交消息与模板保留换行。`Ctrl-V` 在任一上述输入目标内主动读取系统剪贴板，结果走与 bracketed paste 相同的路由；读取在后台任务中完成，不阻塞输入循环。剪贴板助手按平台固定 argv 依次尝试（Linux `wl-paste`/`xclip`/`xsel`，macOS `pbpaste`，Windows `powershell Get-Clipboard -Raw`），带超时；全部不可用时在当前编辑器内提示改用终端自带粘贴（Ctrl-Shift-V），不会插入字面字符。
 
 - diff 预览保持一个源行对应一个终端行，超宽文本在面板 inner width 内安全截断，禁止 Ratatui 自动 wrap 导致内容跨过边框或折回终端左侧。
 - 文件路径、diff、commit/ref 文本和外部命令消息先转义控制字符，再按 `unicode-width` 终端列宽处理；中文等双宽字符不会被截断到半个 cell。

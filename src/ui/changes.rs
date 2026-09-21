@@ -627,8 +627,8 @@ fn render_template_dialog(frame: &mut Frame, app: &App, changes: &ChangesState) 
     frame.render_widget(
         Paragraph::new(vec![
             Line::raw(app.language.text(
-                "Arrows move   Home/End line   Backspace/Delete edit",
-                "方向键移动   Home/End 行首/行尾   Backspace/Delete 编辑",
+                "Arrows move   Home/End   Backspace/Delete edit   Ctrl-V paste",
+                "方向键移动   Home/End   Backspace/Delete 编辑   Ctrl-V 粘贴",
             )),
             Line::raw(app.language.text(
                 "Enter newline   Ctrl-Enter/Ctrl-S save   Ctrl-D clear   Esc cancel",
@@ -729,8 +729,8 @@ fn render_commit_dialog(frame: &mut Frame, app: &App, changes: &ChangesState) {
     frame.render_widget(
         Paragraph::new(vec![
             Line::raw(app.language.text(
-                "Arrows move   Home/End line   Backspace/Delete edit",
-                "方向键移动   Home/End 行首/行尾   Backspace/Delete 编辑",
+                "Arrows move   Home/End   Backspace/Delete edit   Ctrl-V paste",
+                "方向键移动   Home/End   Backspace/Delete 编辑   Ctrl-V 粘贴",
             )),
             Line::raw(app.language.text(
                 "Enter newline   Ctrl-Enter/Ctrl-S commit   Esc cancel",

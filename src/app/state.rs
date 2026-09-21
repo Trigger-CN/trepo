@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use tokio::sync::mpsc;
 
-use crate::adapters::git;
+use crate::adapters::{clipboard, git};
 use crate::app::repository::{
     choices, form_for, FormField, RepositoryChoice, RepositoryForm, RepositoryTab,
 };
@@ -763,6 +763,12 @@ pub struct TemplateResult {
 }
 
 #[derive(Debug)]
+pub struct ClipboardResult {
+    pub generation: u64,
+    pub result: anyhow::Result<String>,
+}
+
+#[derive(Debug)]
 pub struct RepositoryLoadResult {
     pub project_id: ProjectId,
     pub generation: u64,
@@ -1098,6 +1104,11 @@ pub struct App {
     pub graph_commit_rx: mpsc::UnboundedReceiver<GraphCommitResult>,
     template_tx: mpsc::UnboundedSender<TemplateResult>,
     pub template_rx: mpsc::UnboundedReceiver<TemplateResult>,
+    clipboard_tx: mpsc::UnboundedSender<ClipboardResult>,
+    pub clipboard_rx: mpsc::UnboundedReceiver<ClipboardResult>,
+    /// Increments per clipboard read so a slow helper cannot paste into an
+    /// editor that has already been replaced.
+    pub clipboard_generation: u64,
     repository_intent: Option<RepositoryAction>,
     /// Set when Workspace requested a `HEAD:refs/for/<branch>` push; the refspec
     /// is derived from the freshly loaded snapshot once it arrives.
@@ -1135,6 +1146,7 @@ impl App {
         let (commit_tx, commit_rx) = mpsc::unbounded_channel();
         let (graph_commit_tx, graph_commit_rx) = mpsc::unbounded_channel();
         let (template_tx, template_rx) = mpsc::unbounded_channel();
+        let (clipboard_tx, clipboard_rx) = mpsc::unbounded_channel();
         let (repository_tx, repository_rx) = mpsc::unbounded_channel();
         let (repository_action_tx, repository_action_rx) = mpsc::unbounded_channel();
         let (repo_batch_tx, repo_batch_rx) = mpsc::unbounded_channel();
@@ -1190,6 +1202,9 @@ impl App {
             graph_commit_rx,
             template_tx,
             template_rx,
+            clipboard_tx,
+            clipboard_rx,
+            clipboard_generation: 0,
             repository_tx,
             repository_rx,
             repository_action_tx,
@@ -1887,6 +1902,89 @@ impl App {
 
     pub fn range_history_overlay_active(&self) -> bool {
         self.range_history.visible
+    }
+
+    /// Whether some editor or form currently owns typed input, i.e. whether a
+    /// clipboard paste has a destination. Mirrors the precedence of
+    /// `handle_paste` in `main.rs`.
+    pub fn paste_target_active(&self) -> bool {
+        self.changes
+            .as_ref()
+            .is_some_and(|changes| changes.template_editing || changes.commit_editing)
+            || self
+                .graph
+                .as_ref()
+                .is_some_and(|graph| graph.filter_form.is_some() || graph.form.is_some())
+            || self
+                .repository
+                .as_ref()
+                .is_some_and(|state| state.form.is_some())
+            || self.repo_batch.form.is_some()
+            || self.range_history.form.is_some()
+            || self.search_mode
+    }
+
+    /// Starts an asynchronous clipboard read for an explicit Ctrl-V paste.
+    /// The helper command runs off the input loop, so a slow or missing
+    /// clipboard tool never stalls drawing. The text is delivered through
+    /// [`App::apply_clipboard`] once it arrives.
+    pub fn request_clipboard_paste(&mut self) {
+        if !self.paste_target_active() {
+            return;
+        }
+        self.clipboard_generation = self.clipboard_generation.wrapping_add(1);
+        let generation = self.clipboard_generation;
+        let sender = self.clipboard_tx.clone();
+        tokio::spawn(async move {
+            let result = clipboard::read_text().await;
+            let _ = sender.send(ClipboardResult { generation, result });
+        });
+    }
+
+    /// Applies one clipboard read. Returns the pasted text so the caller can
+    /// route it through the same code path as bracketed paste; a failed read
+    /// surfaces a hint in the editor that requested it.
+    pub fn apply_clipboard(&mut self, result: ClipboardResult) -> Option<String> {
+        if result.generation != self.clipboard_generation {
+            return None;
+        }
+        match result.result {
+            Ok(text) => Some(text),
+            Err(error) => {
+                let message = (true, error.to_string());
+                if let Some(changes) = self.changes.as_mut() {
+                    if changes.template_editing || changes.commit_editing {
+                        changes.message = Some(message);
+                        return None;
+                    }
+                }
+                if let Some(graph) = self.graph.as_mut() {
+                    if graph.filter_form.is_some() {
+                        graph.filter_error = Some(message.1);
+                        return None;
+                    }
+                    if graph.form.is_some() {
+                        graph.message = Some(message);
+                        return None;
+                    }
+                }
+                if let Some(repository) = self.repository.as_mut() {
+                    if repository.form.is_some() {
+                        repository.message = Some(message);
+                        return None;
+                    }
+                }
+                if self.repo_batch.form.is_some() {
+                    self.repo_batch.message = Some(message);
+                    return None;
+                }
+                if self.range_history.form.is_some() {
+                    self.range_history.message = Some(message);
+                    return None;
+                }
+                None
+            }
+        }
     }
 
     pub fn open_graph(&mut self) {
@@ -5031,6 +5129,119 @@ mod tests {
             .is_some_and(|(error, message)| *error && message == "git config failed"));
     }
 
+    #[tokio::test]
+    async fn clipboard_paste_routes_only_to_an_active_editor_and_drops_stale_reads() {
+        let value = project("alpha");
+        let workspace = Workspace {
+            root: PathBuf::from("/tmp"),
+            kind: WorkspaceKind::Git,
+            projects: vec![value.clone()],
+        };
+        let mut app = App::new(workspace, 1);
+
+        // With no editor open a Ctrl-V is not a paste and must not start a read.
+        assert!(!app.paste_target_active());
+        app.request_clipboard_paste();
+        assert_eq!(app.clipboard_generation, 0);
+
+        // The template editor owns input, so a read is started.
+        app.changes = Some(ChangesState {
+            project: value.clone(),
+            return_screen: Screen::Workspace,
+            entries: Vec::new(),
+            operation: None,
+            head_message: None,
+            selected: 0,
+            selected_files: HashSet::new(),
+            mode: ChangesMode::File,
+            selected_hunk: 0,
+            selected_hunk_identity: None,
+            selected_line: 0,
+            selected_line_identity: None,
+            loading: false,
+            error: None,
+            generation: 1,
+            preview: None,
+            preview_path: None,
+            preview_loading: false,
+            preview_generation: 0,
+            preview_scroll: 0,
+            operation_running: false,
+            operation_generation: 0,
+            confirmation: None,
+            message: None,
+            commit_message: String::new(),
+            commit_cursor: 0,
+            commit_editing: false,
+            pending_commit_mode: None,
+            commit_template: None,
+            template_editing: true,
+            template_draft: String::new(),
+            template_cursor: 0,
+            template_running: false,
+            template_generation: 0,
+            commit_mode: CommitMode::Commit,
+            commit_signoff: false,
+            commit_signing: false,
+            commit_running: false,
+            commit_generation: 0,
+        });
+        assert!(app.paste_target_active());
+        app.request_clipboard_paste();
+        assert_eq!(app.clipboard_generation, 1);
+
+        // A stale read is dropped without touching any editor.
+        assert_eq!(
+            app.apply_clipboard(ClipboardResult {
+                generation: 0,
+                result: Ok("stale text".into()),
+            }),
+            None
+        );
+
+        // The current read returns text for the caller to route.
+        assert_eq!(
+            app.apply_clipboard(ClipboardResult {
+                generation: 1,
+                result: Ok("pasted body".into()),
+            }),
+            Some("pasted body".to_owned())
+        );
+        assert!(app.changes.as_ref().unwrap().template_draft.is_empty());
+
+        // A failed read surfaces a hint in the requesting editor instead.
+        app.request_clipboard_paste();
+        let generation = app.clipboard_generation;
+        assert_eq!(
+            app.apply_clipboard(ClipboardResult {
+                generation,
+                result: Err(anyhow::anyhow!("clipboard unavailable")),
+            }),
+            None
+        );
+        let changes = app.changes.as_ref().unwrap();
+        assert!(changes
+            .message
+            .as_ref()
+            .is_some_and(|(error, message)| *error && message.contains("clipboard unavailable")));
+    }
+
+    #[tokio::test]
+    async fn clipboard_paste_targets_every_editor_that_accepts_paste() {
+        let (mut app, _) = workspace_app();
+
+        // Search mode owns plain characters, so it is a paste target too.
+        app.search_mode = true;
+        assert!(app.paste_target_active());
+        app.search_mode = false;
+
+        // The range-history form is a paste target on the Workspace screen.
+        app.open_range_history();
+        assert!(app.paste_target_active());
+        app.range_history.form = None;
+        app.range_history.visible = false;
+        assert!(!app.paste_target_active());
+    }
     #[tokio::test]
     async fn changes_load_delivers_the_commit_template_for_new_drafts() {
         let value = project("alpha");

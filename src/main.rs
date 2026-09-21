@@ -233,6 +233,12 @@ fn handle_paste(app: &mut App, text: String) {
     // Route the paste to whichever editor currently owns the keyboard, matching
     // the precedence of `handle_key` so bracketed paste never lands in a hidden
     // buffer or gets dropped by a closed editor.
+    route_pasted_text(app, text);
+}
+
+/// Delivers pasted text to the active editor. Shared by the terminal's own
+/// bracketed paste and by an explicit Ctrl-V clipboard read.
+fn route_pasted_text(app: &mut App, text: String) {
     if app
         .changes
         .as_ref()
@@ -330,9 +336,25 @@ fn drain_background_messages(app: &mut App) {
     while let Ok(result) = app.range_history_rx.try_recv() {
         app.apply_range_history(result);
     }
+    while let Ok(result) = app.clipboard_rx.try_recv() {
+        // A successful read goes through the same routing as bracketed paste.
+        if let Some(text) = app.apply_clipboard(result) {
+            route_pasted_text(app, text);
+        }
+    }
 }
 
 fn handle_key(app: &mut App, key: KeyEvent) {
+    // An explicit Ctrl-V is a clipboard paste, not a literal 'v'. Intercept it
+    // before any editor's Char fallback can swallow it, but only when an
+    // editor actually owns input so screen-level Ctrl-V keeps its old meaning.
+    if key.modifiers.contains(KeyModifiers::CONTROL)
+        && matches!(key.code, KeyCode::Char('v') | KeyCode::Char('V'))
+        && app.paste_target_active()
+    {
+        app.request_clipboard_paste();
+        return;
+    }
     if app.screen == Screen::Workspace && app.workspace_git_overlay_active() {
         let pending = app.workspace_git.pending.is_some();
         let running = app
@@ -747,5 +769,101 @@ mod tests {
     #[test]
     fn rejects_conflicting_language_flags() {
         assert!(parse(&["trepo", "-zh", "--en"]).is_err());
+    }
+
+    #[tokio::test]
+    async fn ctrl_v_pastes_instead_of_typing_a_literal_character() {
+        use std::path::PathBuf;
+        use trepo::app::state::{ChangesMode, ChangesState};
+        use trepo::domain::{Project, ProjectId, Workspace, WorkspaceKind};
+
+        let path = PathBuf::from("/tmp/alpha");
+        let project = Project {
+            id: ProjectId(path.clone()),
+            name: "alpha".into(),
+            path: path.clone(),
+            relative_path: PathBuf::from("alpha"),
+        };
+        let workspace = Workspace {
+            root: PathBuf::from("/tmp"),
+            kind: WorkspaceKind::Git,
+            projects: vec![project.clone()],
+        };
+        let mut app = App::new(workspace, 1);
+        app.screen = Screen::Changes;
+        app.changes = Some(ChangesState {
+            project,
+            return_screen: Screen::Workspace,
+            entries: Vec::new(),
+            operation: None,
+            head_message: None,
+            selected: 0,
+            selected_files: Default::default(),
+            mode: ChangesMode::File,
+            selected_hunk: 0,
+            selected_hunk_identity: None,
+            selected_line: 0,
+            selected_line_identity: None,
+            loading: false,
+            error: None,
+            generation: 1,
+            preview: None,
+            preview_path: None,
+            preview_loading: false,
+            preview_generation: 0,
+            preview_scroll: 0,
+            operation_running: false,
+            operation_generation: 0,
+            confirmation: None,
+            message: None,
+            commit_message: String::new(),
+            commit_cursor: 0,
+            commit_editing: false,
+            pending_commit_mode: None,
+            commit_template: None,
+            template_editing: true,
+            template_draft: String::new(),
+            template_cursor: 0,
+            template_running: false,
+            template_generation: 0,
+            commit_mode: CommitMode::Commit,
+            commit_signoff: false,
+            commit_signing: false,
+            commit_running: false,
+            commit_generation: 0,
+        });
+
+        // Regression: Ctrl-V used to fall through to the editor's Char arm and
+        // insert a literal 'v'. It must instead start a clipboard read.
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('v'), KeyModifiers::CONTROL),
+        );
+        assert_eq!(app.clipboard_generation, 1);
+        assert!(app.changes.as_ref().unwrap().template_draft.is_empty());
+
+        // Without an editor owning input, Ctrl-V must stay inert instead of
+        // spawning a clipboard helper on every screen-level keypress.
+        app.cancel_template_editing();
+        app.clipboard_generation = 0;
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('v'), KeyModifiers::CONTROL),
+        );
+        assert_eq!(app.clipboard_generation, 0);
+        // The first Ctrl-V read does not block the loop; its result is only
+        // delivered once the async helper reports back.
+        let result =
+            tokio::time::timeout(std::time::Duration::from_secs(5), app.clipboard_rx.recv())
+                .await
+                .expect("clipboard read must not block the input loop")
+                .expect("the clipboard read task must report a result");
+        assert_eq!(result.generation, 1);
+        // Headless or desktop, the outcome is either pasted text or a hint;
+        // either way the editor is never left with a stray literal 'v'.
+        if let Some(text) = app.apply_clipboard(result) {
+            route_pasted_text(&mut app, text);
+        }
+        assert_ne!(app.changes.as_ref().unwrap().template_draft, "v");
     }
 }
