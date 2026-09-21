@@ -1,5 +1,6 @@
 pub mod discovery;
 pub mod operations;
+pub mod range_history;
 pub mod repo_batch;
 pub mod scanner;
 pub mod update;

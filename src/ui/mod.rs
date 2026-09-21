@@ -2,6 +2,7 @@ mod change_tree;
 mod changes;
 mod graph;
 mod graph_layout;
+mod range_history;
 mod repository;
 mod text;
 mod workspace;
@@ -57,6 +58,7 @@ fn render_help(frame: &mut Frame, app: &App) {
             Line::raw("z/s/u           储藏 / 暂存 / 取消暂存"),
             Line::raw("m/a/w           提交 / 修订 HEAD / 改写 HEAD；Ctrl-Enter/S 确认"),
             Line::raw("t / p           Git 配置模板 / 打开预填 refspec 表单"),
+            Line::raw("H               工作区时间段提交检索（Author / Query）"),
             Line::raw("r               刷新当前页面"),
             Line::raw("Esc / q / ?     返回 / 退出 / 切换帮助"),
             Line::raw(""),
@@ -86,6 +88,7 @@ fn render_help(frame: &mut Frame, app: &App) {
             Line::raw("z/s/u          Stash files / Stage / Unstage in Changes"),
             Line::raw("m/a/w          Commit / Amend HEAD / Reword HEAD; Ctrl-Enter/S submit"),
             Line::raw("t / p          Commit template / prefilled refspec push form"),
+            Line::raw("H              Workspace commit range search (author / query)"),
             Line::raw("r              Refresh current page"),
             Line::raw("Esc / q / ?    Back / quit Workspace / toggle help"),
             Line::raw(""),
@@ -1604,6 +1607,45 @@ mod tests {
             assert!(text.contains('仓'));
             assert!(text.contains('操'));
             assert!(text.contains('我'));
+        }
+    }
+
+    #[test]
+    fn renders_range_history_form_and_results_at_supported_sizes() {
+        let mut app = app();
+        app.open_range_history();
+        for (width, height) in [(80, 24), (120, 40)] {
+            let text = draw_text(&app, width, height);
+            assert!(compact_text(&text).contains("Since"));
+            assert!(compact_text(&text).contains("Author"));
+            assert!(compact_text(&text).contains("Query"));
+        }
+
+        // Simulate the post-run state: the form is gone but the results overlay
+        // is still open and owns the Workspace screen.
+        app.range_history.form = None;
+        app.range_history.visible = true;
+        app.range_history.spec = crate::domain::RangeHistorySpec::default();
+        app.range_history.ran = true;
+        let project = app.workspace.projects[0].clone();
+        app.range_history.projects = vec![crate::domain::ProjectRangeHistory {
+            project_id: project.id.clone(),
+            project_name: project.name.clone(),
+            commits: vec![Commit {
+                oid: "abcdef1234".into(),
+                parents: Vec::new(),
+                refs: Vec::new(),
+                author: "Ada".into(),
+                timestamp: 1_700_000_000,
+                subject: "fix the widget".into(),
+                body: String::new(),
+            }],
+            error: None,
+        }];
+        for (width, height) in [(80, 24), (120, 40)] {
+            let text = draw_text(&app, width, height);
+            assert!(text.contains("fix the widget"));
+            assert!(text.contains("abcdef12"));
         }
     }
 }

@@ -181,6 +181,7 @@ impl Language {
             "Query" => "查询",
             "Since" => "起始日期",
             "Until" => "结束日期",
+            "Project" => "仓库",
             "Files" => "文件",
             "Diff" => "差异",
             "file" => "文件",

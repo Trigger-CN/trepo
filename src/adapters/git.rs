@@ -1878,6 +1878,49 @@ const LOG_FORMAT: &str = "format:%H%x00%P%x00%an%x00%at%x00%s%x00%B%x00";
 const REF_FORMAT: &str = "%(objectname)%00%(*objectname)%00%(refname)%00";
 const STASH_FORMAT: &str = "%H%x00%gd%x00";
 
+/// Filters applied by [`log_range`]. Empty fields are omitted from the
+/// command, so an empty filter matches the whole history.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LogRangeFilter {
+    pub since: String,
+    pub until: String,
+    pub author: String,
+    pub query: String,
+}
+
+/// Loads commits across all refs whose commit date falls inside the filter
+/// window, optionally narrowed by author and message text.
+///
+/// The lower bound uses `--since-as-filter` so that a commit dated inside the
+/// window is still reported even when it sits behind an out-of-window ancestor
+/// (plain `--since` prunes traversal and would silently drop it).
+pub async fn log_range(path: &Path, filter: &LogRangeFilter) -> Result<Vec<Commit>> {
+    let pretty = format!("--pretty={LOG_FORMAT}");
+    let mut args = vec![
+        OsString::from("log"),
+        OsString::from("--date-order"),
+        OsString::from("--all"),
+        OsString::from(pretty),
+    ];
+    if !filter.since.is_empty() {
+        args.push(OsString::from(format!(
+            "--since-as-filter={}",
+            filter.since
+        )));
+    }
+    if !filter.until.is_empty() {
+        args.push(OsString::from(format!("--until={}", filter.until)));
+    }
+    if !filter.author.is_empty() {
+        args.push(OsString::from(format!("--author={}", filter.author)));
+    }
+    if !filter.query.is_empty() {
+        args.push(OsString::from(format!("--grep={}", filter.query)));
+    }
+    let bytes = git_output(path, args).await?;
+    parse_log(&bytes)
+}
+
 pub async fn log_all(path: &Path) -> Result<Vec<Commit>> {
     let ref_bytes = git_output(
         path,
@@ -2122,6 +2165,36 @@ mod tests {
                 "-m",
                 message,
             ])
+            .env("GIT_AUTHOR_DATE", date)
+            .env("GIT_COMMITTER_DATE", date)
+            .current_dir(root)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "dated commit failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn commit_file_at_at(
+        root: &Path,
+        path: &str,
+        content: &str,
+        message: &str,
+        author: &str,
+        date: &str,
+    ) {
+        fs::write(root.join(path), content).unwrap();
+        run_git(root, &["add", path]);
+        let output = std::process::Command::new("git")
+            .args([
+                "-c",
+                &format!("user.name={author}"),
+                "-c",
+                "user.email=test@example.com",
+            ])
+            .args(["commit", "-q", "-m", message])
             .env("GIT_AUTHOR_DATE", date)
             .env("GIT_COMMITTER_DATE", date)
             .current_dir(root)
@@ -2500,6 +2573,121 @@ u UU N... 100644 100644 100644 100644 a b c conflict.txt\x00\
             actual,
             vec!["main-two", "feature-two", "main-one", "feature-one", "base"]
         );
+    }
+
+    #[tokio::test]
+    async fn log_range_filters_by_window_author_and_query() {
+        let temp = tempdir().unwrap();
+        run_git(temp.path(), &["init", "-q", "-b", "main"]);
+        commit_file_at_at(
+            temp.path(),
+            "a.txt",
+            "a\n",
+            "alpha widget work",
+            "Alice",
+            "2020-01-02T00:00:00Z",
+        );
+        commit_file_at_at(
+            temp.path(),
+            "b.txt",
+            "b\n",
+            "beta cleanup",
+            "Bob",
+            "2020-03-10T00:00:00Z",
+        );
+        commit_file_at_at(
+            temp.path(),
+            "c.txt",
+            "c\n",
+            "gamma widget work",
+            "Alice",
+            "2020-06-01T00:00:00Z",
+        );
+
+        let subjects = |filter: &LogRangeFilter| {
+            let filter = filter.clone();
+            let path = temp.path().to_path_buf();
+            async move {
+                log_range(&path, &filter)
+                    .await
+                    .unwrap()
+                    .into_iter()
+                    .map(|commit| commit.subject)
+                    .collect::<Vec<_>>()
+            }
+        };
+
+        let everything = subjects(&LogRangeFilter::default()).await;
+        assert_eq!(everything.len(), 3);
+
+        let windowed = subjects(&LogRangeFilter {
+            since: "2020-02-01".into(),
+            until: "2020-04-01".into(),
+            ..Default::default()
+        })
+        .await;
+        assert_eq!(windowed, vec!["beta cleanup"]);
+
+        let by_author = subjects(&LogRangeFilter {
+            author: "Alice".into(),
+            ..Default::default()
+        })
+        .await;
+        assert_eq!(by_author, vec!["gamma widget work", "alpha widget work"]);
+
+        let by_query = subjects(&LogRangeFilter {
+            query: "widget".into(),
+            ..Default::default()
+        })
+        .await;
+        assert_eq!(by_query, vec!["gamma widget work", "alpha widget work"]);
+
+        let combined = subjects(&LogRangeFilter {
+            since: "2020-01-01".into(),
+            author: "Alice".into(),
+            query: "gamma".into(),
+            ..Default::default()
+        })
+        .await;
+        assert_eq!(combined, vec!["gamma widget work"]);
+    }
+
+    #[tokio::test]
+    async fn log_range_since_as_filter_keeps_out_of_order_in_window_commits() {
+        // A commit dated inside the window sits behind an older ancestor;
+        // `--since` pruning would drop it, `--since-as-filter` must keep it.
+        let temp = tempdir().unwrap();
+        run_git(temp.path(), &["init", "-q", "-b", "main"]);
+        commit_file_at_at(
+            temp.path(),
+            "a.txt",
+            "a\n",
+            "newer",
+            "Test",
+            "2020-01-10T00:00:00Z",
+        );
+        commit_file_at_at(
+            temp.path(),
+            "b.txt",
+            "b\n",
+            "older",
+            "Test",
+            "2020-01-01T00:00:00Z",
+        );
+
+        let inside = log_range(
+            temp.path(),
+            &LogRangeFilter {
+                since: "2020-01-04".into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|commit| commit.subject)
+        .collect::<Vec<_>>();
+        assert_eq!(inside, vec!["newer"]);
     }
 
     #[tokio::test]

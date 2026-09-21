@@ -179,6 +179,16 @@ Git 与 Repo 的参数面很大，而且会随版本、插件和服务端扩展�
 
 执行结果按项目记录 `pending/running/success/failure`。全批预检通过后仍可能发生应用外 Git 竞争，因此执行期失败不会回滚已完成仓库，也不会把部分成功伪装成事务成功。
 
+### 5.5 跨仓库时间范围检索
+
+排查回归时已知问题提交落在某个时间窗内，但 Graph 的 Since/Until 只作用于单个仓库。Workspace 的 `H` 提供跨仓库版本：一个 `YYYY-MM-DD` 的 Since/Until 窗口，加上可选的 Author 与消息 Query 关键字。
+
+- 范围：存在 `Space`/`A` 显式选择时只查该 `ProjectId` 集合，否则查全部仓库，与 `S`/`Z`/`D` 约定一致；范围为空时直接报错，不发送任何 Git 子进程。
+- 并发：每个仓库一个独立 `git log`，由 `Semaphore` 限流、`JoinSet` 汇总，逐仓库流式回传；单仓库失败（路径缺失、非仓库、revision 无效）只标记该项目，不中断其他仓库。
+- 参数：`git log --date-order --all [--since-as-filter=<since>] [--until=<until>] [--author=<author>] [--grep=<query>] --pretty=<LOG_FORMAT>`，每部分都是独立 `OsString`。下界固定用 `--since-as-filter`（Git ≥ 2.29）：默认的 `--since` 会剪枝遍历，在提交时间非单调时会漏掉窗口内的提交。
+- 结果：跨仓库合并为一条按提交时间降序的时间线（Project / Commit / Date / Author / Subject）；标题显示命中数与失败仓库数；零命中显示明确空态。
+- 异步：结果携带 generation，过期结果不覆盖新一轮；`reported`/`expected` 计数使 loading 在零命中时也能正确结束。
+
 ## 6. Repository 页面
 
 ### 6.1 Graph 标签页
@@ -466,6 +476,7 @@ Upload 执行前展示 project 和准确 argv。M4 capture 模式只执行 `--cu
 | Git dir/worktree/common dir | `git rev-parse --path-format=absolute ...` |
 | refs 与 upstream | `git for-each-ref` + 自定义 NUL/字段格式 |
 | commit DAG | `git log --date-order --parents` + 显式记录/字段分隔符 |
+| 跨仓库时间范围提交 | `git log --date-order --all --since-as-filter/--until/--author/--grep` + 同一 NUL 字段格式，每仓库一次独立调用 |
 | commit detail | `git show --no-patch` + 显式格式 |
 | diff/name status | `git diff --raw/-z`、`--numstat -z`、`--patch` |
 | unmerged stages | `git ls-files -u -z` |

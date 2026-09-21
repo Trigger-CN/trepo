@@ -804,3 +804,23 @@ pub struct Commit {
     pub subject: String,
     pub body: String,
 }
+
+/// Workspace-wide commit-range query: an inclusive `YYYY-MM-DD` window plus
+/// optional author and message-text filters. Empty fields are unbounded.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RangeHistorySpec {
+    pub since: String,
+    pub until: String,
+    pub author: String,
+    pub query: String,
+}
+
+/// One repository's slice of a workspace range query, kept grouped by project
+/// so the UI can show provenance and per-repository errors.
+#[derive(Debug, Clone)]
+pub struct ProjectRangeHistory {
+    pub project_id: ProjectId,
+    pub project_name: String,
+    pub commits: Vec<Commit>,
+    pub error: Option<String>,
+}

@@ -273,6 +273,10 @@ fn handle_paste(app: &mut App, text: String) {
         app.edit_repo_batch_form(trepo::app::state::CommitInput::Text(text));
         return;
     }
+    if app.range_history.form.is_some() {
+        app.edit_range_history_form(trepo::app::state::CommitInput::Text(text));
+        return;
+    }
     if app.search_mode {
         app.search
             .extend(text.chars().filter(|character| !character.is_control()));
@@ -323,6 +327,9 @@ fn drain_background_messages(app: &mut App) {
     while let Ok(event) = app.repo_batch_rx.try_recv() {
         app.apply_repo_batch(event);
     }
+    while let Ok(result) = app.range_history_rx.try_recv() {
+        app.apply_range_history(result);
+    }
 }
 
 fn handle_key(app: &mut App, key: KeyEvent) {
@@ -345,6 +352,32 @@ fn handle_key(app: &mut App, key: KeyEvent) {
             KeyCode::PageDown => app.scroll_workspace_git(10),
             KeyCode::PageUp => app.scroll_workspace_git(-10),
             _ => {}
+        }
+        return;
+    }
+    if app.screen == Screen::Workspace && app.range_history_overlay_active() {
+        if app.range_history.form.is_some() {
+            match key.code {
+                KeyCode::Esc => app.close_range_history(),
+                KeyCode::Enter => app.submit_range_history(),
+                KeyCode::Backspace => {
+                    app.edit_range_history_form(trepo::app::state::CommitInput::Backspace)
+                }
+                KeyCode::Down | KeyCode::Tab => app.move_range_history_field(1),
+                KeyCode::Up | KeyCode::BackTab => app.move_range_history_field(-1),
+                KeyCode::Char(character) => app
+                    .edit_range_history_form(trepo::app::state::CommitInput::Character(character)),
+                _ => {}
+            }
+        } else {
+            match key.code {
+                KeyCode::Esc => app.close_range_history(),
+                KeyCode::Char('f') => app.open_range_history(),
+                KeyCode::Char('r') => app.rerun_range_history(),
+                KeyCode::Down | KeyCode::Char('j') => app.move_range_history_selection(1),
+                KeyCode::Up | KeyCode::Char('k') => app.move_range_history_selection(-1),
+                _ => {}
+            }
         }
         return;
     }
@@ -592,6 +625,7 @@ fn handle_key(app: &mut App, key: KeyEvent) {
             KeyCode::Char('?') => app.help = true,
             KeyCode::Char('/') => app.search_mode = true,
             KeyCode::Char('a') => app.open_repo_batch_menu(),
+            KeyCode::Char('H') => app.open_range_history(),
             KeyCode::Char(' ') => app.toggle_project_selection(),
             KeyCode::Char('A') => app.toggle_filtered_selection(),
             KeyCode::Char('S') => app.begin_workspace_git(trepo::domain::WorkspaceGitAction::Stage),

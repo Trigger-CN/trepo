@@ -10,13 +10,14 @@ use crate::app::repository::{
 use crate::domain::{
     BatchOperationItem, BatchOperationSpec, ChangeEntry, ChangePreview, Commit, CommitMode,
     CommitOutcome, CommitSpec, GitOperationKind, HunkSource, OperationKind, OperationOutcome,
-    OperationSpec, OperationTarget, Project, ProjectId, ProjectSnapshot, RepoBatchAction,
-    RepoBatchSpec, RepoProjectResult, RepoProjectState, RepositoryAction, RepositoryActionOutcome,
-    RepositoryActionSpec, RepositorySnapshot, RiskLevel, Workspace, WorkspaceGitAction,
-    WorkspaceGitSpec, WorkspaceKind, WorkspaceSummary,
+    OperationSpec, OperationTarget, Project, ProjectId, ProjectRangeHistory, ProjectSnapshot,
+    RangeHistorySpec, RepoBatchAction, RepoBatchSpec, RepoProjectResult, RepoProjectState,
+    RepositoryAction, RepositoryActionOutcome, RepositoryActionSpec, RepositorySnapshot, RiskLevel,
+    Workspace, WorkspaceGitAction, WorkspaceGitSpec, WorkspaceKind, WorkspaceSummary,
 };
 use crate::i18n::Language;
 use crate::services::operations::OperationRunner;
+use crate::services::range_history::{self, RangeHistoryResult};
 use crate::services::repo_batch::{self, RepoBatchEvent, RepoBatchEventKind, RepoBatchHandle};
 use crate::services::scanner::{self, ScanResult};
 use crate::services::workspace_git::{
@@ -970,6 +971,76 @@ pub struct RepoBatchState {
     pub scroll: usize,
     pub message: Option<(bool, String)>,
 }
+/// Editable workspace range-query form. Mirrors [`GraphFilter`] but is a
+/// standalone typed form because its scope spans every repository.
+#[derive(Debug, Clone, Default)]
+pub struct RangeHistoryForm {
+    pub draft: RangeHistorySpec,
+    pub selected: usize,
+}
+
+impl RangeHistoryForm {
+    pub fn fields(&self) -> [(&'static str, &str); 4] {
+        [
+            ("Since", &self.draft.since),
+            ("Until", &self.draft.until),
+            ("Author", &self.draft.author),
+            ("Query", &self.draft.query),
+        ]
+    }
+
+    fn selected_value_mut(&mut self) -> &mut String {
+        match self.selected {
+            0 => &mut self.draft.since,
+            1 => &mut self.draft.until,
+            2 => &mut self.draft.author,
+            _ => &mut self.draft.query,
+        }
+    }
+
+    pub fn edit(&mut self, input: CommitInput) {
+        match input {
+            CommitInput::Character(value) => self.selected_value_mut().push(value),
+            CommitInput::Text(value) => self
+                .selected_value_mut()
+                .push_str(&value.replace(['\r', '\n'], "")),
+            CommitInput::Backspace => {
+                self.selected_value_mut().pop();
+            }
+            _ => {}
+        }
+    }
+
+    pub fn validate(&self) -> anyhow::Result<()> {
+        let since = parse_graph_date(&self.draft.since, "Since")?;
+        let until = parse_graph_date(&self.draft.until, "Until")?;
+        if since.zip(until).is_some_and(|(since, until)| since > until) {
+            anyhow::bail!("Since must not be later than Until");
+        }
+        Ok(())
+    }
+}
+
+/// Workspace range-query view state: the optional filter form, the streamed
+/// per-repository results, and a message slot for validation/empty feedback.
+#[derive(Debug, Default)]
+pub struct RangeHistoryState {
+    pub form: Option<RangeHistoryForm>,
+    /// Whether the range-query overlay owns the Workspace screen. Kept separate
+    /// from `ran` so closing the overlay does not forget the last query.
+    pub visible: bool,
+    pub loading: bool,
+    pub projects: Vec<ProjectRangeHistory>,
+    pub spec: RangeHistorySpec,
+    pub ran: bool,
+    pub selected: usize,
+    pub generation: u64,
+    /// Repositories queried and how many have reported, so `loading` clears
+    /// even when a repository legitimately matches nothing.
+    pub expected: usize,
+    pub reported: usize,
+    pub message: Option<(bool, String)>,
+}
 
 #[derive(Debug)]
 pub struct WorkspaceGitTask {
@@ -1007,6 +1078,7 @@ pub struct App {
     pub selected_projects: HashSet<ProjectId>,
     pub repo_batch: RepoBatchState,
     pub workspace_git: WorkspaceGitState,
+    pub range_history: RangeHistoryState,
     pub should_quit: bool,
     scan_tx: mpsc::UnboundedSender<ScanResult>,
     pub scan_rx: mpsc::UnboundedReceiver<ScanResult>,
@@ -1043,6 +1115,8 @@ pub struct App {
     workspace_git_tx: mpsc::UnboundedSender<WorkspaceGitEvent>,
     pub workspace_git_rx: mpsc::UnboundedReceiver<WorkspaceGitEvent>,
     workspace_git_generation: u64,
+    range_history_tx: mpsc::UnboundedSender<RangeHistoryResult>,
+    pub range_history_rx: mpsc::UnboundedReceiver<RangeHistoryResult>,
     operation_runner: OperationRunner,
     concurrency: usize,
 }
@@ -1066,6 +1140,7 @@ impl App {
         let (repo_batch_tx, repo_batch_rx) = mpsc::unbounded_channel();
         let (workspace_git_prepare_tx, workspace_git_prepare_rx) = mpsc::unbounded_channel();
         let (workspace_git_tx, workspace_git_rx) = mpsc::unbounded_channel();
+        let (range_history_tx, range_history_rx) = mpsc::unbounded_channel();
         let projects = workspace
             .projects
             .iter()
@@ -1095,6 +1170,7 @@ impl App {
             selected_projects: HashSet::new(),
             repo_batch: RepoBatchState::default(),
             workspace_git: WorkspaceGitState::default(),
+            range_history: RangeHistoryState::default(),
             should_quit: false,
             scan_tx,
             scan_rx,
@@ -1127,6 +1203,8 @@ impl App {
             workspace_git_tx,
             workspace_git_rx,
             workspace_git_generation: 0,
+            range_history_tx,
+            range_history_rx,
             operation_runner: OperationRunner,
             concurrency: concurrency.max(1),
             repository_intent: None,
@@ -1807,6 +1885,10 @@ impl App {
             || self.repo_batch.message.is_some()
     }
 
+    pub fn range_history_overlay_active(&self) -> bool {
+        self.range_history.visible
+    }
+
     pub fn open_graph(&mut self) {
         let Some(project) = self.selected_project().map(|value| value.project.clone()) else {
             return;
@@ -1988,6 +2070,180 @@ impl App {
             graph.restore_filtered_selection(selected_oid.as_deref());
         }
     }
+    /// Opens the workspace range-query form, seeded from the last run so a
+    /// lookup can be refined without retyping.
+    pub fn open_range_history(&mut self) {
+        self.range_history.form = Some(RangeHistoryForm {
+            draft: self.range_history.spec.clone(),
+            selected: 0,
+        });
+        self.range_history.message = None;
+        self.range_history.selected = 0;
+        self.range_history.visible = true;
+    }
+
+    pub fn move_range_history_field(&mut self, delta: isize) {
+        if let Some(form) = self.range_history.form.as_mut() {
+            form.selected = (form.selected as isize + delta).clamp(0, 3) as usize;
+        }
+    }
+
+    pub fn edit_range_history_form(&mut self, input: CommitInput) {
+        if let Some(form) = self.range_history.form.as_mut() {
+            form.edit(input);
+        }
+    }
+
+    pub fn close_range_history(&mut self) {
+        self.range_history.form = None;
+        self.range_history.message = None;
+        self.range_history.visible = false;
+    }
+
+    /// Validates the form and starts the concurrent workspace-wide query.
+    pub fn submit_range_history(&mut self) {
+        let Some(form) = self.range_history.form.as_ref() else {
+            return;
+        };
+        if let Err(error) = form.validate() {
+            self.range_history.message = Some((true, error.to_string()));
+            return;
+        }
+        let spec = form.draft.clone();
+        self.range_history.form = None;
+        self.range_history.message = None;
+        self.run_range_history(spec);
+    }
+
+    /// Re-runs the last range query against the current project scope.
+    pub fn rerun_range_history(&mut self) {
+        self.run_range_history(self.range_history.spec.clone());
+    }
+
+    /// Resolves the queried scope: an explicit selection wins, otherwise every
+    /// project in the workspace.
+    fn range_history_projects(&self) -> Vec<Project> {
+        self.workspace
+            .projects
+            .iter()
+            .filter(|project| {
+                self.selected_projects.is_empty() || self.selected_projects.contains(&project.id)
+            })
+            .cloned()
+            .collect()
+    }
+
+    fn run_range_history(&mut self, spec: RangeHistorySpec) {
+        let projects = self.range_history_projects();
+        if projects.is_empty() {
+            self.range_history.message = Some((true, "no repositories in scope".to_owned()));
+            return;
+        }
+        self.range_history.generation = self.range_history.generation.wrapping_add(1);
+        let generation = self.range_history.generation;
+        self.range_history.spec = spec.clone();
+        self.range_history.projects = projects
+            .iter()
+            .map(|project| ProjectRangeHistory {
+                project_id: project.id.clone(),
+                project_name: project.name.clone(),
+                commits: Vec::new(),
+                error: None,
+            })
+            .collect();
+        self.range_history.expected = projects.len();
+        self.range_history.reported = 0;
+        self.range_history.loading = true;
+        self.range_history.ran = true;
+        self.range_history.visible = true;
+        self.range_history.selected = 0;
+        range_history::spawn_range_history(
+            projects,
+            spec,
+            generation,
+            self.concurrency,
+            self.range_history_tx.clone(),
+        );
+    }
+
+    /// Merges one streamed repository result, ignoring stale generations.
+    pub fn apply_range_history(&mut self, result: RangeHistoryResult) {
+        if result.generation != self.range_history.generation {
+            return;
+        }
+        if let Some(slot) = self
+            .range_history
+            .projects
+            .iter_mut()
+            .find(|value| value.project_id == result.project_id)
+        {
+            match result.result {
+                Ok(commits) => {
+                    slot.commits = commits;
+                    slot.error = None;
+                }
+                Err(error) => {
+                    slot.commits = Vec::new();
+                    slot.error = Some(error.to_string());
+                }
+            }
+        }
+        self.range_history.reported = self.range_history.reported.saturating_add(1);
+        if self.range_history.reported >= self.range_history.expected {
+            self.range_history.loading = false;
+        }
+    }
+
+    /// Commits that matched, newest first, paired with their project label.
+    pub fn range_history_rows(&self) -> Vec<(String, String, &Commit)> {
+        let mut rows = self
+            .range_history
+            .projects
+            .iter()
+            .flat_map(|project| {
+                project.commits.iter().map(|commit| {
+                    (
+                        project.project_name.clone(),
+                        short_oid(&commit.oid).to_owned(),
+                        commit,
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+        rows.sort_by(|left, right| {
+            right
+                .2
+                .timestamp
+                .cmp(&left.2.timestamp)
+                .then_with(|| left.0.cmp(&right.0))
+        });
+        rows
+    }
+
+    pub fn range_history_message(&self) -> Option<(bool, String)> {
+        if let Some(message) = self.range_history.message.as_ref() {
+            return Some(message.clone());
+        }
+        if self.range_history.loading {
+            return None;
+        }
+        if self.range_history.ran && self.range_history_rows().is_empty() {
+            return Some((false, "no commits in range".to_owned()));
+        }
+        None
+    }
+
+    /// Moves the result-list selection, clamped to the current row count.
+    pub fn move_range_history_selection(&mut self, delta: isize) {
+        let len = self.range_history_rows().len();
+        if len == 0 {
+            self.range_history.selected = 0;
+            return;
+        }
+        let current = self.range_history.selected.min(len - 1) as isize;
+        self.range_history.selected = (current + delta).clamp(0, len as isize - 1) as usize;
+    }
+
     pub fn graph_objects(&self) -> Vec<GraphObject> {
         let Some(graph) = self.graph.as_ref() else {
             return Vec::new();
@@ -5657,5 +5913,144 @@ mod tests {
             .as_ref()
             .and_then(|state| state.message.as_ref())
             .is_some_and(|(error, message)| *error && message == "snapshot failed"));
+    }
+
+    #[tokio::test]
+    async fn range_history_scope_prefers_explicit_selection() {
+        let alpha = project("alpha");
+        let beta = project("beta");
+        let workspace = Workspace {
+            root: PathBuf::from("/tmp"),
+            kind: WorkspaceKind::Repo,
+            projects: vec![alpha.clone(), beta],
+        };
+        let mut app = App::new(workspace, 2);
+
+        // No explicit selection: every repository is in scope.
+        let scope = app.range_history_projects();
+        assert_eq!(scope.len(), 2);
+
+        // An explicit selection narrows the scope to that set only.
+        app.selected_projects.insert(alpha.id.clone());
+        let scope = app.range_history_projects();
+        assert_eq!(scope.len(), 1);
+        assert_eq!(scope[0].id, alpha.id);
+    }
+
+    #[tokio::test]
+    async fn range_history_form_validates_dates_and_rejects_reversed_windows() {
+        let (mut app, _) = workspace_app();
+        app.open_range_history();
+        app.edit_range_history_form(CommitInput::Text("2026-08-15".into()));
+        app.move_range_history_field(1);
+        app.edit_range_history_form(CommitInput::Text("2026-08-01".into()));
+        app.submit_range_history();
+        // The reversed window is rejected and the form stays open.
+        assert!(app.range_history.form.is_some());
+        assert!(app
+            .range_history
+            .message
+            .as_ref()
+            .is_some_and(|(error, message)| *error && message.contains("later than")));
+    }
+
+    #[tokio::test]
+    async fn range_history_merges_streamed_results_newest_first() {
+        let alpha = project("alpha");
+        let beta = project("beta");
+        let workspace = Workspace {
+            root: PathBuf::from("/tmp"),
+            kind: WorkspaceKind::Repo,
+            projects: vec![alpha.clone(), beta.clone()],
+        };
+        let mut app = App::new(workspace, 2);
+        app.run_range_history(RangeHistorySpec::default());
+        let generation = app.range_history.generation;
+        assert!(app.range_history.loading);
+
+        let commit = |oid: &str, timestamp: i64, subject: &str| Commit {
+            oid: oid.into(),
+            parents: Vec::new(),
+            refs: Vec::new(),
+            author: "Ada".into(),
+            timestamp,
+            subject: subject.into(),
+            body: String::new(),
+        };
+        app.apply_range_history(RangeHistoryResult {
+            generation,
+            project_id: alpha.id.clone(),
+            project_name: alpha.name.clone(),
+            result: Ok(vec![commit("aa11", 100, "alpha")]),
+        });
+        assert!(app.range_history.loading);
+        app.apply_range_history(RangeHistoryResult {
+            generation,
+            project_id: beta.id.clone(),
+            project_name: beta.name.clone(),
+            result: Err(anyhow::anyhow!("boom")),
+        });
+        // A per-repository failure is recorded without aborting the others, and
+        // the loading flag clears once every repository has reported back.
+        assert!(!app.range_history.loading);
+        let rows = app.range_history_rows();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].0, "alpha");
+        let beta_state = app
+            .range_history
+            .projects
+            .iter()
+            .find(|value| value.project_id == beta.id)
+            .unwrap();
+        assert_eq!(beta_state.error.as_deref(), Some("boom"));
+    }
+
+    #[tokio::test]
+    async fn range_history_drops_stale_generations() {
+        let alpha = project("alpha");
+        let workspace = Workspace {
+            root: PathBuf::from("/tmp"),
+            kind: WorkspaceKind::Repo,
+            projects: vec![alpha.clone()],
+        };
+        let mut app = App::new(workspace, 1);
+        app.run_range_history(RangeHistorySpec::default());
+        let stale = app.range_history.generation;
+        app.run_range_history(RangeHistorySpec::default());
+        assert_eq!(app.range_history.generation, stale + 1);
+
+        app.apply_range_history(RangeHistoryResult {
+            generation: stale,
+            project_id: alpha.id.clone(),
+            project_name: alpha.name.clone(),
+            result: Ok(vec![Commit {
+                oid: "dead".into(),
+                parents: Vec::new(),
+                refs: Vec::new(),
+                author: "Ada".into(),
+                timestamp: 1,
+                subject: "stale".into(),
+                body: String::new(),
+            }]),
+        });
+        assert!(app.range_history.projects[0].commits.is_empty());
+    }
+
+    #[tokio::test]
+    async fn range_history_overlay_closes_after_a_run() {
+        let (mut app, _) = workspace_app();
+        assert!(!app.range_history_overlay_active());
+
+        app.open_range_history();
+        assert!(app.range_history_overlay_active());
+
+        app.submit_range_history();
+        assert!(app.range_history_overlay_active());
+
+        // Closing must dismiss the results overlay even though the query already
+        // ran; otherwise the Workspace keys stay swallowed and the TUI hangs.
+        app.close_range_history();
+        assert!(!app.range_history_overlay_active());
+        assert!(app.range_history.ran);
     }
 }

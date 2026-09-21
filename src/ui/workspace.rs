@@ -47,6 +47,9 @@ pub fn render(frame: &mut Frame, app: &App) {
     render_footer(frame, app, vertical[2]);
     render_repo_batch_overlay(frame, app);
     render_workspace_git_overlay(frame, app);
+    if app.range_history_overlay_active() {
+        super::range_history::render(frame, app, &app.range_history);
+    }
     if app
         .repository
         .as_ref()
@@ -451,8 +454,8 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
     let keys = format!(
         "{}{}",
         app.language.text(
-            "   Space Select  S Stage  Z Stash  D Discard  d Scope  t List/Tree  p Push refs/for  a Repo actions  / Search",
-            "   Space 选择  S 暂存  Z 储藏  D 丢弃  d 范围  t 列表/树形  p 推送 refs/for  a Repo 操作  / 搜索",
+            "   Space Select  S Stage  Z Stash  D Discard  d Scope  t List/Tree  p Push refs/for  H Range  a Repo actions  / Search",
+            "   Space 选择  S 暂存  Z 储藏  D 丢弃  d 范围  t 列表/树形  p 推送 refs/for  H 时间范围  a Repo 操作  / 搜索",
         ),
         abort
     );

@@ -587,7 +587,7 @@ fn render_commits(frame: &mut Frame, app: &App, graph: &crate::app::state::Graph
     frame.render_widget(table, area);
 }
 
-fn calendar_date(timestamp: i64) -> String {
+pub(super) fn calendar_date(timestamp: i64) -> String {
     let days = timestamp.div_euclid(86_400);
     let shifted = days + 719_468;
     let era = if shifted >= 0 {

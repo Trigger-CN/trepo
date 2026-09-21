@@ -98,9 +98,25 @@ Workspace 展示仓库状态、活动 merge/rebase/cherry-pick/revert、HEAD 和
 | `c` | 打开选中仓库的 Changes |
 | `o` | 打开选中仓库的 Repository 管理 |
 | `a` | 打开 Repo 批任务，仅 Android Repo 工作区有效 |
+| `H` | 打开跨仓库时间范围提交检索（Since/Until + Author + Query），并发扫描范围内所有仓库 |
 | `x` | 活动 Git 操作存在时，重新读取仓库状态并进入终止确认 |
 
 搜索会与两个改动范围按 AND 组合；切换范围或布局前后会按稳定 `ProjectId` 恢复当前仓库，只有当前仓库不再可见时才回退到首个可见仓库。仓库目录行和文件视觉行不改变仓库选择或操作目标。没有显式选择时，`S/Z/D` 使用当前过滤范围中的光标仓库；显式选择集合非空时只使用该集合，不额外加入光标仓库。确认框列出的冻结仓库和每仓库统计是最终执行范围。
+
+### 跨仓库时间范围检索（`H`）
+
+在 Workspace 按 `H` 打开时间范围检索表单，用 `Tab`/方向键切换字段，`Enter` 执行，`Esc` 取消：
+
+| 字段 | 含义 |
+| --- | --- |
+| Since | 起始日期，UTC `YYYY-MM-DD`，留空不限制下界 |
+| Until | 结束日期，UTC `YYYY-MM-DD`，留空不限制上界 |
+| Author | 作者匹配，留空不限制 |
+| Query | 提交消息关键字匹配，留空不限制 |
+
+查找范围遵循 Workspace 现有约定：存在 `Space`/`A` 显式选择时只查选择集合，否则查全部仓库。trepo 对范围内每个仓库并发执行 `git log --all --since-as-filter=<since> --until=<until> --author=<author> --grep=<query>`，并逐仓库流式显示结果。Since 使用 `--since-as-filter`（需要 Git ≥ 2.29），即使提交时间非单调也能命中窗口内的提交，不会因祖先提交早于窗口而被剪掉。
+
+结果是一个跨仓库合并的提交时间线（Project / Commit / Date / Author / Subject），按提交时间降序排列；顶部标题显示命中提交数和失败仓库数。某个仓库失败（路径缺失、非 Git 仓库等）只标记该仓库，不影响其他仓库。`j/k` 移动选择、`r` 用同一条件重跑（会重新解析当前范围）、`f` 重新打开表单修改条件、`Esc` 关闭。范围内没有任何命中时显示 `No commits in range`。
 
 ### Workspace Git 批任务流程
 
