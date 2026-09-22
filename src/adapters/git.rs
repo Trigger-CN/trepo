@@ -1888,13 +1888,27 @@ pub struct LogRangeFilter {
     pub query: String,
 }
 
+/// One repository's answer to a bounded range query.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RangeLog {
+    pub commits: Vec<Commit>,
+    /// True when the repository held more matches than the requested cap, so
+    /// the list is a truncation rather than the complete history.
+    pub capped: bool,
+}
+
 /// Loads commits across all refs whose commit date falls inside the filter
-/// window, optionally narrowed by author and message text.
+/// window, optionally narrowed by author and message text, stopping after
+/// `max_count` matches (0 means unlimited).
 ///
 /// The lower bound uses `--since-as-filter` so that a commit dated inside the
 /// window is still reported even when it sits behind an out-of-window ancestor
 /// (plain `--since` prunes traversal and would silently drop it).
-pub async fn log_range(path: &Path, filter: &LogRangeFilter) -> Result<Vec<Commit>> {
+///
+/// An unbounded query over a large workspace is exactly the case that used to
+/// flood the terminal, so the cap is pushed into Git instead of relying on the
+/// UI to discard rows after they were parsed.
+pub async fn log_range(path: &Path, filter: &LogRangeFilter, max_count: usize) -> Result<RangeLog> {
     let pretty = format!("--pretty={LOG_FORMAT}");
     let mut args = vec![
         OsString::from("log"),
@@ -1902,6 +1916,10 @@ pub async fn log_range(path: &Path, filter: &LogRangeFilter) -> Result<Vec<Commi
         OsString::from("--all"),
         OsString::from(pretty),
     ];
+    if max_count > 0 {
+        // Ask for one extra commit so a truncated result is detectable.
+        args.push(OsString::from(format!("--max-count={}", max_count + 1)));
+    }
     if !filter.since.is_empty() {
         args.push(OsString::from(format!(
             "--since-as-filter={}",
@@ -1918,7 +1936,39 @@ pub async fn log_range(path: &Path, filter: &LogRangeFilter) -> Result<Vec<Commi
         args.push(OsString::from(format!("--grep={}", filter.query)));
     }
     let bytes = git_output(path, args).await?;
-    parse_log(&bytes)
+    let mut commits = parse_log(&bytes)?;
+    let capped = max_count > 0 && commits.len() > max_count;
+    if capped {
+        commits.truncate(max_count);
+    }
+    Ok(RangeLog { commits, capped })
+}
+/// Loads one commit's metadata plus its patch and diffstat as plain text.
+///
+/// `--format=` suppresses the header that [`Commit`] already carries, and
+/// `-m --first-parent` keeps a merge's diff to its first parent: without it
+/// Git prints nothing at all for merges, which would make "view changes"
+/// silently empty for them.
+pub async fn commit_patch(path: &Path, oid: &str) -> Result<String> {
+    if oid.is_empty() || oid.starts_with('-') || oid.contains('\0') {
+        bail!("invalid commit: {oid:?}");
+    }
+    let bytes = git_output(
+        path,
+        [
+            "show",
+            "--no-ext-diff",
+            "--no-color",
+            "--stat",
+            "--patch",
+            "--format=",
+            "-m",
+            "--first-parent",
+            oid,
+        ],
+    )
+    .await?;
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
 pub async fn log_all(path: &Path) -> Result<Vec<Commit>> {
@@ -2608,9 +2658,10 @@ u UU N... 100644 100644 100644 100644 a b c conflict.txt\x00\
             let filter = filter.clone();
             let path = temp.path().to_path_buf();
             async move {
-                log_range(&path, &filter)
+                log_range(&path, &filter, 0)
                     .await
                     .unwrap()
+                    .commits
                     .into_iter()
                     .map(|commit| commit.subject)
                     .collect::<Vec<_>>()
@@ -2681,13 +2732,97 @@ u UU N... 100644 100644 100644 100644 a b c conflict.txt\x00\
                 since: "2020-01-04".into(),
                 ..Default::default()
             },
+            0,
         )
         .await
         .unwrap()
+        .commits
         .into_iter()
         .map(|commit| commit.subject)
         .collect::<Vec<_>>();
         assert_eq!(inside, vec!["newer"]);
+    }
+
+    #[tokio::test]
+    async fn log_range_detects_truncated_results_without_losing_the_extra_commit() {
+        let temp = tempdir().unwrap();
+        run_git(temp.path(), &["init", "-q", "-b", "main"]);
+        for (name, subject, date) in [
+            ("a.txt", "one", "2020-01-01T00:00:00Z"),
+            ("b.txt", "two", "2020-01-02T00:00:00Z"),
+            ("c.txt", "three", "2020-01-03T00:00:00Z"),
+        ] {
+            commit_file_at_at(
+                temp.path(),
+                name,
+                &format!("{subject}\n"),
+                subject,
+                "Test",
+                date,
+            );
+        }
+
+        // A cap below the history size returns exactly the newest `cap`
+        // commits and flags the truncation instead of leaking the probe.
+        let capped = log_range(temp.path(), &LogRangeFilter::default(), 2)
+            .await
+            .unwrap();
+        let subjects = capped
+            .commits
+            .iter()
+            .map(|commit| commit.subject.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(subjects, vec!["three", "two"]);
+        assert!(capped.capped);
+
+        // A cap above the history size proves the history is complete.
+        let complete = log_range(temp.path(), &LogRangeFilter::default(), 5)
+            .await
+            .unwrap();
+        assert_eq!(complete.commits.len(), 3);
+        assert!(!complete.capped);
+
+        // Zero means unlimited and must never truncate.
+        let unlimited = log_range(temp.path(), &LogRangeFilter::default(), 0)
+            .await
+            .unwrap();
+        assert_eq!(unlimited.commits.len(), 3);
+        assert!(!unlimited.capped);
+    }
+
+    #[tokio::test]
+    async fn commit_patch_reports_stats_and_diff_for_regular_and_merge_commits() {
+        let temp = tempdir().unwrap();
+        run_git(temp.path(), &["init", "-q", "-b", "main"]);
+        commit_file(temp.path(), "a.txt", "a\n", "base");
+        run_git(temp.path(), &["checkout", "-q", "-b", "side"]);
+        commit_file(temp.path(), "s.txt", "s\n", "side work");
+        run_git(temp.path(), &["checkout", "-q", "main"]);
+        commit_file(temp.path(), "m.txt", "m\n", "main work");
+        run_git(
+            temp.path(),
+            &["merge", "-q", "--no-ff", "side", "-m", "merge side"],
+        );
+        let head = run_git(temp.path(), &["rev-parse", "HEAD"]);
+
+        let patch = commit_patch(temp.path(), &head).await.unwrap();
+        // A merge must not silently show an empty patch: exactly the diff
+        // against its first parent is reported.
+        assert_eq!(patch.matches("diff --git ").count(), 1);
+        assert!(patch.contains("s.txt"));
+        assert!(patch.contains("+s"));
+        // Metadata is carried by the list row, so no commit header is printed.
+        assert!(!patch.contains("merge side"));
+        assert!(patch.contains("1 file changed"));
+
+        let regular = run_git(temp.path(), &["rev-parse", "HEAD~1"]);
+        let patch = commit_patch(temp.path(), &regular).await.unwrap();
+        assert_eq!(patch.matches("diff --git ").count(), 1);
+        assert!(patch.contains("m.txt"));
+
+        // Anything that could be read as a Git option is rejected outright.
+        assert!(commit_patch(temp.path(), "--help").await.is_err());
+        assert!(commit_patch(temp.path(), "").await.is_err());
     }
 
     #[tokio::test]

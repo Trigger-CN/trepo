@@ -336,6 +336,9 @@ fn drain_background_messages(app: &mut App) {
     while let Ok(result) = app.range_history_rx.try_recv() {
         app.apply_range_history(result);
     }
+    while let Ok(result) = app.range_commit_rx.try_recv() {
+        app.apply_range_commit_patch(result);
+    }
     while let Ok(result) = app.clipboard_rx.try_recv() {
         // A successful read goes through the same routing as bracketed paste.
         if let Some(text) = app.apply_clipboard(result) {
@@ -377,29 +380,36 @@ fn handle_key(app: &mut App, key: KeyEvent) {
         }
         return;
     }
-    if app.screen == Screen::Workspace && app.range_history_overlay_active() {
-        if app.range_history.form.is_some() {
-            match key.code {
-                KeyCode::Esc => app.close_range_history(),
-                KeyCode::Enter => app.submit_range_history(),
-                KeyCode::Backspace => {
-                    app.edit_range_history_form(trepo::app::state::CommitInput::Backspace)
-                }
-                KeyCode::Down | KeyCode::Tab => app.move_range_history_field(1),
-                KeyCode::Up | KeyCode::BackTab => app.move_range_history_field(-1),
-                KeyCode::Char(character) => app
-                    .edit_range_history_form(trepo::app::state::CommitInput::Character(character)),
-                _ => {}
+    // The range page owns typed input while its filter form is open; the
+    // results view uses the ordinary screen-level keys below.
+    if app.screen == Screen::RangeHistory && app.range_history.form.is_some() {
+        match key.code {
+            KeyCode::Esc => app.close_range_history(),
+            KeyCode::Enter => app.submit_range_history(),
+            KeyCode::Backspace => {
+                app.edit_range_history_form(trepo::app::state::CommitInput::Backspace)
             }
-        } else {
-            match key.code {
-                KeyCode::Esc => app.close_range_history(),
-                KeyCode::Char('f') => app.open_range_history(),
-                KeyCode::Char('r') => app.rerun_range_history(),
-                KeyCode::Down | KeyCode::Char('j') => app.move_range_history_selection(1),
-                KeyCode::Up | KeyCode::Char('k') => app.move_range_history_selection(-1),
-                _ => {}
+            KeyCode::Down | KeyCode::Tab => app.move_range_history_field(1),
+            KeyCode::Up | KeyCode::BackTab => app.move_range_history_field(-1),
+            KeyCode::Char(character) => {
+                app.edit_range_history_form(trepo::app::state::CommitInput::Character(character))
             }
+            _ => {}
+        }
+        return;
+    }
+    // The opened commit owns scrolling keys until it is closed; locating from
+    // inside the view mirrors the `l` action of the list behind it.
+    if app.screen == Screen::RangeHistory && app.range_history.view.is_some() {
+        match key.code {
+            KeyCode::Esc => app.close_range_commit_view(),
+            KeyCode::Char('?') => app.help = true,
+            KeyCode::Char('l') => app.locate_range_history_commit(),
+            KeyCode::Down | KeyCode::Char('j') => app.scroll_range_commit_view(1),
+            KeyCode::Up | KeyCode::Char('k') => app.scroll_range_commit_view(-1),
+            KeyCode::PageDown => app.scroll_range_commit_view(10),
+            KeyCode::PageUp => app.scroll_range_commit_view(-10),
+            _ => {}
         }
         return;
     }
@@ -721,6 +731,21 @@ fn handle_key(app: &mut App, key: KeyEvent) {
             KeyCode::BackTab => app.next_repository_tab(-1),
             KeyCode::Down | KeyCode::Char('j') => app.move_repository_selection(1),
             KeyCode::Up | KeyCode::Char('k') => app.move_repository_selection(-1),
+            _ => {}
+        },
+        Screen::RangeHistory => match key.code {
+            KeyCode::Esc => app.back(),
+            KeyCode::Char('?') => app.help = true,
+            KeyCode::Char('f') => app.open_range_history_form(),
+            KeyCode::Char('r') => app.rerun_range_history(),
+            KeyCode::Enter => app.open_range_commit_view(),
+            KeyCode::Char('l') => app.locate_range_history_commit(),
+            KeyCode::Down | KeyCode::Char('j') => app.move_range_history_selection(1),
+            KeyCode::Up | KeyCode::Char('k') => app.move_range_history_selection(-1),
+            KeyCode::Char('g') | KeyCode::Home => app.range_history_first(),
+            KeyCode::Char('G') | KeyCode::End => app.range_history_last(),
+            KeyCode::PageDown => app.move_range_history_selection(10),
+            KeyCode::PageUp => app.move_range_history_selection(-10),
             _ => {}
         },
     }

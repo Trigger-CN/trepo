@@ -47,9 +47,6 @@ pub fn render(frame: &mut Frame, app: &App) {
     render_footer(frame, app, vertical[2]);
     render_repo_batch_overlay(frame, app);
     render_workspace_git_overlay(frame, app);
-    if app.range_history_overlay_active() {
-        super::range_history::render(frame, app, &app.range_history);
-    }
     if app
         .repository
         .as_ref()

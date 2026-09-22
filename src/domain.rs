@@ -815,6 +815,36 @@ pub struct RangeHistorySpec {
     pub query: String,
 }
 
+impl RangeHistorySpec {
+    /// Compact one-line filter summary used by the page header; empty fields
+    /// are omitted so an unbounded query reads as a bare workspace scan.
+    pub fn summary(&self) -> String {
+        let mut parts = Vec::new();
+        if !self.since.is_empty() || !self.until.is_empty() {
+            parts.push(format!(
+                "{}..{}",
+                if self.since.is_empty() {
+                    "*"
+                } else {
+                    &self.since
+                },
+                if self.until.is_empty() {
+                    "*"
+                } else {
+                    &self.until
+                }
+            ));
+        }
+        if !self.author.is_empty() {
+            parts.push(format!("author:{}", self.author));
+        }
+        if !self.query.is_empty() {
+            parts.push(format!("query:{}", self.query));
+        }
+        parts.join("  ")
+    }
+}
+
 /// One repository's slice of a workspace range query, kept grouped by project
 /// so the UI can show provenance and per-repository errors.
 #[derive(Debug, Clone)]
@@ -822,5 +852,8 @@ pub struct ProjectRangeHistory {
     pub project_id: ProjectId,
     pub project_name: String,
     pub commits: Vec<Commit>,
+    /// True when the repository held more matches than the per-repository cap,
+    /// so `commits` is a bounded newest-first slice.
+    pub capped: bool,
     pub error: Option<String>,
 }

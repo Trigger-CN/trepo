@@ -79,7 +79,7 @@ git push origin v0.5.0
 | `S` / `Z` / `D` | Workspace: confirm Stage / Stash / complete Discard for the repository under the cursor, or only the explicit `Space` / `A` selection when non-empty |
 | `a` | Workspace: open Repo batch actions; Changes: Amend current `HEAD`; Repository: open fixed actions |
 | `c` | Open Changes; cancel a running Repo task from its task view |
-| `f` | Graph: open structured Branch/Query/Author/Since/Until filters; Repo task: retry only failed projects |
+| `f` | Graph: open structured Branch/Query/Author/Since/Until filters; Range history: reopen the range filter form; Repo task: retry only failed projects |
 | `Tab` | Cycle file / hunk / line mode in Changes; switch tabs or form fields |
 | `z` | Changes: confirm stashing the selected files, including untracked files |
 | `s` / `u` | Stage / unstage selected Changes files, or the active file, hunk, or line when no file selection exists |
@@ -87,7 +87,9 @@ git push origin v0.5.0
 | `t` | Workspace: toggle List / Tree layout for the current scope; each scope remembers its own layout; Changes: edit the repository-local commit message template |
 | `m` / `a` / `w` | Changes: open Commit / Amend `HEAD` / Reword `HEAD` directly; Amend and Reword preload the current message, and a key pressed during Stage refresh opens the editor as soon as loading finishes |
 | `p` | Workspace: open a prefilled Push refspec form for the cursor repository after a fresh snapshot — Remote defaults to `origin` or the first remote, Refspec to `HEAD:refs/for/<current-branch>` (`master` when detached) — then confirm `git push <remote> <refspec>` |
-| `H` | Workspace: open the cross-repository commit range search (Since/Until window with optional Author and message Query), scanning every repository in scope concurrently |
+| `H` | Workspace: open the cross-repository commit range search page (Since/Until window with optional Author and message Query), scanning every repository in scope concurrently |
+| `Enter` | Range history: open the selected commit's detail and diff; other pages: open graph, object menu, or insert a newline |
+| `l` | Range history: jump to the owning repository's Graph page with that commit selected |
 | `Ctrl-A` / `Ctrl-U` / `Ctrl-G` | Toggle Commit/Amend compatibility mode / sign-off / signing in the Changes commit dialog |
 | `o` | Open Repository management from Workspace, Graph, or Changes |
 | `PageUp` / `PageDown` | Scroll the selected diff |
@@ -110,7 +112,10 @@ Implemented:
 - compact pipe-based topology lanes with left-shifting continuations, solid split/merge connectors, explicit `~N` hidden-lane markers, and `◉` missing-parent boundaries
 - responsive Graph columns preserve topology, wrapped subject text, and important refs first; rows use their real visual height, commit body keeps original line breaks, and dense remote/tag badges fold into `R:+N`/`T:+N` while Inspector/object menus retain every ref
 - in-memory Graph filtering by local/remote branch history, commit OID/subject/body/ref text, author, and inclusive UTC date range; conditions combine with AND while selection remains bound to commit OID
-- cross-repository commit range search from Workspace `H`: a `YYYY-MM-DD` Since/Until window (lower bound via `--since-as-filter` so out-of-order commits are not dropped) plus optional Author and message Query, loading every repository in scope concurrently and merging the hits into one newest-first timeline with per-repository error reporting
+- cross-repository commit range search from Workspace `H`, presented as a dedicated page that mirrors the Graph commit list without lanes and supports `j`/`k`, `g`/`G`, `PageUp`/`PageDown`, `f` to reopen the filter, `r` to rerun, and `Esc` to return: a `YYYY-MM-DD` Since/Until window (lower bound via `--since-as-filter` so out-of-order commits are not dropped) plus optional Author and message Query, loading every repository in scope concurrently and merging the hits into one newest-first timeline with per-repository error reporting
+- the range search caps every repository at 500 newest matches (an `, N capped` title note marks truncation) and renders only the rows inside the viewport, so an unfiltered query over a large workspace stays responsive
+- `Enter` on a range-search row opens that commit's detail page: metadata, the full message, and the `git show --stat --patch -m --first-parent` diffstat plus colour-coded patch (merges show their diff against the first parent instead of nothing), scrollable and with explicit empty text when a commit changes nothing
+- `l` on a range-search row jumps to the owning repository's Graph page with that commit selected; a Graph filter that hides it is cleared and reported, and a commit that is no longer reachable reports an error instead of moving the selection
 - Graph two-level object menu: select a commit node, choose its commit/HEAD/local branch/remote branch/tag/stash object, then choose a fixed contextual action
 - Graph contextual Commit/Amend actions route into the same multiline Changes editor instead of a separate empty-message form; Amend remains limited to the current HEAD object and preloads its message
 - Graph repository forms and confirmations reuse the protected RepositoryAction/OperationRunner workflow; local branches expose separate Push and force-with-lease actions while remote branches expose only valid local operations

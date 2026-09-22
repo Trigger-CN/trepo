@@ -1,24 +1,221 @@
-use ratatui::layout::{Constraint, Rect};
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::Line;
-use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, Wrap};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table, Wrap};
 use ratatui::Frame;
 
 use crate::app::state::{App, RangeHistoryState};
 
-/// Renders the workspace range-query overlay: the filter form, the merged
-/// cross-repository commit timeline, or the status/error message.
-pub(super) fn render(frame: &mut Frame, app: &App, state: &RangeHistoryState) {
-    if let Some(form) = state.form.as_ref() {
-        render_form(frame, app, form);
+/// Renders the workspace range-query page: the filter form, or the merged
+/// cross-repository commit timeline with the same table language as the Graph
+/// page (minus the lanes). Only the visible viewport is materialised, so a
+/// capped-but-large result set still draws in constant time.
+pub(super) fn render(frame: &mut Frame, app: &App) {
+    let area = frame.area();
+    if area.width < 60 || area.height < 12 {
+        frame.render_widget(
+            Paragraph::new(app.language.text(
+                "Terminal too small. Resize to at least 60x12. Press Esc to return.",
+                "终端太小，请调整到至少 60x12，按 Esc 返回。",
+            ))
+            .block(
+                Block::default()
+                    .title(app.language.text(" Range history ", " 时间范围检索 "))
+                    .borders(Borders::ALL),
+            ),
+            area,
+        );
         return;
     }
-    render_results(frame, app, state);
+
+    let state = &app.range_history;
+    let vertical = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(2),
+            Constraint::Min(5),
+            Constraint::Length(1),
+        ])
+        .split(area);
+    render_header(frame, app, state, vertical[0]);
+    if let Some(view) = state.view.as_ref() {
+        render_commit_view(frame, app, view, vertical[1]);
+    } else if state.form.is_some() {
+        render_form(frame, app, state, vertical[1]);
+    } else {
+        render_results(frame, app, state, vertical[1]);
+    }
+    render_footer(frame, app, state, vertical[2]);
 }
 
-fn render_form(frame: &mut Frame, app: &App, form: &crate::app::state::RangeHistoryForm) {
-    let area = centered_rect(66, 40, frame.area());
-    frame.render_widget(Clear, area);
+/// Renders one located commit: metadata, its full message, then the diffstat
+/// and patch produced by `git show`. Only the visible lines are drawn, so a
+/// large patch costs the same as a small one.
+fn render_commit_view(
+    frame: &mut Frame,
+    app: &App,
+    view: &crate::app::state::RangeCommitView,
+    area: Rect,
+) {
+    let title = format!(
+        " {} {}  {}  {} ",
+        view.project_name,
+        view.short_oid,
+        app.language.label("Commit"),
+        super::text::truncate(
+            &view.commit.subject.clone(),
+            area.width.saturating_sub(40) as usize,
+        )
+    );
+    let block = Block::default()
+        .title(title)
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::DarkGray));
+    if view.loading {
+        frame.render_widget(
+            Paragraph::new(app.language.text("Loading commit...", "正在加载提交..."))
+                .style(Style::default().fg(Color::Yellow))
+                .block(block),
+            area,
+        );
+        return;
+    }
+    if let Some(error) = view.error.as_ref() {
+        frame.render_widget(
+            Paragraph::new(error.clone())
+                .style(Style::default().fg(Color::Red))
+                .wrap(Wrap { trim: false })
+                .block(block),
+            area,
+        );
+        return;
+    }
+
+    let width = area.width.saturating_sub(2) as usize;
+    let mut lines = vec![
+        Line::styled(
+            view.commit.subject.clone(),
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Line::raw(""),
+        super::graph::detail_line(
+            app.language.label("Commit"),
+            view.commit.oid.clone(),
+            Color::LightBlue,
+        ),
+        super::graph::detail_line(
+            app.language.label("Author"),
+            view.commit.author.clone(),
+            Color::Gray,
+        ),
+        super::graph::detail_line(
+            app.language.label("Date"),
+            super::graph::calendar_date(view.commit.timestamp),
+            Color::Gray,
+        ),
+        super::graph::detail_line(
+            app.language.label("Parents"),
+            if view.commit.parents.is_empty() {
+                "-".to_owned()
+            } else {
+                view.commit.parents.join(" ")
+            },
+            Color::LightBlue,
+        ),
+        Line::raw(""),
+    ];
+    for source_line in view.commit.body.split('\n') {
+        lines.extend(
+            super::text::wrap(source_line.trim_end_matches('\r'), width)
+                .into_iter()
+                .map(|line| Line::styled(line, Style::default().fg(Color::Gray))),
+        );
+    }
+    lines.push(Line::raw(""));
+
+    if view.text.trim().is_empty() {
+        let message = if view.commit.parents.len() > 1 {
+            app.language.text(
+                "No changes against the first parent.",
+                "相对第一个父提交没有变更。",
+            )
+        } else {
+            app.language.text("No textual changes.", "没有文本变更。")
+        };
+        lines.push(Line::styled(message, Style::default().fg(Color::DarkGray)));
+    } else {
+        lines.extend(patch_lines(&view.text, width));
+    }
+
+    let scroll = u16::try_from(view.scroll).unwrap_or(u16::MAX);
+    frame.render_widget(Paragraph::new(lines).block(block).scroll((scroll, 0)), area);
+}
+
+/// Colours the patch like the Changes diff: additions green, removals red,
+/// hunk headers cyan and file headers yellow.
+fn patch_lines(text: &str, width: usize) -> Vec<Line<'static>> {
+    text.lines()
+        .map(|line| {
+            let style = if line.starts_with("+++") || line.starts_with("---") {
+                Style::default().fg(Color::Yellow)
+            } else if line.starts_with('+') {
+                Style::default().fg(Color::Green)
+            } else if line.starts_with('-') {
+                Style::default().fg(Color::Red)
+            } else if line.starts_with("@@") || line.starts_with("diff --git ") {
+                Style::default().fg(Color::Cyan)
+            } else if line.contains("|") && line.contains("changed") {
+                Style::default().fg(Color::DarkGray)
+            } else {
+                Style::default()
+            };
+            Line::styled(super::text::truncate(line, width), style)
+        })
+        .collect()
+}
+
+fn render_header(frame: &mut Frame, app: &App, state: &RangeHistoryState, area: Rect) {
+    let scope = if app.selected_projects.is_empty() {
+        app.language.text("all repositories", "全部仓库").to_owned()
+    } else {
+        format!(
+            "{} {}",
+            app.selected_projects.len(),
+            app.language.text("selected repositories", "个已选仓库")
+        )
+    };
+    let filter = state.spec.summary();
+    let filter = if filter.is_empty() {
+        app.language.text("no range", "无范围").to_owned()
+    } else {
+        filter
+    };
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                " trepo ",
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(format!(
+                "  {}  /  {filter}  [{}]",
+                app.language.text("Range history", "时间范围检索"),
+                scope
+            )),
+        ]))
+        .block(Block::default().borders(Borders::BOTTOM)),
+        area,
+    );
+}
+
+fn render_form(frame: &mut Frame, app: &App, state: &RangeHistoryState, area: Rect) {
+    let Some(form) = state.form.as_ref() else {
+        return;
+    };
     let mut lines = Vec::new();
     for (index, (label, value)) in form.fields().iter().enumerate() {
         let marker = if index == form.selected { "> " } else { "  " };
@@ -33,6 +230,12 @@ fn render_form(frame: &mut Frame, app: &App, form: &crate::app::state::RangeHist
         ));
     }
     lines.push(Line::raw(""));
+    if let Some((error, message)) = &state.message {
+        lines.push(Line::styled(
+            message.clone(),
+            Style::default().fg(if *error { Color::Red } else { Color::Green }),
+        ));
+    }
     lines.push(Line::styled(
         app.language.text(
             "Enter run   Tab field   Esc cancel",
@@ -51,7 +254,7 @@ fn render_form(frame: &mut Frame, app: &App, form: &crate::app::state::RangeHist
         Paragraph::new(lines)
             .block(
                 Block::default()
-                    .title(app.language.text(" Range history ", " 时间范围检索 "))
+                    .title(app.language.text(" Range filters ", " 范围过滤 "))
                     .borders(Borders::ALL),
             )
             .wrap(Wrap { trim: false }),
@@ -59,138 +262,215 @@ fn render_form(frame: &mut Frame, app: &App, form: &crate::app::state::RangeHist
     );
 }
 
-fn render_results(frame: &mut Frame, app: &App, state: &RangeHistoryState) {
-    let area = centered_rect(92, 80, frame.area());
-    frame.render_widget(Clear, area);
-
-    let rows = display_rows(app);
+fn render_results(frame: &mut Frame, app: &App, state: &RangeHistoryState, area: Rect) {
+    let total = app.range_history_total();
     let error_count = state.projects.iter().filter(|p| p.error.is_some()).count();
-    let title = format!(
-        " {} ({} {}{}) ",
-        app.language.text("Range history", "时间范围检索"),
-        rows.len(),
-        app.language.text("commits", "提交"),
-        if error_count > 0 {
-            format!(
-                ", {} {}",
-                error_count,
-                app.language.text("repositories failed", "个仓库失败")
-            )
-        } else {
-            String::new()
-        }
-    );
-    let block = Block::default()
-        .title(title)
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::DarkGray));
-    let footer = if state.loading {
-        app.language
-            .text("Loading...   Esc close", "正在加载...   Esc 关闭")
-    } else {
-        app.language.text(
-            "Esc close   r rerun   f filter",
-            "Esc 关闭   r 重跑   f 过滤",
-        )
-    };
+    let capped_count = state.projects.iter().filter(|p| p.capped).count();
 
-    if rows.is_empty() {
+    if total == 0 {
         let message = if state.loading {
-            app.language.text("Loading...", "正在加载...")
-        } else if let Some((_, text)) = state.message.as_ref() {
-            text.as_str()
+            app.language.text("Loading...", "正在加载...").to_owned()
+        } else if let Some((_, text)) = app.range_history_message() {
+            text
         } else {
-            app.language.text("No commits in range", "范围内没有提交")
+            app.language
+                .text("No commits in range", "范围内没有提交")
+                .to_owned()
         };
         frame.render_widget(
-            Paragraph::new(vec![
-                Line::raw(message.to_owned()),
-                Line::raw(""),
-                Line::styled(footer, Color::DarkGray),
-            ])
-            .block(block)
-            .wrap(Wrap { trim: false }),
+            Paragraph::new(vec![Line::raw(message), Line::raw("")])
+                .block(results_block(app, total, error_count, capped_count))
+                .wrap(Wrap { trim: false }),
             area,
         );
         return;
     }
 
+    // Only the rows inside the viewport are built; the cache keeps the merged
+    // ordering so scrolling never re-sorts.
+    let inner_width = area.width.saturating_sub(2) as usize;
+    let selected = state.selected.min(total - 1);
+    let row_budget = usize::from(area.height.saturating_sub(3)).max(1);
+    let start = viewport_start(selected, row_budget, total);
+    let subject_width = subject_column_width(inner_width);
+
     let header = Row::new([
+        Cell::from(""),
         Cell::from(app.language.label("Project")),
         Cell::from(app.language.label("Commit")),
         Cell::from(app.language.label("Date")),
         Cell::from(app.language.label("Author")),
         Cell::from(app.language.label("Subject")),
     ])
-    .style(Style::default().add_modifier(Modifier::BOLD));
+    .style(
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    );
 
-    let selected = state.selected.min(rows.len() - 1);
-    let body = rows
-        .iter()
-        .enumerate()
-        .map(|(index, row)| {
-            let style = if index == selected {
+    let end = (start + row_budget).min(total);
+    let rows = (start..end)
+        .filter_map(|index| {
+            let (project, oid, commit) = app.range_history_row(index)?;
+            let is_selected = index == selected;
+            let style = if is_selected {
                 super::selection_style()
             } else {
                 Style::default()
             };
-            Row::new([
-                Cell::from(row.0.clone()),
-                Cell::from(row.1.clone()),
-                Cell::from(row.2.clone()),
-                Cell::from(row.3.clone()),
-                Cell::from(row.4.clone()),
-            ])
-            .style(style)
+            Some(
+                Row::new([
+                    Cell::from(Line::styled(
+                        if is_selected { ">" } else { " " },
+                        Style::default()
+                            .fg(super::selection_fg(is_selected, Color::Cyan))
+                            .add_modifier(Modifier::BOLD),
+                    )),
+                    Cell::from(Line::styled(
+                        super::text::truncate(&project, 18),
+                        Style::default().fg(super::selection_fg(is_selected, Color::Gray)),
+                    )),
+                    Cell::from(Line::styled(
+                        oid,
+                        Style::default().fg(super::selection_fg(is_selected, Color::LightBlue)),
+                    )),
+                    Cell::from(Line::styled(
+                        super::graph::calendar_date(commit.timestamp),
+                        Style::default().fg(super::selection_fg(is_selected, Color::Gray)),
+                    )),
+                    Cell::from(Line::styled(
+                        super::text::truncate(&commit.author.replace(['\n', '\r'], " "), 14),
+                        Style::default().fg(super::selection_fg(is_selected, Color::Gray)),
+                    )),
+                    Cell::from(Line::styled(
+                        super::text::truncate(
+                            &commit.subject.replace(['\n', '\r'], " "),
+                            subject_width,
+                        ),
+                        Style::default().fg(super::selection_fg(is_selected, Color::White)),
+                    )),
+                ])
+                .style(style),
+            )
         })
         .collect::<Vec<_>>();
 
     let widths = [
+        Constraint::Length(1),
         Constraint::Length(18),
         Constraint::Length(9),
         Constraint::Length(10),
         Constraint::Length(14),
         Constraint::Min(10),
     ];
-    let table = Table::new(body, widths)
-        .header(header)
-        .block(block)
-        .row_highlight_style(super::selection_style());
-    frame.render_widget(table, area);
+    let title = format!(
+        " {} ({}-{}/{}){} ",
+        app.language.text("Range history", "时间范围检索"),
+        start + 1,
+        end,
+        total,
+        result_notes(error_count, capped_count)
+    );
+    frame.render_widget(
+        Table::new(rows, widths)
+            .header(header)
+            .column_spacing(1)
+            .block(
+                Block::default()
+                    .title(title)
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(Color::DarkGray)),
+            ),
+        area,
+    );
+}
 
-    if area.height > 2 {
-        let footer_area = Rect::new(area.x + 1, area.y + area.height - 1, area.width - 2, 1);
-        frame.render_widget(
-            Paragraph::new(Line::styled(footer, Color::DarkGray)),
-            footer_area,
-        );
+fn results_block(
+    app: &App,
+    total: usize,
+    error_count: usize,
+    capped_count: usize,
+) -> Block<'static> {
+    Block::default()
+        .title(format!(
+            " {} ({total}){} ",
+            app.language.text("Range history", "时间范围检索"),
+            result_notes(error_count, capped_count)
+        ))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::DarkGray))
+}
+
+/// Per-repository failure and truncation counts shown in the title, so colour
+/// is never the only carrier of that information.
+fn result_notes(error_count: usize, capped_count: usize) -> String {
+    let mut notes = String::new();
+    if error_count > 0 {
+        notes.push_str(&format!(", {error_count} failed"));
     }
+    if capped_count > 0 {
+        notes.push_str(&format!(", {capped_count} capped"));
+    }
+    notes
 }
 
-/// Flattens the per-project results into display rows, newest first, using the
-/// same ordering the state exposes so selection stays consistent.
-fn display_rows(app: &App) -> Vec<(String, String, String, String, String)> {
-    app.range_history_rows()
-        .into_iter()
-        .map(|(project, oid, commit)| {
-            (
-                super::text::truncate(&project, 18),
-                oid,
-                super::graph::calendar_date(commit.timestamp),
-                super::text::truncate(&commit.author.replace(['\n', '\r'], " "), 14),
-                super::text::truncate(&commit.subject.replace(['\n', '\r'], " "), 200),
-            )
-        })
-        .collect()
+fn render_footer(frame: &mut Frame, app: &App, state: &RangeHistoryState, area: Rect) {
+    let footer = if state.view.is_some() {
+        app.language.text(
+            "j/k Scroll   PgUp/PgDn Page   l Locate in Graph   Esc Back to results",
+            "j/k 滚动   PgUp/PgDn 翻页   l 在提交图中定位   Esc 返回列表",
+        )
+    } else if state.form.is_some() {
+        app.language
+            .text("Enter run   Esc cancel", "Enter 执行   Esc 取消")
+    } else if state.loading {
+        app.language
+            .text("Loading...   Esc back", "正在加载...   Esc 返回")
+    } else {
+        app.language.text(
+            "Enter Detail   l Locate   j/k Move   g/G First/Last   f Filter   r Rerun   Esc Back",
+            "Enter 详情   l 定位   j/k 移动   g/G 首/末   f 过滤   r 重跑   Esc 返回",
+        )
+    };
+    frame.render_widget(Paragraph::new(Line::styled(footer, Color::DarkGray)), area);
 }
 
-fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
-    let width = area.width.saturating_mul(percent_x) / 100;
-    let height = area.height.saturating_mul(percent_y) / 100;
-    Rect::new(
-        area.x + area.width.saturating_sub(width) / 2,
-        area.y + area.height.saturating_sub(height) / 2,
-        width.max(1),
-        height.max(1),
-    )
+fn viewport_start(selected: usize, budget: usize, total: usize) -> usize {
+    if total <= budget {
+        return 0;
+    }
+    let start = selected.saturating_sub(budget.saturating_sub(1));
+    start.min(total.saturating_sub(budget))
+}
+
+fn subject_column_width(width: usize) -> usize {
+    // 1 marker + 18 project + 9 commit + 10 date + 14 author + separators.
+    width.saturating_sub(1 + 18 + 9 + 10 + 14 + 6).max(8)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn viewport_keeps_the_selected_row_visible_and_bounded() {
+        assert_eq!(viewport_start(0, 10, 5), 0);
+        assert_eq!(viewport_start(4, 10, 100), 0);
+        assert_eq!(viewport_start(10, 10, 100), 1);
+        assert_eq!(viewport_start(99, 10, 100), 90);
+    }
+
+    #[test]
+    fn patch_lines_colour_diff_content() {
+        let text =
+            " s.txt | 1 +\n\ndiff --git a/s.txt b/s.txt\n+++ b/s.txt\n@@ -0,0 +1 @@\n+s\n-s\n";
+        let lines = patch_lines(text, 40);
+        // `Line::styled` stores the style on the line, not on its spans.
+        let color_at = |index: usize| lines[index].style.fg;
+        assert_eq!(color_at(2), Some(Color::Cyan));
+        assert_eq!(color_at(3), Some(Color::Yellow));
+        assert_eq!(color_at(4), Some(Color::Cyan));
+        assert_eq!(color_at(5), Some(Color::Green));
+        assert_eq!(color_at(6), Some(Color::Red));
+    }
 }

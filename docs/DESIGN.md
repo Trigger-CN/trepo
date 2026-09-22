@@ -85,6 +85,7 @@ Git 与 Repo 的参数面很大，而且会随版本、插件和服务端扩展�
 | --- | --- |
 | Workspace | Repo 工作区主页，展示所有仓库及聚合状态 |
 | Repository | 单仓库容器，包含 Graph、Changes、Branches、Tags、Remotes、Stashes 等标签页 |
+| Range history | 跨仓库时间范围提交检索页：与 Graph 同版式的提交表格（无 lane 列），结果按提交时间降序、只渲染当前视口；`H` 进入，`Esc` 返回 |
 | Repo Actions | Repo 级 init/sync/start/upload/download/manifest/forall 等工作流 |
 | Tasks | 正在执行和历史任务、逐项目结果、日志、取消与重试 |
 | Command Palette | 搜索页面、动作、仓库、引用，以及执行受控 Git/Repo 命令 |
@@ -181,12 +182,17 @@ Git 与 Repo 的参数面很大，而且会随版本、插件和服务端扩展�
 
 ### 5.5 跨仓库时间范围检索
 
-排查回归时已知问题提交落在某个时间窗内，但 Graph 的 Since/Until 只作用于单个仓库。Workspace 的 `H` 提供跨仓库版本：一个 `YYYY-MM-DD` 的 Since/Until 窗口，加上可选的 Author 与消息 Query 关键字。
+排查回归时已知问题提交落在某个时间窗内，但 Graph 的 Since/Until 只作用于单个仓库。Workspace 的 `H` 提供跨仓库版本，结果不是覆盖层而是独立页面（见下方“呈现与限流”）：一个 `YYYY-MM-DD` 的 Since/Until 窗口，加上可选的 Author 与消息 Query 关键字。
 
 - 范围：存在 `Space`/`A` 显式选择时只查该 `ProjectId` 集合，否则查全部仓库，与 `S`/`Z`/`D` 约定一致；范围为空时直接报错，不发送任何 Git 子进程。
 - 并发：每个仓库一个独立 `git log`，由 `Semaphore` 限流、`JoinSet` 汇总，逐仓库流式回传；单仓库失败（路径缺失、非仓库、revision 无效）只标记该项目，不中断其他仓库。
-- 参数：`git log --date-order --all [--since-as-filter=<since>] [--until=<until>] [--author=<author>] [--grep=<query>] --pretty=<LOG_FORMAT>`，每部分都是独立 `OsString`。下界固定用 `--since-as-filter`（Git ≥ 2.29）：默认的 `--since` 会剪枝遍历，在提交时间非单调时会漏掉窗口内的提交。
-- 结果：跨仓库合并为一条按提交时间降序的时间线（Project / Commit / Date / Author / Subject）；标题显示命中数与失败仓库数；零命中显示明确空态。
+- 参数：`git log --date-order --all [--max-count=<cap+1>] [--since-as-filter=<since>] [--until=<until>] [--author=<author>] [--grep=<query>] --pretty=<LOG_FORMAT>`，每部分都是独立 `OsString`。下界固定用 `--since-as-filter`（Git ≥ 2.29）：默认的 `--since` 会剪枝遍历，在提交时间非单调时会漏掉窗口内的提交。
+- 限流：每仓库上限 `PER_REPOSITORY_LIMIT = 500`。`log_range` 向 Git 请求 `cap + 1` 条以探测截断，返回 `RangeLog { commits, capped }` 并丢掉探测用的多余提交；`capped` 沿 `ProjectRangeHistory` 传到标题的 `, N capped` 提示。`max_count == 0` 表示不限流（仅测试使用），不截断。
+- 呈现与限流：结果是新增的 `Screen::RangeHistory` 整页（与 Graph 提交列表同版式的表格，但没有 lane 列），不再是 Workspace 上的覆盖窗口。状态持有 `return_screen`（Esc 返回处）和私有行索引缓存 `rows: Vec<(project_index, commit_index)>`，只在结果到达时重建并排序（提交时间降序、同时间按项目名）；渲染只物化当前视口内的行（`viewport_start` + `area.height - 3`），因此大结果集下绘制仍是常数级。
+- 结果：跨仓库合并为一条按提交时间降序的时间线（Project / Commit / Date / Author / Subject）；标题显示当前视口区间、命中总数与失败仓库数；零命中显示明确空态。
+- 键位：结果页 `j`/`k`（或 `↑`/`↓`）移动、`g`/`G`（或 `Home`/`End`）首末、`PageUp`/`PageDown` 翻 10 行、`Enter` 打开提交详情、`l` 定位到所属仓库提交图、`f` 重开表单（`open_range_history_form`，不影响 `return_screen`）、`r` 重跑、`Esc` 先关详情/取消表单再返回 `return_screen`。表单内 `Esc` 取消、`Enter` 执行、`Tab`/`BackTab` 与 `↑`/`↓` 切换字段。
+- 提交详情：`Enter` 后用 `git::commit_patch` 异步执行 `git show --no-ext-diff --no-color --stat --patch --format= -m --first-parent <oid>`（固定 argv，拒绝空/`-` 开头/含 NUL 的 oid），返回 `RangeCommitResult { generation, oid, result }`，由 `RangeCommitView` 校验 generation+OID 后落地。`-m --first-parent` 是必要的：默认对 merge 不输出任何 diff，会让“查看改动”对 merge 静默变空。视图复用 Graph 的元数据行风格与 Changes 的 diff 配色，按终端宽度 wrap/truncate 并支持 `j`/`k`、`PageUp`/`PageDown` 滚动；无文本改动时给出明确文案而不是空白页。
+- 定位：`GraphState` 新增 `locate_oid`。`locate_graph_commit` 总是重新加载目标仓库历史再设置 `locate_oid`（因此同一仓库也能生效），`apply_graph` 在历史到达后：目标可见则选中；被当前 filter 隐藏则清空 filter、关闭表单并提示；已不可达则置错误且不移动选择。定位请求在每次应用后消费，不会影响后续刷新。
 - 异步：结果携带 generation，过期结果不覆盖新一轮；`reported`/`expected` 计数使 loading 在零命中时也能正确结束。
 
 ## 6. Repository 页面
@@ -476,8 +482,9 @@ Upload 执行前展示 project 和准确 argv。M4 capture 模式只执行 `--cu
 | Git dir/worktree/common dir | `git rev-parse --path-format=absolute ...` |
 | refs 与 upstream | `git for-each-ref` + 自定义 NUL/字段格式 |
 | commit DAG | `git log --date-order --parents` + 显式记录/字段分隔符 |
-| 跨仓库时间范围提交 | `git log --date-order --all --since-as-filter/--until/--author/--grep` + 同一 NUL 字段格式，每仓库一次独立调用 |
-| commit detail | `git show --no-patch` + 显式格式 |
+| 跨仓库时间范围提交 | `git log --date-order --all --max-count/--since-as-filter/--until/--author/--grep` + 同一 NUL 字段格式，每仓库一次独立调用，每仓库最多 500 条 |
+| commit detail | `git show --no-patch` + 显式格式
+| 单个提交改动 | `git show --no-ext-diff --no-color --stat --patch --format= -m --first-parent <oid>`（merge 取相对第一父的 diff）|
 | diff/name status | `git diff --raw/-z`、`--numstat -z`、`--patch` |
 | unmerged stages | `git ls-files -u -z` |
 | operation state | Git path 查询与 MERGE_HEAD/rebase/cherry-pick 等状态文件存在性 |

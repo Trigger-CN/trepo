@@ -3,7 +3,12 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, Semaphore};
 
 use crate::adapters::git::{self, LogRangeFilter};
-use crate::domain::{Commit, Project, ProjectId, RangeHistorySpec};
+use crate::domain::{Project, ProjectId, RangeHistorySpec};
+
+/// Per-repository cap on matching commits. An unfiltered query over a large
+/// workspace would otherwise materialise every commit in every repository,
+/// which both stalls Git and floods the terminal.
+pub const PER_REPOSITORY_LIMIT: usize = 500;
 
 /// One repository's response to a workspace-wide range query.
 #[derive(Debug)]
@@ -11,7 +16,7 @@ pub struct RangeHistoryResult {
     pub generation: u64,
     pub project_id: ProjectId,
     pub project_name: String,
-    pub result: anyhow::Result<Vec<Commit>>,
+    pub result: anyhow::Result<git::RangeLog>,
 }
 
 /// Loads the range-limited history for every project concurrently, streaming one
@@ -42,7 +47,7 @@ pub fn spawn_range_history(
                     author: spec.author.clone(),
                     query: spec.query.clone(),
                 };
-                let result = git::log_range(&project.path, &filter).await;
+                let result = git::log_range(&project.path, &filter, PER_REPOSITORY_LIMIT).await;
                 RangeHistoryResult {
                     generation,
                     project_id: project.id,

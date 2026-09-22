@@ -57,7 +57,7 @@ M1 是所有后续里程碑的共同数据与交互基础。M4 可以在 M2 后�
 - Changes 支持文件多选批量 Stage/Unstage、selected-path Stash 和完整 Discard，提供 Commit/Amend/Reword 显式编辑入口，并展示及终止活动 Git 操作；文件/hunk/changed-line、commit/stash/conflict、refs/integration 和 remotes 写操作受锁、token 和 generation 保护。
 - 提交消息模板存于仓库本地 `trepo.commitTemplate`，可在 Changes 按 `t` 编辑；模板只预填全新的 Commit 草稿，Amend/Reword 仍预载 HEAD message。
 - Repository → Remotes 提供独立 Push refspec 入口；Workspace 按 `p` 先从最新快照预填 Remote 与 `HEAD:refs/for/<branch>`（detached HEAD 回退 `master`），在可编辑表单中修改目标后才进入同一 RemoteWrite 确认流程。
-- Workspace 按 `H` 打开跨仓库时间范围检索：`YYYY-MM-DD` Since/Until 窗口加可选 Author/Query，下界使用 `--since-as-filter`（Git ≥ 2.29）以免漏掉非单调时间内的提交；有显式选择时查选择集合，否则查全部仓库，并发加载并合并为一条按时间降序的跨仓库时间线。
+- Workspace 按 `H` 进入跨仓库时间范围检索页（与 Graph 提交列表同版式但不含分支树列，`Esc` 返回）：`YYYY-MM-DD` Since/Until 窗口加可选 Author/Query，下界使用 `--since-as-filter`（Git ≥ 2.29）以免漏掉非单调时间内的提交；有显式选择时查选择集合，否则查全部仓库，并发加载并合并为一条按时间降序的跨仓库时间线。每仓库最多保留 500 条命中并在标题提示 `, N capped`，表格只渲染当前视口，空条件检索也不会拖慢界面。结果行按 `Enter` 查看该提交的完整信息与改动（`git show --stat --patch -m --first-parent`，merge 看第一父提交的 diff），按 `l` 直接跳到所属仓库提交图并选中该提交（被过滤器隐藏时先清空并提示）。
 - Repo `sync/start/checkout/abandon/prune/rebase/upload/download` 和 pinned manifest export 具有 workspace lock、逐项目结果、流式日志、取消后复扫与失败重试。
 - Graph、Changes、Workspace Git 与 Repo overlay、confirmation 和结果状态均覆盖 80x24 与 120x40 TestBackend 渲染；四个主页面的数据行选中态另有 cell 前景、背景和粗体断言。
 - UI 默认英文，`-zh`/`--zh` 与 `-en`/`--en` 以实例级语言状态覆盖主要页面；长路径、diff 和外部文本按终端列宽安全处理，控制字符不能污染终端布局。选中行使用暗蓝灰色 `#262e3a` 背景并保留原有文本前景色，状态仍由颜色和字符或符号共同表达。
@@ -423,7 +423,7 @@ cargo build
 - Git 与 Repo 写操作协调 workspace/project 锁、实时前置检查、确认和 generation。
 - Repository 与 Graph 的普通 Push/Force Push 使用固定 `branch:branch` refspec；裸 `--force` 不可达，force-with-lease 并发推进场景由真实 peer/bare remote 覆盖。
 - Stash 高级模式、index 恢复、branch/clear，以及 selected-file/selected-repository Stash 和整仓 Stage 的领域映射、范围确认和 80x24/120x40 可见性均有测试覆盖。
-- 跨仓库时间范围检索（`H`）在真实临时仓库上验证窗口、Author、Query 与三者组合过滤，并用非单调日期 fixture 证明 `--since-as-filter` 保留窗口内超出遍历边界的提交；状态机覆盖显式选择优先、流式归并、零命中结束与 stale generation，UI 覆盖 80x24 与 120x40。
+- 跨仓库时间范围检索（`H`）在真实临时仓库上验证窗口、Author、Query 与三者组合过滤，并用非单调日期 fixture 证明 `--since-as-filter` 保留窗口内超出遍历边界的提交；每仓库 `--max-count` 上限另用真实仓库验证截断返回恰好 cap 条且 `capped=true`、未截断与 unlimited 不丢条目；`git show -m --first-parent` 在含 merge 的真实仓库上验证恰好一份 diff 且携带 stat；状态机覆盖显式选择优先、页面进入/返回与表单重开、提交详情异步落地与 stale generation/OID 拒绝、滚动夹紧、跨仓库定位与过滤器揭示/不可达报错、流式归并、新增行缓存（时间降序 + 选择夹紧）、零命中结束与 stale generation，UI 覆盖 80x24 与 120x40（含详情页的补丁与元数据渲染）。
 - Repo 批处理保留凭据脱敏日志；Workspace Git 批任务保留逐仓库 pending/running/success/failure。两者均不承诺跨仓库回滚并在结束后复扫事实状态。
 - Graph Subject 和 Workspace 展开仓库使用真实视觉行高；Changes diff 每个源行固定一行，显示列宽安全层已覆盖中文宽字符、控制字符与长转短重绘残留。
 - Language 注入 App，默认 English；精确 `-zh`/`-en` 在 Clap 前规范化，标准 `--zh`/`--en` 同时受支持且互斥。

@@ -98,14 +98,14 @@ Workspace 展示仓库状态、活动 merge/rebase/cherry-pick/revert、HEAD 和
 | `c` | 打开选中仓库的 Changes |
 | `o` | 打开选中仓库的 Repository 管理 |
 | `a` | 打开 Repo 批任务，仅 Android Repo 工作区有效 |
-| `H` | 打开跨仓库时间范围提交检索（Since/Until + Author + Query），并发扫描范围内所有仓库 |
+| `H` | 打开跨仓库时间范围提交检索页（Since/Until + Author + Query），并发扫描范围内所有仓库 |
 | `x` | 活动 Git 操作存在时，重新读取仓库状态并进入终止确认 |
 
 搜索会与两个改动范围按 AND 组合；切换范围或布局前后会按稳定 `ProjectId` 恢复当前仓库，只有当前仓库不再可见时才回退到首个可见仓库。仓库目录行和文件视觉行不改变仓库选择或操作目标。没有显式选择时，`S/Z/D` 使用当前过滤范围中的光标仓库；显式选择集合非空时只使用该集合，不额外加入光标仓库。确认框列出的冻结仓库和每仓库统计是最终执行范围。
 
 ### 跨仓库时间范围检索（`H`）
 
-在 Workspace 按 `H` 打开时间范围检索表单，用 `Tab`/方向键切换字段，`Enter` 执行，`Esc` 取消：
+在 Workspace 按 `H` 进入时间范围检索页，用 `Tab`/方向键切换字段，`Enter` 执行，`Esc` 取消：
 
 | 字段 | 含义 |
 | --- | --- |
@@ -116,7 +116,15 @@ Workspace 展示仓库状态、活动 merge/rebase/cherry-pick/revert、HEAD 和
 
 查找范围遵循 Workspace 现有约定：存在 `Space`/`A` 显式选择时只查选择集合，否则查全部仓库。trepo 对范围内每个仓库并发执行 `git log --all --since-as-filter=<since> --until=<until> --author=<author> --grep=<query>`，并逐仓库流式显示结果。Since 使用 `--since-as-filter`（需要 Git ≥ 2.29），即使提交时间非单调也能命中窗口内的提交，不会因祖先提交早于窗口而被剪掉。
 
-结果是一个跨仓库合并的提交时间线（Project / Commit / Date / Author / Subject），按提交时间降序排列；顶部标题显示命中提交数和失败仓库数。某个仓库失败（路径缺失、非 Git 仓库等）只标记该仓库，不影响其他仓库。`j/k` 移动选择、`r` 用同一条件重跑（会重新解析当前范围）、`f` 重新打开表单修改条件、`Esc` 关闭。范围内没有任何命中时显示 `No commits in range`。
+结果是独立页面（与 Commit Graph 页同一版式，但不含分支树列）：跨仓库合并的提交时间线（Project / Commit / Date / Author / Subject）按提交时间降序排列，标题显示命中提交数与失败仓库数。某个仓库失败（路径缺失、非 Git 仓库等）只标记该仓库，不影响其他仓库。
+
+为避免大量命中拖慢界面，每个仓库最多保留最新的 500 条命中；被截断的仓库在标题中以 `, N capped` 提示（表格只渲染当前视口内的行，滚动不会重排全量结果）。空条件直接检索同样受此上限保护。
+
+页面键位：`j/k` 或 `↑/↓` 移动选择、`g/G` 或 `Home/End` 跳到首/末、`PageUp/PageDown` 翻页、`Enter` 查看详情、`l` 定位到仓库提交图、`f` 重新打开表单修改条件、`r` 用同一条件重跑（会重新解析当前范围）、`Esc` 取消表单或返回 Workspace。范围内没有任何命中时显示 `No commits in range`。
+
+按 `Enter` 进入提交详情页：顶部是该提交的 Commit / Author / Date / Parents 与完整提交信息，下方是 `git show --stat --patch -m --first-parent` 输出的改动统计与补丁（`+` 绿、`-` 红、`@@` 与 `diff --git` 青、文件头黄）。merge 提交展示相对第一个父提交的改动，而不是空白。详情页内 `j/k`、`PageUp/PageDown` 滚动，`l` 可直接定位，`Esc` 返回结果列表；提交没有任何文本改动时会明确提示。
+
+按 `l` 一键定位：trepo 打开该提交所属仓库的提交图页并按 OID 选中该提交——即使该提交被当前 Graph 过滤器隐藏，也会清空过滤器后选中并给出提示；如果提交已不可达，则显示错误且不随意移动选择。
 
 ### Workspace Git 批任务流程
 

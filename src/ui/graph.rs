@@ -855,7 +855,7 @@ fn localized_field_value(app: &App, field: &FormField) -> String {
     }
 }
 
-fn detail_line(label: &str, value: String, color: Color) -> Line<'static> {
+pub(super) fn detail_line(label: &str, value: String, color: Color) -> Line<'static> {
     Line::from(vec![
         Span::styled(format!("{label}: "), Style::default().fg(Color::DarkGray)),
         Span::styled(value, Style::default().fg(color)),

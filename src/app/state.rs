@@ -30,6 +30,7 @@ pub enum Screen {
     Graph,
     Changes,
     Repository,
+    RangeHistory,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -86,6 +87,14 @@ pub struct GraphResult {
     pub project_id: ProjectId,
     pub generation: u64,
     pub result: anyhow::Result<Vec<Commit>>,
+}
+
+/// One commit's patch, requested from the range list by its OID.
+#[derive(Debug)]
+pub struct RangeCommitResult {
+    pub generation: u64,
+    pub oid: String,
+    pub result: anyhow::Result<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -562,6 +571,10 @@ pub struct GraphState {
     pub form: Option<GraphForm>,
     pub message: Option<(bool, String)>,
     pub selected_oid: Option<String>,
+    /// Set when another page asked to reveal one commit; consumed by the
+    /// next loaded history so the target is selected even if it sits outside
+    /// the current filter.
+    pub locate_oid: Option<String>,
     pub filter: GraphFilter,
     pub filter_form: Option<GraphFilterForm>,
     pub filter_error: Option<String>,
@@ -1027,14 +1040,13 @@ impl RangeHistoryForm {
     }
 }
 
-/// Workspace range-query view state: the optional filter form, the streamed
+/// Workspace range-query page state: the optional filter form, the streamed
 /// per-repository results, and a message slot for validation/empty feedback.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct RangeHistoryState {
     pub form: Option<RangeHistoryForm>,
-    /// Whether the range-query overlay owns the Workspace screen. Kept separate
-    /// from `ran` so closing the overlay does not forget the last query.
-    pub visible: bool,
+    /// Where Esc returns to; the page is only reachable from Workspace today.
+    pub return_screen: Screen,
     pub loading: bool,
     pub projects: Vec<ProjectRangeHistory>,
     pub spec: RangeHistorySpec,
@@ -1045,7 +1057,52 @@ pub struct RangeHistoryState {
     /// even when a repository legitimately matches nothing.
     pub expected: usize,
     pub reported: usize,
+    /// Flat (project index, commit index) table ordered newest first. Rebuilt
+    /// only when results change, so rendering never re-sorts thousands of
+    /// commits on every frame.
+    rows: Vec<(usize, usize)>,
     pub message: Option<(bool, String)>,
+    /// Commit opened from the list with `Enter`; while set the page shows the
+    /// commit instead of the table.
+    pub view: Option<RangeCommitView>,
+}
+
+impl Default for RangeHistoryState {
+    fn default() -> Self {
+        Self {
+            form: None,
+            return_screen: Screen::Workspace,
+            loading: false,
+            projects: Vec::new(),
+            spec: RangeHistorySpec::default(),
+            ran: false,
+            selected: 0,
+            generation: 0,
+            expected: 0,
+            reported: 0,
+            rows: Vec::new(),
+            message: None,
+            view: None,
+        }
+    }
+}
+
+/// The commit opened from the range list: the metadata row plus the patch text
+/// streamed in by [`git::commit_patch`].
+#[derive(Debug)]
+pub struct RangeCommitView {
+    pub oid: String,
+    pub short_oid: String,
+    pub project_name: String,
+    pub commit: Commit,
+    /// Repository that owns the commit, so the view can also locate it.
+    pub project: Project,
+    pub loading: bool,
+    pub error: Option<String>,
+    pub text: String,
+    pub line_count: usize,
+    pub scroll: usize,
+    pub generation: u64,
 }
 
 #[derive(Debug)]
@@ -1128,6 +1185,8 @@ pub struct App {
     workspace_git_generation: u64,
     range_history_tx: mpsc::UnboundedSender<RangeHistoryResult>,
     pub range_history_rx: mpsc::UnboundedReceiver<RangeHistoryResult>,
+    range_commit_tx: mpsc::UnboundedSender<RangeCommitResult>,
+    pub range_commit_rx: mpsc::UnboundedReceiver<RangeCommitResult>,
     operation_runner: OperationRunner,
     concurrency: usize,
 }
@@ -1153,6 +1212,7 @@ impl App {
         let (workspace_git_prepare_tx, workspace_git_prepare_rx) = mpsc::unbounded_channel();
         let (workspace_git_tx, workspace_git_rx) = mpsc::unbounded_channel();
         let (range_history_tx, range_history_rx) = mpsc::unbounded_channel();
+        let (range_commit_tx, range_commit_rx) = mpsc::unbounded_channel();
         let projects = workspace
             .projects
             .iter()
@@ -1220,6 +1280,8 @@ impl App {
             workspace_git_generation: 0,
             range_history_tx,
             range_history_rx,
+            range_commit_tx,
+            range_commit_rx,
             operation_runner: OperationRunner,
             concurrency: concurrency.max(1),
             repository_intent: None,
@@ -1899,11 +1961,6 @@ impl App {
             || self.repo_batch.task.is_some()
             || self.repo_batch.message.is_some()
     }
-
-    pub fn range_history_overlay_active(&self) -> bool {
-        self.range_history.visible
-    }
-
     /// Whether some editor or form currently owns typed input, i.e. whether a
     /// clipboard paste has a destination. Mirrors the precedence of
     /// `handle_paste` in `main.rs`.
@@ -2031,6 +2088,7 @@ impl App {
             form: None,
             message: None,
             selected_oid,
+            locate_oid: None,
             filter,
             filter_form: None,
             filter_error: None,
@@ -2067,6 +2125,42 @@ impl App {
             Err(error) => graph.error = Some(error.to_string()),
         }
         graph.selected = graph.selected.min(graph.commits.len().saturating_sub(1));
+        if let Some(oid) = graph.locate_oid.take() {
+            match graph.commits.iter().position(|commit| commit.oid == oid) {
+                Some(index) if graph.filtered_indices().contains(&index) => {
+                    graph.selected = index;
+                }
+                Some(index) => {
+                    // The commit exists but the active filter hides it; clearing
+                    // the filter is the only way to actually reveal it.
+                    graph.filter = GraphFilter::default();
+                    graph.filter_form = None;
+                    graph.filter_error = None;
+                    graph.selected = index;
+                    graph.message = Some((
+                        false,
+                        "cleared the filter to reveal the located commit".to_owned(),
+                    ));
+                }
+                None => {
+                    graph.message = Some((
+                        true,
+                        "that commit is no longer reachable from any ref".to_owned(),
+                    ));
+                }
+            }
+        }
+    }
+
+    /// Opens a repository's Graph page with one commit selected. The history is
+    /// always reloaded so the locate request is honoured even when that
+    /// repository is already the loaded one.
+    pub fn locate_graph_commit(&mut self, project: Project, oid: String) {
+        self.load_graph(project);
+        if let Some(graph) = self.graph.as_mut() {
+            graph.locate_oid = Some(oid);
+        }
+        self.screen = Screen::Graph;
     }
 
     pub fn move_graph_selection(&mut self, delta: isize) {
@@ -2168,16 +2262,175 @@ impl App {
             graph.restore_filtered_selection(selected_oid.as_deref());
         }
     }
-    /// Opens the workspace range-query form, seeded from the last run so a
-    /// lookup can be refined without retyping.
+    /// Enters the range-query page. A page that has never produced results
+    /// opens the filter form; an existing result stays browsable, and `f`
+    /// reopens the form seeded from the last run.
     pub fn open_range_history(&mut self) {
-        self.range_history.form = Some(RangeHistoryForm {
-            draft: self.range_history.spec.clone(),
+        let state = &mut self.range_history;
+        state.return_screen = self.screen;
+        state.message = None;
+        if !state.ran || state.form.is_some() {
+            state.form = Some(RangeHistoryForm {
+                draft: state.spec.clone(),
+                selected: 0,
+            });
+            state.selected = 0;
+        }
+        self.screen = Screen::RangeHistory;
+    }
+
+    /// Opens the filter form from inside the page (the `f` action). Unlike
+    /// entry, it never touches `return_screen` or the browsed selection.
+    pub fn open_range_history_form(&mut self) {
+        let state = &mut self.range_history;
+        state.form = Some(RangeHistoryForm {
+            draft: state.spec.clone(),
             selected: 0,
         });
+        state.message = None;
+    }
+
+    /// Leaves the page (Esc). An open commit view or form is closed first, so
+    /// Esc only ever unwinds one step.
+    pub fn close_range_history(&mut self) {
+        if self.range_history.view.take().is_some() {
+            self.range_history.message = None;
+            return;
+        }
+        if self.range_history.form.take().is_some() {
+            self.range_history.message = None;
+            return;
+        }
         self.range_history.message = None;
-        self.range_history.selected = 0;
-        self.range_history.visible = true;
+        self.screen = self.range_history.return_screen;
+    }
+
+    /// Opens the selected commit's detail/patch view, loading the patch
+    /// asynchronously; an empty result falls back to a message.
+    pub fn open_range_commit_view(&mut self) {
+        if self.range_history.form.is_some() || self.range_history.loading {
+            return;
+        }
+        let Some(index) = self
+            .range_history
+            .rows
+            .get(self.range_history.selected)
+            .copied()
+        else {
+            return;
+        };
+        let Some(project) = self.range_history.projects.get(index.0) else {
+            return;
+        };
+        let Some(commit) = project.commits.get(index.1).cloned() else {
+            return;
+        };
+        let Some(owner) = self
+            .workspace
+            .projects
+            .iter()
+            .find(|candidate| candidate.id == project.project_id)
+            .cloned()
+        else {
+            self.range_history.message = Some((
+                true,
+                "that repository is no longer in the workspace".to_owned(),
+            ));
+            return;
+        };
+        let generation = self
+            .range_history
+            .view
+            .as_ref()
+            .map_or(1, |view| view.generation.wrapping_add(1));
+        let oid = commit.oid.clone();
+        self.range_history.view = Some(RangeCommitView {
+            short_oid: short_oid(&oid).to_owned(),
+            oid: oid.clone(),
+            project_name: project.project_name.clone(),
+            commit,
+            project: owner.clone(),
+            loading: true,
+            error: None,
+            text: String::new(),
+            line_count: 0,
+            scroll: 0,
+            generation,
+        });
+        let sender = self.range_commit_tx.clone();
+        tokio::spawn(async move {
+            let result = git::commit_patch(&owner.path, &oid).await;
+            let _ = sender.send(RangeCommitResult {
+                generation,
+                oid,
+                result,
+            });
+        });
+    }
+
+    /// Merges one streamed patch, ignoring stale generations.
+    pub fn apply_range_commit_patch(&mut self, result: RangeCommitResult) {
+        let Some(view) = self.range_history.view.as_mut() else {
+            return;
+        };
+        if view.generation != result.generation || view.oid != result.oid {
+            return;
+        }
+        view.loading = false;
+        match result.result {
+            Ok(text) => {
+                view.line_count = text.lines().count();
+                view.text = text;
+            }
+            Err(error) => view.error = Some(error.to_string()),
+        }
+    }
+
+    pub fn scroll_range_commit_view(&mut self, delta: isize) {
+        let Some(view) = self.range_history.view.as_mut() else {
+            return;
+        };
+        let current = view.scroll as isize;
+        view.scroll =
+            (current + delta).clamp(0, view.line_count.saturating_sub(1) as isize) as usize;
+    }
+
+    pub fn close_range_commit_view(&mut self) {
+        self.range_history.view = None;
+    }
+
+    /// Jumps to the owning repository's Graph page with this commit selected.
+    pub fn locate_range_history_commit(&mut self) {
+        let Some(index) = self
+            .range_history
+            .rows
+            .get(self.range_history.selected)
+            .copied()
+        else {
+            return;
+        };
+        let Some(project) = self.range_history.projects.get(index.0) else {
+            return;
+        };
+        let Some(commit) = project.commits.get(index.1) else {
+            return;
+        };
+        let Some(owner) = self
+            .workspace
+            .projects
+            .iter()
+            .find(|candidate| candidate.id == project.project_id)
+            .cloned()
+        else {
+            self.range_history.message = Some((
+                true,
+                "that repository is no longer in the workspace".to_owned(),
+            ));
+            return;
+        };
+        let oid = commit.oid.clone();
+        self.range_history.view = None;
+        self.locate_graph_commit(owner, oid);
     }
 
     pub fn move_range_history_field(&mut self, delta: isize) {
@@ -2190,12 +2443,6 @@ impl App {
         if let Some(form) = self.range_history.form.as_mut() {
             form.edit(input);
         }
-    }
-
-    pub fn close_range_history(&mut self) {
-        self.range_history.form = None;
-        self.range_history.message = None;
-        self.range_history.visible = false;
     }
 
     /// Validates the form and starts the concurrent workspace-wide query.
@@ -2246,6 +2493,7 @@ impl App {
                 project_id: project.id.clone(),
                 project_name: project.name.clone(),
                 commits: Vec::new(),
+                capped: false,
                 error: None,
             })
             .collect();
@@ -2253,8 +2501,11 @@ impl App {
         self.range_history.reported = 0;
         self.range_history.loading = true;
         self.range_history.ran = true;
-        self.range_history.visible = true;
+        self.range_history.rows.clear();
         self.range_history.selected = 0;
+        // A new result set invalidates the commit opened from the old one.
+        self.range_history.view = None;
+        self.screen = Screen::RangeHistory;
         range_history::spawn_range_history(
             projects,
             spec,
@@ -2276,12 +2527,14 @@ impl App {
             .find(|value| value.project_id == result.project_id)
         {
             match result.result {
-                Ok(commits) => {
-                    slot.commits = commits;
+                Ok(range) => {
+                    slot.commits = range.commits;
+                    slot.capped = range.capped;
                     slot.error = None;
                 }
                 Err(error) => {
                     slot.commits = Vec::new();
+                    slot.capped = false;
                     slot.error = Some(error.to_string());
                 }
             }
@@ -2290,32 +2543,55 @@ impl App {
         if self.range_history.reported >= self.range_history.expected {
             self.range_history.loading = false;
         }
+        self.rebuild_range_history_rows();
     }
 
-    /// Commits that matched, newest first, paired with their project label.
-    pub fn range_history_rows(&self) -> Vec<(String, String, &Commit)> {
+    /// Rebuilds the newest-first (project, commit) index. Sorting happens only
+    /// when a result arrives, never per frame.
+    pub fn rebuild_range_history_rows(&mut self) {
         let mut rows = self
             .range_history
             .projects
             .iter()
-            .flat_map(|project| {
-                project.commits.iter().map(|commit| {
-                    (
-                        project.project_name.clone(),
-                        short_oid(&commit.oid).to_owned(),
-                        commit,
-                    )
-                })
+            .enumerate()
+            .flat_map(|(project_index, project)| {
+                (0..project.commits.len()).map(move |commit_index| (project_index, commit_index))
             })
             .collect::<Vec<_>>();
+        let projects = &self.range_history.projects;
         rows.sort_by(|left, right| {
-            right
-                .2
+            let left_commit = &projects[left.0].commits[left.1];
+            let right_commit = &projects[right.0].commits[right.1];
+            right_commit
                 .timestamp
-                .cmp(&left.2.timestamp)
-                .then_with(|| left.0.cmp(&right.0))
+                .cmp(&left_commit.timestamp)
+                .then_with(|| {
+                    projects[left.0]
+                        .project_name
+                        .cmp(&projects[right.0].project_name)
+                })
         });
-        rows
+        self.range_history.rows = rows;
+        if self.range_history.selected >= self.range_history.rows.len() {
+            self.range_history.selected = self.range_history.rows.len().saturating_sub(1);
+        }
+    }
+
+    /// Commit matched by a flattened result row index, if it exists.
+    pub fn range_history_row(&self, index: usize) -> Option<(String, String, &Commit)> {
+        let (project_index, commit_index) = *self.range_history.rows.get(index)?;
+        let project = self.range_history.projects.get(project_index)?;
+        let commit = project.commits.get(commit_index)?;
+        Some((
+            project.project_name.clone(),
+            short_oid(&commit.oid).to_owned(),
+            commit,
+        ))
+    }
+
+    /// Total number of matched commits across every repository.
+    pub fn range_history_total(&self) -> usize {
+        self.range_history.rows.len()
     }
 
     pub fn range_history_message(&self) -> Option<(bool, String)> {
@@ -2325,7 +2601,7 @@ impl App {
         if self.range_history.loading {
             return None;
         }
-        if self.range_history.ran && self.range_history_rows().is_empty() {
+        if self.range_history.ran && self.range_history.rows.is_empty() {
             return Some((false, "no commits in range".to_owned()));
         }
         None
@@ -2333,13 +2609,21 @@ impl App {
 
     /// Moves the result-list selection, clamped to the current row count.
     pub fn move_range_history_selection(&mut self, delta: isize) {
-        let len = self.range_history_rows().len();
+        let len = self.range_history.rows.len();
         if len == 0 {
             self.range_history.selected = 0;
             return;
         }
         let current = self.range_history.selected.min(len - 1) as isize;
         self.range_history.selected = (current + delta).clamp(0, len as isize - 1) as usize;
+    }
+
+    pub fn range_history_first(&mut self) {
+        self.range_history.selected = 0;
+    }
+
+    pub fn range_history_last(&mut self) {
+        self.range_history.selected = self.range_history.rows.len().saturating_sub(1);
     }
 
     pub fn graph_objects(&self) -> Vec<GraphObject> {
@@ -2610,6 +2894,8 @@ impl App {
             Screen::Graph => self.graph.as_ref().map(|graph| graph.project.clone()),
             Screen::Changes => self.changes.as_ref().map(|changes| changes.project.clone()),
             Screen::Repository => self.repository.as_ref().map(|state| state.project.clone()),
+            // The range page has no single repository; Esc there returns first.
+            Screen::RangeHistory => return,
         };
         if let Some(project) = project {
             self.screen = Screen::Changes;
@@ -3769,7 +4055,7 @@ impl App {
                 .changes
                 .as_ref()
                 .map(|changes| (changes.project.clone(), changes.operation)),
-            Screen::Graph | Screen::Repository => None,
+            Screen::Graph | Screen::Repository | Screen::RangeHistory => None,
         };
         let Some((project, Some(operation))) = selected else {
             match origin {
@@ -3783,7 +4069,7 @@ impl App {
                         changes.message = Some((true, "No Git operation is active".to_owned()));
                     }
                 }
-                Screen::Graph | Screen::Repository => {}
+                Screen::Graph | Screen::Repository | Screen::RangeHistory => {}
             }
             return;
         };
@@ -3817,7 +4103,7 @@ impl App {
                 }
                 self.screen = Screen::Changes;
             }
-            Screen::Workspace | Screen::Repository => {
+            Screen::Workspace | Screen::Repository | Screen::RangeHistory => {
                 if let Some(state) = self.repository.as_mut() {
                     state.message = Some((is_error, message));
                 }
@@ -3833,6 +4119,8 @@ impl App {
             Screen::Graph => self.graph.as_ref().map(|state| state.project.clone()),
             Screen::Changes => self.changes.as_ref().map(|state| state.project.clone()),
             Screen::Repository => self.repository.as_ref().map(|state| state.project.clone()),
+            // The range page has no single repository; Esc there returns first.
+            Screen::RangeHistory => return,
         };
         if let Some(project) = project {
             self.screen = Screen::Repository;
@@ -4247,6 +4535,7 @@ impl App {
                             state.detail = detail;
                         }
                     }
+                    Screen::RangeHistory => {}
                 }
             }
             Err(error) => {
@@ -4280,6 +4569,7 @@ impl App {
                 }
             }
             Screen::Graph => self.screen = Screen::Workspace,
+            Screen::RangeHistory => self.close_range_history(),
             Screen::Changes => {
                 if let Some(changes) = self.changes.as_mut() {
                     if changes.confirmation.take().is_some() {
@@ -5239,7 +5529,6 @@ mod tests {
         app.open_range_history();
         assert!(app.paste_target_active());
         app.range_history.form = None;
-        app.range_history.visible = false;
         assert!(!app.paste_target_active());
     }
     #[tokio::test]
@@ -5381,6 +5670,7 @@ mod tests {
             form: None,
             message: None,
             selected_oid: None,
+            locate_oid: None,
             filter: GraphFilter::default(),
             filter_form: None,
             filter_error: None,
@@ -5483,6 +5773,7 @@ mod tests {
             form: None,
             message: None,
             selected_oid: None,
+            locate_oid: None,
             filter: GraphFilter::default(),
             filter_form: None,
             filter_error: None,
@@ -5631,6 +5922,7 @@ mod tests {
             form: None,
             message: None,
             selected_oid: None,
+            locate_oid: None,
             filter: GraphFilter {
                 branch: "feature".into(),
                 ..GraphFilter::default()
@@ -6192,7 +6484,10 @@ mod tests {
             generation,
             project_id: alpha.id.clone(),
             project_name: alpha.name.clone(),
-            result: Ok(vec![commit("aa11", 100, "alpha")]),
+            result: Ok(git::RangeLog {
+                commits: vec![commit("aa11", 100, "alpha")],
+                capped: false,
+            }),
         });
         assert!(app.range_history.loading);
         app.apply_range_history(RangeHistoryResult {
@@ -6204,9 +6499,11 @@ mod tests {
         // A per-repository failure is recorded without aborting the others, and
         // the loading flag clears once every repository has reported back.
         assert!(!app.range_history.loading);
-        let rows = app.range_history_rows();
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].0, "alpha");
+        assert_eq!(app.range_history_total(), 1);
+        assert_eq!(
+            app.range_history_row(0).map(|(project, _, _)| project),
+            Some("alpha".to_owned())
+        );
         let beta_state = app
             .range_history
             .projects
@@ -6234,34 +6531,327 @@ mod tests {
             generation: stale,
             project_id: alpha.id.clone(),
             project_name: alpha.name.clone(),
-            result: Ok(vec![Commit {
-                oid: "dead".into(),
-                parents: Vec::new(),
-                refs: Vec::new(),
-                author: "Ada".into(),
-                timestamp: 1,
-                subject: "stale".into(),
-                body: String::new(),
-            }]),
+            result: Ok(git::RangeLog {
+                commits: vec![Commit {
+                    oid: "dead".into(),
+                    parents: Vec::new(),
+                    refs: Vec::new(),
+                    author: "Ada".into(),
+                    timestamp: 1,
+                    subject: "stale".into(),
+                    body: String::new(),
+                }],
+                capped: false,
+            }),
         });
         assert!(app.range_history.projects[0].commits.is_empty());
+        assert_eq!(app.range_history_total(), 0);
     }
 
     #[tokio::test]
-    async fn range_history_overlay_closes_after_a_run() {
+    async fn range_history_page_opens_browses_and_returns() {
         let (mut app, _) = workspace_app();
-        assert!(!app.range_history_overlay_active());
+        assert_eq!(app.screen, Screen::Workspace);
 
+        // The first visit opens the filter form on its own page.
         app.open_range_history();
-        assert!(app.range_history_overlay_active());
+        assert_eq!(app.screen, Screen::RangeHistory);
+        assert!(app.range_history.form.is_some());
 
-        app.submit_range_history();
-        assert!(app.range_history_overlay_active());
-
-        // Closing must dismiss the results overlay even though the query already
-        // ran; otherwise the Workspace keys stay swallowed and the TUI hangs.
+        // Esc cancels the form but stays on the page.
         app.close_range_history();
-        assert!(!app.range_history_overlay_active());
+        assert_eq!(app.screen, Screen::RangeHistory);
+        assert!(app.range_history.form.is_none());
+
+        // A reopened form submits the query and stays on the page.
+        app.open_range_history_form();
+        app.submit_range_history();
         assert!(app.range_history.ran);
+        assert_eq!(app.screen, Screen::RangeHistory);
+
+        // With no form open, Esc returns to Workspace.
+        app.close_range_history();
+        assert_eq!(app.screen, Screen::Workspace);
+
+        // A later visit browses the cached results and `f` reopens the form.
+        app.open_range_history();
+        assert_eq!(app.screen, Screen::RangeHistory);
+        assert!(app.range_history.form.is_none());
+        app.open_range_history_form();
+        assert!(app.range_history.form.is_some());
+    }
+
+    #[tokio::test]
+    async fn range_history_rows_are_cached_newest_first_with_a_bounded_selection() {
+        let alpha = project("alpha");
+        let beta = project("beta");
+        let workspace = Workspace {
+            root: PathBuf::from("/tmp"),
+            kind: WorkspaceKind::Repo,
+            projects: vec![alpha.clone(), beta.clone()],
+        };
+        let mut app = App::new(workspace, 2);
+        app.run_range_history(RangeHistorySpec::default());
+        let generation = app.range_history.generation;
+        let commit = |oid: &str, timestamp: i64| Commit {
+            oid: oid.into(),
+            parents: Vec::new(),
+            refs: Vec::new(),
+            author: "Ada".into(),
+            timestamp,
+            subject: oid.into(),
+            body: String::new(),
+        };
+        app.apply_range_history(RangeHistoryResult {
+            generation,
+            project_id: alpha.id.clone(),
+            project_name: alpha.name.clone(),
+            result: Ok(git::RangeLog {
+                commits: vec![commit("aa11", 100), commit("aa22", 300)],
+                capped: false,
+            }),
+        });
+        app.apply_range_history(RangeHistoryResult {
+            generation,
+            project_id: beta.id.clone(),
+            project_name: beta.name.clone(),
+            result: Ok(git::RangeLog {
+                commits: vec![commit("bb11", 200)],
+                capped: true,
+            }),
+        });
+
+        // Merged ordering is newest first across repositories.
+        let order = (0..app.range_history_total())
+            .map(|index| app.range_history_row(index).unwrap().1)
+            .collect::<Vec<_>>();
+        assert_eq!(order, vec!["aa22", "bb11", "aa11"]);
+        assert!(app.range_history.projects[1].capped);
+
+        // Selection moves within the cached rows and clamps at both ends.
+        app.range_history_first();
+        app.move_range_history_selection(-1);
+        assert_eq!(app.range_history.selected, 0);
+        app.move_range_history_selection(1);
+        assert_eq!(app.range_history.selected, 1);
+        app.range_history_last();
+        app.range_history_last();
+        assert_eq!(app.range_history.selected, 2);
+        app.move_range_history_selection(5);
+        assert_eq!(app.range_history.selected, 2);
+    }
+
+    #[tokio::test]
+    async fn range_history_opens_a_commit_view_with_its_patch() {
+        let alpha = project("alpha");
+        let workspace = Workspace {
+            root: PathBuf::from("/tmp"),
+            kind: WorkspaceKind::Repo,
+            projects: vec![alpha.clone()],
+        };
+        let mut app = App::new(workspace, 1);
+        app.run_range_history(RangeHistorySpec::default());
+        let generation = app.range_history.generation;
+        app.apply_range_history(RangeHistoryResult {
+            generation,
+            project_id: alpha.id.clone(),
+            project_name: alpha.name.clone(),
+            result: Ok(git::RangeLog {
+                commits: vec![Commit {
+                    oid: "aa11".into(),
+                    parents: vec!["pp00".into()],
+                    refs: Vec::new(),
+                    author: "Ada".into(),
+                    timestamp: 100,
+                    subject: "fix the widget".into(),
+                    body: "fix the widget\n\nlonger explanation".into(),
+                }],
+                capped: false,
+            }),
+        });
+
+        // Enter opens the view and requests the patch asynchronously.
+        app.open_range_commit_view();
+        let view = app.range_history.view.as_ref().expect("view opened");
+        assert_eq!(view.oid, "aa11");
+        assert_eq!(view.project.name, "alpha");
+        assert!(view.loading);
+        let view_generation = view.generation;
+
+        // A stale generation or a different OID never lands in the view.
+        app.apply_range_commit_patch(RangeCommitResult {
+            generation: view_generation + 1,
+            oid: "aa11".into(),
+            result: Ok("stale\n".into()),
+        });
+        assert!(app.range_history.view.as_ref().unwrap().loading);
+        app.apply_range_commit_patch(RangeCommitResult {
+            generation: view_generation,
+            oid: "bb22".into(),
+            result: Ok("mismatch\n".into()),
+        });
+        assert!(app.range_history.view.as_ref().unwrap().loading);
+
+        let patch = " s.txt | 1 +\ndiff --git a/s.txt b/s.txt\n@@ -0,0 +1 @@\n+s\n";
+        app.apply_range_commit_patch(RangeCommitResult {
+            generation: view_generation,
+            oid: "aa11".into(),
+            result: Ok(patch.into()),
+        });
+        let view = app.range_history.view.as_ref().unwrap();
+        assert!(!view.loading);
+        assert_eq!(view.text, patch);
+        assert!(view.line_count >= 4);
+        assert_eq!(app.range_history.view.as_ref().unwrap().scroll, 0);
+
+        // Scrolling is bounded by the patch length and works in both directions.
+        app.scroll_range_commit_view(-5);
+        assert_eq!(app.range_history.view.as_ref().unwrap().scroll, 0);
+        app.scroll_range_commit_view(2);
+        assert_eq!(app.range_history.view.as_ref().unwrap().scroll, 2);
+        app.scroll_range_commit_view(1000);
+        let line_count = app.range_history.view.as_ref().unwrap().line_count;
+        assert_eq!(
+            app.range_history.view.as_ref().unwrap().scroll,
+            line_count - 1
+        );
+
+        // Esc closes the view first and keeps the page open.
+        let return_screen = app.range_history.return_screen;
+        app.close_range_history();
+        assert!(app.range_history.view.is_none());
+        assert_eq!(app.screen, Screen::RangeHistory);
+        assert_eq!(app.range_history.return_screen, return_screen);
+        // A second Esc leaves the page.
+        app.close_range_history();
+        assert_eq!(app.screen, Screen::Workspace);
+    }
+
+    #[tokio::test]
+    async fn locate_range_history_commit_selects_it_in_the_owning_graph() {
+        let alpha = project("alpha");
+        let beta = project("beta");
+        let workspace = Workspace {
+            root: PathBuf::from("/tmp"),
+            kind: WorkspaceKind::Repo,
+            projects: vec![alpha.clone(), beta.clone()],
+        };
+        let mut app = App::new(workspace, 2);
+        app.run_range_history(RangeHistorySpec::default());
+        let generation = app.range_history.generation;
+        let commit = |oid: &str, timestamp: i64| Commit {
+            oid: oid.into(),
+            parents: Vec::new(),
+            refs: Vec::new(),
+            author: "Ada".into(),
+            timestamp,
+            subject: oid.into(),
+            body: String::new(),
+        };
+        app.apply_range_history(RangeHistoryResult {
+            generation,
+            project_id: alpha.id.clone(),
+            project_name: alpha.name.clone(),
+            result: Ok(git::RangeLog {
+                commits: vec![commit("aa11", 100)],
+                capped: false,
+            }),
+        });
+        app.apply_range_history(RangeHistoryResult {
+            generation,
+            project_id: beta.id.clone(),
+            project_name: beta.name.clone(),
+            result: Ok(git::RangeLog {
+                commits: vec![commit("bb22", 200)],
+                capped: false,
+            }),
+        });
+
+        // The newest row belongs to beta; locate must load beta's graph only.
+        app.range_history_first();
+        app.locate_range_history_commit();
+        assert_eq!(app.screen, Screen::Graph);
+        let graph = app.graph.as_ref().expect("graph loaded");
+        assert_eq!(graph.project.id, beta.id);
+        assert_eq!(graph.locate_oid.as_deref(), Some("bb22"));
+
+        // Once the history arrives the target commit becomes the selection.
+        let graph_generation = graph.generation;
+        app.apply_graph(GraphResult {
+            project_id: beta.id.clone(),
+            generation: graph_generation,
+            result: Ok(vec![
+                commit("bb22", 200),
+                commit("bb11", 100),
+                commit("aa11", 50),
+            ]),
+        });
+        let graph = app.graph.as_ref().unwrap();
+        assert!(graph.locate_oid.is_none(), "locate request is consumed");
+        assert_eq!(graph.commits[graph.selected].oid, "bb22");
+    }
+
+    #[tokio::test]
+    async fn locate_reveals_the_commit_and_reports_one_that_is_gone() {
+        let alpha = project("alpha");
+        let workspace = Workspace {
+            root: PathBuf::from("/tmp"),
+            kind: WorkspaceKind::Repo,
+            projects: vec![alpha.clone()],
+        };
+        let mut app = App::new(workspace, 1);
+        app.run_range_history(RangeHistorySpec::default());
+        let generation = app.range_history.generation;
+        let commit = |oid: &str, timestamp: i64| Commit {
+            oid: oid.into(),
+            parents: Vec::new(),
+            refs: Vec::new(),
+            author: "Ada".into(),
+            timestamp,
+            subject: oid.into(),
+            body: String::new(),
+        };
+        app.apply_range_history(RangeHistoryResult {
+            generation,
+            project_id: alpha.id.clone(),
+            project_name: alpha.name.clone(),
+            result: Ok(git::RangeLog {
+                commits: vec![commit("aa11", 100), commit("cc33", 300)],
+                capped: false,
+            }),
+        });
+
+        // A Graph filter that hides the located commit is cleared so the
+        // commit is actually revealed instead of silently staying invisible.
+        app.range_history_first();
+        app.locate_range_history_commit();
+        let graph_generation = app.graph.as_ref().unwrap().generation;
+        if let Some(graph) = app.graph.as_mut() {
+            // Matches aa11 only, so the located cc33 is filtered out.
+            graph.filter.query = "aa11".into();
+        }
+        app.apply_graph(GraphResult {
+            project_id: alpha.id.clone(),
+            generation: graph_generation,
+            result: Ok(vec![commit("aa11", 100), commit("cc33", 300)]),
+        });
+        let graph = app.graph.as_ref().unwrap();
+        assert!(!graph.filter.is_active(), "filter cleared to reveal it");
+        assert_eq!(graph.commits[graph.selected].oid, "cc33");
+        assert!(graph.message.as_ref().is_some_and(|(error, _)| !error));
+
+        // A commit that no longer exists reports an error instead of moving
+        // the selection somewhere arbitrary.
+        app.screen = Screen::RangeHistory;
+        app.locate_graph_commit(alpha.clone(), "deadbeef".into());
+        let graph_generation = app.graph.as_ref().unwrap().generation;
+        app.apply_graph(GraphResult {
+            project_id: alpha.id.clone(),
+            generation: graph_generation,
+            result: Ok(vec![commit("aa11", 100)]),
+        });
+        let graph = app.graph.as_ref().unwrap();
+        assert!(graph.locate_oid.is_none());
+        assert!(graph.message.as_ref().is_some_and(|(error, _)| *error));
     }
 }

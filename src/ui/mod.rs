@@ -21,6 +21,7 @@ pub fn render(frame: &mut Frame, app: &App) {
         Screen::Graph => graph::render(frame, app),
         Screen::Changes => changes::render(frame, app),
         Screen::Repository => repository::render(frame, app),
+        Screen::RangeHistory => range_history::render(frame, app),
     }
     if app.help {
         render_help(frame, app);
@@ -58,7 +59,7 @@ fn render_help(frame: &mut Frame, app: &App) {
             Line::raw("z/s/u           储藏 / 暂存 / 取消暂存"),
             Line::raw("m/a/w           提交 / 修订 HEAD / 改写 HEAD；Ctrl-Enter/S 确认"),
             Line::raw("t / p           Git 配置模板 / 打开预填 refspec 表单"),
-            Line::raw("H               工作区时间段提交检索（Author / Query）"),
+            Line::raw("H               工作区时间段提交检索；列表 Enter 看详情、l 定位"),
             Line::raw("r               刷新当前页面"),
             Line::raw("Esc / q / ?     返回 / 退出 / 切换帮助"),
             Line::raw(""),
@@ -88,7 +89,7 @@ fn render_help(frame: &mut Frame, app: &App) {
             Line::raw("z/s/u          Stash files / Stage / Unstage in Changes"),
             Line::raw("m/a/w          Commit / Amend HEAD / Reword HEAD; Ctrl-Enter/S submit"),
             Line::raw("t / p          Commit template / prefilled refspec push form"),
-            Line::raw("H              Workspace commit range search (author / query)"),
+            Line::raw("H              Workspace range search; Enter detail, l locate in graph"),
             Line::raw("r              Refresh current page"),
             Line::raw("Esc / q / ?    Back / quit Workspace / toggle help"),
             Line::raw(""),
@@ -587,6 +588,7 @@ mod tests {
             form: None,
             message: None,
             selected_oid: None,
+            locate_oid: None,
             filter: crate::app::state::GraphFilter::default(),
             filter_form: None,
             filter_error: None,
@@ -640,6 +642,7 @@ mod tests {
             form: None,
             message: None,
             selected_oid: None,
+            locate_oid: None,
             filter: crate::app::state::GraphFilter::default(),
             filter_form: None,
             filter_error: None,
@@ -699,6 +702,7 @@ mod tests {
             form: None,
             message: None,
             selected_oid: None,
+            locate_oid: None,
             filter: crate::app::state::GraphFilter::default(),
             filter_form: None,
             filter_error: None,
@@ -773,6 +777,7 @@ mod tests {
             form: None,
             message: None,
             selected_oid: None,
+            locate_oid: None,
             filter: GraphFilter {
                 branch: "main".into(),
                 query: String::new(),
@@ -874,6 +879,7 @@ mod tests {
             form: None,
             message: None,
             selected_oid: None,
+            locate_oid: None,
             filter: crate::app::state::GraphFilter::default(),
             filter_form: None,
             filter_error: None,
@@ -1612,8 +1618,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn renders_range_history_form_and_results_at_supported_sizes() {
+    #[tokio::test]
+    async fn renders_range_history_form_and_results_at_supported_sizes() {
         let mut app = app();
         app.open_range_history();
         for (width, height) in [(80, 24), (120, 40)] {
@@ -1623,10 +1629,8 @@ mod tests {
             assert!(compact_text(&text).contains("Query"));
         }
 
-        // Simulate the post-run state: the form is gone but the results overlay
-        // is still open and owns the Workspace screen.
+        // Simulate the post-run state: the page shows the merged timeline.
         app.range_history.form = None;
-        app.range_history.visible = true;
         app.range_history.spec = crate::domain::RangeHistorySpec::default();
         app.range_history.ran = true;
         let project = app.workspace.projects[0].clone();
@@ -1642,12 +1646,33 @@ mod tests {
                 subject: "fix the widget".into(),
                 body: String::new(),
             }],
+            capped: false,
             error: None,
         }];
+        app.rebuild_range_history_rows();
         for (width, height) in [(80, 24), (120, 40)] {
             let text = draw_text(&app, width, height);
             assert!(text.contains("fix the widget"));
             assert!(text.contains("abcdef12"));
+            assert!(compact_text(&text).contains("Locate"));
+        }
+
+        // The commit view replaces the table and shows message plus patch.
+        app.open_range_commit_view();
+        let view = app.range_history.view.as_mut().unwrap();
+        let generation = view.generation;
+        let oid = view.oid.clone();
+        app.apply_range_commit_patch(crate::app::state::RangeCommitResult {
+            generation,
+            oid,
+            result: Ok(
+                " a.txt | 1 +\n\ndiff --git a/a.txt b/a.txt\n@@ -0,0 +1 @@\n+added line\n".into(),
+            ),
+        });
+        for (width, height) in [(80, 24), (120, 40)] {
+            let text = draw_text(&app, width, height);
+            assert!(text.contains("added line"));
+            assert!(text.contains("Ada"));
         }
     }
 }
