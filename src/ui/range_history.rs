@@ -4,7 +4,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table, Wrap};
 use ratatui::Frame;
 
-use crate::app::state::{App, RangeHistoryState};
+use crate::app::state::{App, RangeHistoryGroup, RangeHistoryState};
 
 /// Renders the workspace range-query page: the filter form, or the merged
 /// cross-repository commit timeline with the same table language as the Graph
@@ -286,103 +286,238 @@ fn render_results(frame: &mut Frame, app: &App, state: &RangeHistoryState, area:
         return;
     }
 
-    // Only the rows inside the viewport are built; the cache keeps the merged
-    // ordering so scrolling never re-sorts.
-    let inner_width = area.width.saturating_sub(2) as usize;
+    let groups = app.range_history_groups();
+    // Each group is a two-line header plus one line per matched commit, so
+    // the whole body is a flat list of unit-height display lines.
+    let total_lines = groups
+        .iter()
+        .map(|group| RangeHistoryGroup::HEADER_HEIGHT + group.count)
+        .sum::<usize>();
     let selected = state.selected.min(total - 1);
-    let row_budget = usize::from(area.height.saturating_sub(3)).max(1);
-    let start = viewport_start(selected, row_budget, total);
-    let subject_width = subject_column_width(inner_width);
-
-    let header = Row::new([
-        Cell::from(""),
-        Cell::from(app.language.label("Project")),
-        Cell::from(app.language.label("Commit")),
-        Cell::from(app.language.label("Date")),
-        Cell::from(app.language.label("Author")),
-        Cell::from(app.language.label("Subject")),
-    ])
-    .style(
-        Style::default()
-            .fg(Color::Cyan)
-            .add_modifier(Modifier::BOLD),
-    );
-
-    let end = (start + row_budget).min(total);
-    let rows = (start..end)
-        .filter_map(|index| {
-            let (project, oid, commit) = app.range_history_row(index)?;
-            let is_selected = index == selected;
-            let style = if is_selected {
-                super::selection_style()
-            } else {
-                Style::default()
-            };
-            Some(
-                Row::new([
-                    Cell::from(Line::styled(
-                        if is_selected { ">" } else { " " },
-                        Style::default()
-                            .fg(super::selection_fg(is_selected, Color::Cyan))
-                            .add_modifier(Modifier::BOLD),
-                    )),
-                    Cell::from(Line::styled(
-                        super::text::truncate(&project, 18),
-                        Style::default().fg(super::selection_fg(is_selected, Color::Gray)),
-                    )),
-                    Cell::from(Line::styled(
-                        oid,
-                        Style::default().fg(super::selection_fg(is_selected, Color::LightBlue)),
-                    )),
-                    Cell::from(Line::styled(
-                        super::graph::calendar_date(commit.timestamp),
-                        Style::default().fg(super::selection_fg(is_selected, Color::Gray)),
-                    )),
-                    Cell::from(Line::styled(
-                        super::text::truncate(&commit.author.replace(['\n', '\r'], " "), 14),
-                        Style::default().fg(super::selection_fg(is_selected, Color::Gray)),
-                    )),
-                    Cell::from(Line::styled(
-                        super::text::truncate(
-                            &commit.subject.replace(['\n', '\r'], " "),
-                            subject_width,
-                        ),
-                        Style::default().fg(super::selection_fg(is_selected, Color::White)),
-                    )),
-                ])
-                .style(style),
-            )
-        })
-        .collect::<Vec<_>>();
-
-    let widths = [
-        Constraint::Length(1),
-        Constraint::Length(18),
-        Constraint::Length(9),
-        Constraint::Length(10),
-        Constraint::Length(14),
-        Constraint::Min(10),
-    ];
     let title = format!(
-        " {} ({}-{}/{}){} ",
+        " {} ({}){} ",
         app.language.text("Range history", "时间范围检索"),
-        start + 1,
-        end,
         total,
         result_notes(error_count, capped_count)
     );
+    let block = Block::default()
+        .title(title)
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::DarkGray));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.height == 0 {
+        return;
+    }
+
+    // The column header stays pinned above the scrolling grouped body and no
+    // longer needs a Project column: the owning repository is the group name.
+    let header_area = Rect { height: 1, ..inner };
+    let inner_width = inner.width as usize;
+    let subject_width = subject_column_width(inner_width);
     frame.render_widget(
-        Table::new(rows, widths)
-            .header(header)
-            .column_spacing(1)
-            .block(
-                Block::default()
-                    .title(title)
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(Color::DarkGray)),
-            ),
-        area,
+        Paragraph::new(columns_line(
+            " ",
+            app.language.label("Commit"),
+            app.language.label("Date"),
+            app.language.label("Author"),
+            app.language.label("Subject"),
+            subject_width,
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )),
+        header_area,
     );
+    let body = Rect {
+        y: inner.y + 1,
+        height: inner.height.saturating_sub(1),
+        ..inner
+    };
+    if body.height == 0 {
+        return;
+    }
+
+    // Only the display lines inside the viewport are built; the cached order
+    // means scrolling never re-sorts or re-groups.
+    let selected_line = display_line_of(groups, selected);
+    let start = viewport_start(selected_line, usize::from(body.height), total_lines);
+    let end = (start + usize::from(body.height)).min(total_lines);
+
+    let mut cursor_y = body.y;
+    let mut line = 0usize;
+    for group in groups {
+        let group_lines = RangeHistoryGroup::HEADER_HEIGHT + group.count;
+        let group_start = line;
+        let group_end = line + group_lines;
+        line = group_end;
+        if group_end <= start {
+            continue;
+        }
+        if group_start >= end {
+            break;
+        }
+        let visible_start = start.max(group_start);
+        let visible_end = end.min(group_end);
+
+        let header_start = visible_start.max(group_start);
+        let header_end = visible_end.min(group_start + RangeHistoryGroup::HEADER_HEIGHT);
+        if header_end > header_start {
+            let height = (header_end - header_start) as u16;
+            let rect = Rect {
+                y: cursor_y,
+                height,
+                ..body
+            };
+            let mut lines = Vec::new();
+            for header_line in header_start..header_end {
+                if header_line == group_start {
+                    let count = if group.count == 1 {
+                        "1 commit".to_owned()
+                    } else {
+                        format!("{} commits", group.count)
+                    };
+                    let mut spans = vec![Span::styled(
+                        super::text::truncate(&group.name, inner_width),
+                        Style::default()
+                            .fg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD),
+                    )];
+                    spans.push(Span::styled(
+                        format!("  ({count})"),
+                        Style::default().fg(Color::DarkGray),
+                    ));
+                    if group.capped {
+                        spans.push(Span::styled(
+                            app.language.text("  capped", "  已截断"),
+                            Style::default().fg(Color::Yellow),
+                        ));
+                    }
+                    lines.push(Line::from(spans));
+                } else {
+                    // The directory gets its own full-width line so it is
+                    // never squeezed into a truncated table column; text
+                    // helpers keep control characters visible.
+                    lines.push(Line::styled(
+                        super::text::truncate(&group.directory, inner_width),
+                        Style::default().fg(Color::DarkGray),
+                    ));
+                }
+            }
+            frame.render_widget(Paragraph::new(lines), rect);
+            cursor_y += height;
+        }
+
+        let commit_start = visible_start.max(group_start + RangeHistoryGroup::HEADER_HEIGHT);
+        if visible_end > commit_start {
+            let height = (visible_end - commit_start) as u16;
+            let rect = Rect {
+                y: cursor_y,
+                height,
+                ..body
+            };
+            let rows = (commit_start - group_start - RangeHistoryGroup::HEADER_HEIGHT
+                ..commit_start - group_start - RangeHistoryGroup::HEADER_HEIGHT
+                    + usize::from(height))
+                .filter_map(|offset| {
+                    let index = group.first_row + offset;
+                    let (_, oid, commit) = app.range_history_row(index)?;
+                    let is_selected = index == selected;
+                    let style = if is_selected {
+                        super::selection_style()
+                    } else {
+                        Style::default()
+                    };
+                    Some(
+                        Row::new([
+                            Cell::from(Line::styled(
+                                if is_selected { ">" } else { " " },
+                                Style::default()
+                                    .fg(super::selection_fg(is_selected, Color::Cyan))
+                                    .add_modifier(Modifier::BOLD),
+                            )),
+                            Cell::from(Line::styled(
+                                oid,
+                                Style::default()
+                                    .fg(super::selection_fg(is_selected, Color::LightBlue)),
+                            )),
+                            Cell::from(Line::styled(
+                                super::graph::calendar_date(commit.timestamp),
+                                Style::default().fg(super::selection_fg(is_selected, Color::Gray)),
+                            )),
+                            Cell::from(Line::styled(
+                                super::text::truncate(
+                                    &commit.author.replace(['\n', '\r'], " "),
+                                    14,
+                                ),
+                                Style::default().fg(super::selection_fg(is_selected, Color::Gray)),
+                            )),
+                            Cell::from(Line::styled(
+                                super::text::truncate(
+                                    &commit.subject.replace(['\n', '\r'], " "),
+                                    subject_width,
+                                ),
+                                Style::default().fg(super::selection_fg(is_selected, Color::White)),
+                            )),
+                        ])
+                        .style(style),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let widths = [
+                Constraint::Length(1),
+                Constraint::Length(9),
+                Constraint::Length(10),
+                Constraint::Length(14),
+                Constraint::Min(10),
+            ];
+            frame.render_widget(Table::new(rows, widths).column_spacing(1), rect);
+            cursor_y += height;
+        }
+    }
+}
+
+/// Display line of a flattened row index inside the grouped body.
+fn display_line_of(groups: &[RangeHistoryGroup], row_index: usize) -> usize {
+    let mut line = 0;
+    let mut row = 0;
+    for group in groups {
+        if row_index < row + group.count {
+            return line + RangeHistoryGroup::HEADER_HEIGHT + (row_index - row);
+        }
+        row += group.count;
+        line += RangeHistoryGroup::HEADER_HEIGHT + group.count;
+    }
+    line.saturating_sub(1)
+}
+
+/// Builds the pinned column header so it lines up with the grouped table
+/// columns (1 marker, 9 commit, 10 date, 14 author, then subject).
+fn columns_line(
+    marker: &str,
+    oid: &str,
+    date: &str,
+    author: &str,
+    subject: &str,
+    subject_width: usize,
+    style: Style,
+) -> Line<'static> {
+    let mut spans = Vec::new();
+    let mut push = |value: &str, width: usize| {
+        let value = super::text::truncate(value, width);
+        let padding = width.saturating_sub(super::text::display_width(&value));
+        spans.push(Span::styled(value, style));
+        spans.push(Span::raw(" ".repeat(padding + 1)));
+    };
+    push(marker, 1);
+    push(oid, 9);
+    push(date, 10);
+    push(author, 14);
+    spans.push(Span::styled(
+        super::text::truncate(subject, subject_width),
+        style,
+    ));
+    Line::from(spans)
 }
 
 fn results_block(
@@ -444,8 +579,8 @@ fn viewport_start(selected: usize, budget: usize, total: usize) -> usize {
 }
 
 fn subject_column_width(width: usize) -> usize {
-    // 1 marker + 18 project + 9 commit + 10 date + 14 author + separators.
-    width.saturating_sub(1 + 18 + 9 + 10 + 14 + 6).max(8)
+    // 1 marker + 9 commit + 10 date + 14 author + separators.
+    width.saturating_sub(1 + 9 + 10 + 14 + 5).max(8)
 }
 
 #[cfg(test)]
@@ -472,5 +607,23 @@ mod tests {
         assert_eq!(color_at(4), Some(Color::Cyan));
         assert_eq!(color_at(5), Some(Color::Green));
         assert_eq!(color_at(6), Some(Color::Red));
+    }
+
+    #[test]
+    fn display_lines_account_for_group_headers() {
+        let group = |name: &str, count: usize, first_row: usize| RangeHistoryGroup {
+            project_index: 0,
+            name: name.to_owned(),
+            directory: format!("/tmp/{name}"),
+            capped: false,
+            count,
+            first_row,
+        };
+        let groups = vec![group("alpha", 2, 0), group("beta", 1, 2)];
+
+        // Two header lines precede each group's commit rows.
+        assert_eq!(display_line_of(&groups, 0), 2);
+        assert_eq!(display_line_of(&groups, 1), 3);
+        assert_eq!(display_line_of(&groups, 2), 6);
     }
 }

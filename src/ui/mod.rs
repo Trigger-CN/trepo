@@ -1650,11 +1650,49 @@ mod tests {
             error: None,
         }];
         app.rebuild_range_history_rows();
+        // A second repository proves both group headers are laid out with the
+        // name and the full directory on their own lines.
+        let second = Project {
+            id: ProjectId(PathBuf::from("/tmp/demo/vendor/long-module-name")),
+            name: "platform/second".into(),
+            path: PathBuf::from("/tmp/demo/vendor/long-module-name"),
+            relative_path: PathBuf::from("vendor/long-module-name"),
+        };
+        app.workspace.projects.push(second.clone());
+        app.range_history
+            .projects
+            .push(crate::domain::ProjectRangeHistory {
+                project_id: second.id.clone(),
+                project_name: second.name.clone(),
+                commits: vec![Commit {
+                    oid: "bb22bb22".into(),
+                    parents: Vec::new(),
+                    refs: Vec::new(),
+                    author: "Bo".into(),
+                    timestamp: 1_600_000_000,
+                    subject: "tune the widget".into(),
+                    body: String::new(),
+                }],
+                capped: true,
+                error: None,
+            });
+        app.rebuild_range_history_rows();
+        assert_eq!(app.range_history_groups().len(), 2);
         for (width, height) in [(80, 24), (120, 40)] {
             let text = draw_text(&app, width, height);
-            assert!(text.contains("fix the widget"));
-            assert!(text.contains("abcdef12"));
-            assert!(compact_text(&text).contains("Locate"));
+            for expected in [
+                "platform/demo",
+                "/tmp/demo",
+                "platform/second",
+                "/tmp/demo/vendor/long-module-name",
+                "tune the widget",
+                "capped",
+            ] {
+                assert!(
+                    text.contains(expected),
+                    "{expected:?} missing at {width}x{height}:\n{text}"
+                );
+            }
         }
 
         // The commit view replaces the table and shows message plus patch.

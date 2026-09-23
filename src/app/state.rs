@@ -1057,14 +1057,42 @@ pub struct RangeHistoryState {
     /// even when a repository legitimately matches nothing.
     pub expected: usize,
     pub reported: usize,
-    /// Flat (project index, commit index) table ordered newest first. Rebuilt
-    /// only when results change, so rendering never re-sorts thousands of
-    /// commits on every frame.
+    /// Flat (project index, commit index) table ordered by repository then
+    /// newest first. Rebuilt only when results arrive, never per frame.
     rows: Vec<(usize, usize)>,
+    /// Repository groups in workspace order. Each group owns a contiguous
+    /// slice of `rows` plus the display-line layout its header occupies.
+    groups: Vec<RangeHistoryGroup>,
     pub message: Option<(bool, String)>,
     /// Commit opened from the list with `Enter`; while set the page shows the
-    /// commit instead of the table.
+    /// commit instead of the grouped table.
     pub view: Option<RangeCommitView>,
+}
+
+/// One repository block on the range page: a two-line header (name, then
+/// directory) followed by that repository's matched commits.
+#[derive(Debug)]
+pub struct RangeHistoryGroup {
+    pub project_index: usize,
+    pub name: String,
+    /// Workspace-relative project directory, shown on its own line.
+    pub directory: String,
+    pub capped: bool,
+    /// Number of matched commits in this group.
+    pub count: usize,
+    /// Index of this group's first commit in [`RangeHistoryState::rows`].
+    pub first_row: usize,
+}
+
+impl RangeHistoryGroup {
+    /// Header display lines: one for the name, one for the directory, so
+    /// neither is squeezed into a truncated table column.
+    pub const HEADER_HEIGHT: usize = 2;
+
+    /// This group's rows as a contiguous range of the shared row index.
+    pub fn row_range(&self) -> std::ops::Range<usize> {
+        self.first_row..self.first_row + self.count
+    }
 }
 
 impl Default for RangeHistoryState {
@@ -1081,6 +1109,7 @@ impl Default for RangeHistoryState {
             expected: 0,
             reported: 0,
             rows: Vec::new(),
+            groups: Vec::new(),
             message: None,
             view: None,
         }
@@ -2546,35 +2575,64 @@ impl App {
         self.rebuild_range_history_rows();
     }
 
-    /// Rebuilds the newest-first (project, commit) index. Sorting happens only
-    /// when a result arrives, never per frame.
+    /// Rebuilds the grouped row index: repositories in workspace order, each
+    /// with its own newest-first commits. Sorting happens only when a result
+    /// arrives, never per frame.
     pub fn rebuild_range_history_rows(&mut self) {
-        let mut rows = self
-            .range_history
-            .projects
-            .iter()
-            .enumerate()
-            .flat_map(|(project_index, project)| {
-                (0..project.commits.len()).map(move |commit_index| (project_index, commit_index))
-            })
-            .collect::<Vec<_>>();
-        let projects = &self.range_history.projects;
-        rows.sort_by(|left, right| {
-            let left_commit = &projects[left.0].commits[left.1];
-            let right_commit = &projects[right.0].commits[right.1];
-            right_commit
-                .timestamp
-                .cmp(&left_commit.timestamp)
-                .then_with(|| {
-                    projects[left.0]
-                        .project_name
-                        .cmp(&projects[right.0].project_name)
-                })
-        });
+        let mut rows = Vec::new();
+        let mut groups = Vec::new();
+        for (project_index, project) in self.range_history.projects.iter().enumerate() {
+            let mut commit_indices = (0..project.commits.len()).collect::<Vec<_>>();
+            commit_indices.sort_by(|left, right| {
+                project.commits[*right]
+                    .timestamp
+                    .cmp(&project.commits[*left].timestamp)
+                    .then_with(|| project.commits[*left].oid.cmp(&project.commits[*right].oid))
+            });
+            let first_row = rows.len();
+            rows.extend(
+                commit_indices
+                    .into_iter()
+                    .map(|commit_index| (project_index, commit_index)),
+            );
+            let directory = self
+                .workspace
+                .projects
+                .iter()
+                .find(|candidate| candidate.id == project.project_id)
+                .map_or_else(
+                    || project.project_name.clone(),
+                    |owner| owner.path.display().to_string(),
+                );
+            groups.push(RangeHistoryGroup {
+                project_index,
+                name: project.project_name.clone(),
+                directory,
+                capped: project.capped,
+                count: project.commits.len(),
+                first_row,
+            });
+        }
         self.range_history.rows = rows;
+        self.range_history.groups = groups;
         if self.range_history.selected >= self.range_history.rows.len() {
             self.range_history.selected = self.range_history.rows.len().saturating_sub(1);
         }
+    }
+
+    /// Repository groups in display order, including those that matched
+    /// nothing so their empty state stays visible.
+    pub fn range_history_groups(&self) -> &[RangeHistoryGroup] {
+        &self.range_history.groups
+    }
+
+    /// Repository that owns a flattened result row, by row index.
+    pub fn range_history_row_project(&self, index: usize) -> Option<&RangeHistoryGroup> {
+        let (project_index, _) = *self.range_history.rows.get(index)?;
+        self.range_history
+            .groups
+            .iter()
+            .find(|group| group.project_index == project_index)
     }
 
     /// Commit matched by a flattened result row index, if it exists.
@@ -6621,20 +6679,30 @@ mod tests {
             }),
         });
 
-        // Merged ordering is newest first across repositories.
+        // Rows are grouped by repository in workspace order, newest first
+        // inside each group, and every group carries its own header data.
         let order = (0..app.range_history_total())
             .map(|index| app.range_history_row(index).unwrap().1)
             .collect::<Vec<_>>();
-        assert_eq!(order, vec!["aa22", "bb11", "aa11"]);
-        assert!(app.range_history.projects[1].capped);
+        assert_eq!(order, vec!["aa22", "aa11", "bb11"]);
+        let groups = app.range_history_groups();
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].name, "alpha");
+        assert_eq!(groups[0].count, 2);
+        assert_eq!(groups[0].first_row, 0);
+        assert_eq!(groups[1].name, "beta");
+        assert_eq!(groups[1].count, 1);
+        assert_eq!(groups[1].first_row, 2);
+        assert!(groups[1].capped);
+        assert!(!groups[0].capped);
 
         // Selection moves within the cached rows and clamps at both ends.
         app.range_history_first();
+        assert_eq!(app.range_history.selected, 0);
         app.move_range_history_selection(-1);
         assert_eq!(app.range_history.selected, 0);
         app.move_range_history_selection(1);
         assert_eq!(app.range_history.selected, 1);
-        app.range_history_last();
         app.range_history_last();
         assert_eq!(app.range_history.selected, 2);
         app.move_range_history_selection(5);
@@ -6767,8 +6835,10 @@ mod tests {
             }),
         });
 
-        // The newest row belongs to beta; locate must load beta's graph only.
-        app.range_history_first();
+        // Groups follow workspace order, so row 0 belongs to alpha here; the
+        // last row is beta's, and locate must load beta's graph only.
+        app.range_history_last();
+        assert_eq!(app.range_history_row(1).unwrap().0, "beta");
         app.locate_range_history_commit();
         assert_eq!(app.screen, Screen::Graph);
         let graph = app.graph.as_ref().expect("graph loaded");
