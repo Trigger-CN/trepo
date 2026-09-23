@@ -283,6 +283,11 @@ fn route_pasted_text(app: &mut App, text: String) {
         app.edit_range_history_form(trepo::app::state::CommitInput::Text(text));
         return;
     }
+    if app.file_search.form.is_some() {
+        app.edit_file_search_form(trepo::app::state::CommitInput::Text(text));
+        return;
+    }
+
     if app.search_mode {
         app.search
             .extend(text.chars().filter(|character| !character.is_control()));
@@ -338,6 +343,15 @@ fn drain_background_messages(app: &mut App) {
     }
     while let Ok(result) = app.range_commit_rx.try_recv() {
         app.apply_range_commit_patch(result);
+    }
+    while let Ok(result) = app.file_search_rx.try_recv() {
+        app.apply_file_search(result);
+    }
+    while let Ok(result) = app.file_history_rx.try_recv() {
+        app.apply_file_history(result);
+    }
+    while let Ok(result) = app.file_commit_rx.try_recv() {
+        app.apply_file_commit_patch(result);
     }
     while let Ok(result) = app.clipboard_rx.try_recv() {
         // A successful read goes through the same routing as bracketed paste.
@@ -409,6 +423,52 @@ fn handle_key(app: &mut App, key: KeyEvent) {
             KeyCode::Up | KeyCode::Char('k') => app.scroll_range_commit_view(-1),
             KeyCode::PageDown => app.scroll_range_commit_view(10),
             KeyCode::PageUp => app.scroll_range_commit_view(-10),
+            _ => {}
+        }
+        return;
+    }
+    // The file page owns typed input while its form is open; the results view
+    // uses the ordinary screen-level keys below.
+    if app.screen == Screen::FileSearch && app.file_search.form.is_some() {
+        match key.code {
+            KeyCode::Esc => app.close_file_search(),
+            KeyCode::Enter => app.submit_file_search(),
+            KeyCode::Backspace => {
+                app.edit_file_search_form(trepo::app::state::CommitInput::Backspace)
+            }
+            KeyCode::Char(character) => {
+                app.edit_file_search_form(trepo::app::state::CommitInput::Character(character))
+            }
+            _ => {}
+        }
+        return;
+    }
+    // A commit opened on top of the file history owns scrolling until closed.
+    if app.screen == Screen::FileSearch && app.file_commit_view_open() {
+        match key.code {
+            KeyCode::Esc => app.close_file_commit_view(),
+            KeyCode::Char('?') => app.help = true,
+            KeyCode::Down | KeyCode::Char('j') => app.scroll_file_commit_view(1),
+            KeyCode::Up | KeyCode::Char('k') => app.scroll_file_commit_view(-1),
+            KeyCode::PageDown => app.scroll_file_commit_view(10),
+            KeyCode::PageUp => app.scroll_file_commit_view(-10),
+            _ => {}
+        }
+        return;
+    }
+    // The opened file history owns its list keys, mirroring the range list.
+    if app.screen == Screen::FileSearch && app.file_search.history.is_some() {
+        match key.code {
+            KeyCode::Esc => app.close_file_history(),
+            KeyCode::Char('?') => app.help = true,
+            KeyCode::Enter => app.open_file_history_commit(),
+            KeyCode::Char('l') => app.locate_file_history_commit(),
+            KeyCode::Down | KeyCode::Char('j') => app.move_file_history_selection(1),
+            KeyCode::Up | KeyCode::Char('k') => app.move_file_history_selection(-1),
+            KeyCode::Char('g') | KeyCode::Home => app.file_history_first(),
+            KeyCode::Char('G') | KeyCode::End => app.file_history_last(),
+            KeyCode::PageDown => app.move_file_history_selection(10),
+            KeyCode::PageUp => app.move_file_history_selection(-10),
             _ => {}
         }
         return;
@@ -658,6 +718,7 @@ fn handle_key(app: &mut App, key: KeyEvent) {
             KeyCode::Char('/') => app.search_mode = true,
             KeyCode::Char('a') => app.open_repo_batch_menu(),
             KeyCode::Char('H') => app.open_range_history(),
+            KeyCode::Char('F') => app.open_file_search(),
             KeyCode::Char(' ') => app.toggle_project_selection(),
             KeyCode::Char('A') => app.toggle_filtered_selection(),
             KeyCode::Char('S') => app.begin_workspace_git(trepo::domain::WorkspaceGitAction::Stage),
@@ -746,6 +807,20 @@ fn handle_key(app: &mut App, key: KeyEvent) {
             KeyCode::Char('G') | KeyCode::End => app.range_history_last(),
             KeyCode::PageDown => app.move_range_history_selection(10),
             KeyCode::PageUp => app.move_range_history_selection(-10),
+            _ => {}
+        },
+        Screen::FileSearch => match key.code {
+            KeyCode::Esc => app.back(),
+            KeyCode::Char('?') => app.help = true,
+            KeyCode::Char('f') => app.open_file_search_form(),
+            KeyCode::Char('r') => app.rerun_file_search(),
+            KeyCode::Enter => app.open_file_history(),
+            KeyCode::Down | KeyCode::Char('j') => app.move_file_search_selection(1),
+            KeyCode::Up | KeyCode::Char('k') => app.move_file_search_selection(-1),
+            KeyCode::Char('g') | KeyCode::Home => app.file_search_first(),
+            KeyCode::Char('G') | KeyCode::End => app.file_search_last(),
+            KeyCode::PageDown => app.move_file_search_selection(10),
+            KeyCode::PageUp => app.move_file_search_selection(-10),
             _ => {}
         },
     }

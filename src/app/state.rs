@@ -9,13 +9,15 @@ use crate::app::repository::{
 };
 use crate::domain::{
     BatchOperationItem, BatchOperationSpec, ChangeEntry, ChangePreview, Commit, CommitMode,
-    CommitOutcome, CommitSpec, GitOperationKind, HunkSource, OperationKind, OperationOutcome,
-    OperationSpec, OperationTarget, Project, ProjectId, ProjectRangeHistory, ProjectSnapshot,
-    RangeHistorySpec, RepoBatchAction, RepoBatchSpec, RepoProjectResult, RepoProjectState,
-    RepositoryAction, RepositoryActionOutcome, RepositoryActionSpec, RepositorySnapshot, RiskLevel,
-    Workspace, WorkspaceGitAction, WorkspaceGitSpec, WorkspaceKind, WorkspaceSummary,
+    CommitOutcome, CommitSpec, FileSearchSpec, GitOperationKind, HunkSource, OperationKind,
+    OperationOutcome, OperationSpec, OperationTarget, Project, ProjectFileMatches, ProjectId,
+    ProjectRangeHistory, ProjectSnapshot, RangeHistorySpec, RepoBatchAction, RepoBatchSpec,
+    RepoProjectResult, RepoProjectState, RepositoryAction, RepositoryActionOutcome,
+    RepositoryActionSpec, RepositorySnapshot, RiskLevel, Workspace, WorkspaceGitAction,
+    WorkspaceGitSpec, WorkspaceKind, WorkspaceSummary,
 };
 use crate::i18n::Language;
+use crate::services::file_search::{self, FileHistoryResult, FileSearchResult};
 use crate::services::operations::OperationRunner;
 use crate::services::range_history::{self, RangeHistoryResult};
 use crate::services::repo_batch::{self, RepoBatchEvent, RepoBatchEventKind, RepoBatchHandle};
@@ -31,6 +33,7 @@ pub enum Screen {
     Changes,
     Repository,
     RangeHistory,
+    FileSearch,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -1134,6 +1137,98 @@ pub struct RangeCommitView {
     pub generation: u64,
 }
 
+/// One-line path form for the file search: a single query matched against
+/// repository-relative paths.
+#[derive(Debug, Clone, Default)]
+pub struct FileSearchForm {
+    pub query: String,
+}
+
+impl FileSearchForm {
+    pub fn edit(&mut self, input: CommitInput) {
+        match input {
+            CommitInput::Character(value) => self.query.push(value),
+            CommitInput::Text(value) => self.query.push_str(&value.replace(['\r', '\n'], "")),
+            CommitInput::Backspace => {
+                self.query.pop();
+            }
+            _ => {}
+        }
+    }
+
+    pub fn validate(&self) -> anyhow::Result<()> {
+        if self.query.trim().is_empty() {
+            anyhow::bail!("enter a file name or path fragment");
+        }
+        Ok(())
+    }
+}
+
+/// One file's history page: the queried file plus the commits that touched
+/// it, newest first, as streamed back by [`git::file_log`]. A selected entry
+/// can open its commit detail without leaving the page, so `commit_view`
+/// reuses the shared [`RangeCommitView`].
+#[derive(Debug)]
+pub struct FileHistoryView {
+    pub project: Project,
+    /// Repository-relative path as shown in the search result.
+    pub path: String,
+    pub entries: Vec<crate::adapters::git::FileHistoryEntry>,
+    pub capped: bool,
+    pub loading: bool,
+    pub error: Option<String>,
+    pub selected: usize,
+    pub generation: u64,
+    /// Commit opened from this history with `Enter`.
+    pub commit_view: Option<RangeCommitView>,
+}
+
+/// File-search page state: the optional query form, streamed per-repository
+/// matches, and the opened file's history.
+#[derive(Debug)]
+pub struct FileSearchState {
+    pub form: Option<FileSearchForm>,
+    /// Where Esc returns to; the page is only reachable from Workspace today.
+    pub return_screen: Screen,
+    pub loading: bool,
+    pub projects: Vec<ProjectFileMatches>,
+    pub spec: FileSearchSpec,
+    pub ran: bool,
+    pub selected: usize,
+    pub generation: u64,
+    /// Repositories queried and how many have reported, so `loading` clears
+    /// even when a repository legitimately matches nothing.
+    pub expected: usize,
+    pub reported: usize,
+    /// Flat (project index, file index) table in workspace order. Rebuilt
+    /// only when results arrive, never per frame.
+    rows: Vec<(usize, usize)>,
+    pub message: Option<(bool, String)>,
+    /// File opened from the list with `Enter`; while set the page shows its
+    /// commit history instead of the results table.
+    pub history: Option<FileHistoryView>,
+}
+
+impl Default for FileSearchState {
+    fn default() -> Self {
+        Self {
+            form: None,
+            return_screen: Screen::Workspace,
+            loading: false,
+            projects: Vec::new(),
+            spec: FileSearchSpec::default(),
+            ran: false,
+            selected: 0,
+            generation: 0,
+            expected: 0,
+            reported: 0,
+            rows: Vec::new(),
+            message: None,
+            history: None,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct WorkspaceGitTask {
     pub spec: WorkspaceGitSpec,
@@ -1171,6 +1266,7 @@ pub struct App {
     pub repo_batch: RepoBatchState,
     pub workspace_git: WorkspaceGitState,
     pub range_history: RangeHistoryState,
+    pub file_search: FileSearchState,
     pub should_quit: bool,
     scan_tx: mpsc::UnboundedSender<ScanResult>,
     pub scan_rx: mpsc::UnboundedReceiver<ScanResult>,
@@ -1216,6 +1312,12 @@ pub struct App {
     pub range_history_rx: mpsc::UnboundedReceiver<RangeHistoryResult>,
     range_commit_tx: mpsc::UnboundedSender<RangeCommitResult>,
     pub range_commit_rx: mpsc::UnboundedReceiver<RangeCommitResult>,
+    file_search_tx: mpsc::UnboundedSender<FileSearchResult>,
+    pub file_search_rx: mpsc::UnboundedReceiver<FileSearchResult>,
+    file_history_tx: mpsc::UnboundedSender<FileHistoryResult>,
+    pub file_history_rx: mpsc::UnboundedReceiver<FileHistoryResult>,
+    file_commit_tx: mpsc::UnboundedSender<RangeCommitResult>,
+    pub file_commit_rx: mpsc::UnboundedReceiver<RangeCommitResult>,
     operation_runner: OperationRunner,
     concurrency: usize,
 }
@@ -1242,6 +1344,9 @@ impl App {
         let (workspace_git_tx, workspace_git_rx) = mpsc::unbounded_channel();
         let (range_history_tx, range_history_rx) = mpsc::unbounded_channel();
         let (range_commit_tx, range_commit_rx) = mpsc::unbounded_channel();
+        let (file_search_tx, file_search_rx) = mpsc::unbounded_channel();
+        let (file_history_tx, file_history_rx) = mpsc::unbounded_channel();
+        let (file_commit_tx, file_commit_rx) = mpsc::unbounded_channel();
         let projects = workspace
             .projects
             .iter()
@@ -1272,6 +1377,7 @@ impl App {
             repo_batch: RepoBatchState::default(),
             workspace_git: WorkspaceGitState::default(),
             range_history: RangeHistoryState::default(),
+            file_search: FileSearchState::default(),
             should_quit: false,
             scan_tx,
             scan_rx,
@@ -1311,6 +1417,12 @@ impl App {
             range_history_rx,
             range_commit_tx,
             range_commit_rx,
+            file_search_tx,
+            file_search_rx,
+            file_history_tx,
+            file_history_rx,
+            file_commit_tx,
+            file_commit_rx,
             operation_runner: OperationRunner,
             concurrency: concurrency.max(1),
             repository_intent: None,
@@ -2007,6 +2119,7 @@ impl App {
                 .is_some_and(|state| state.form.is_some())
             || self.repo_batch.form.is_some()
             || self.range_history.form.is_some()
+            || self.file_search.form.is_some()
             || self.search_mode
     }
 
@@ -2684,6 +2797,444 @@ impl App {
         self.range_history.selected = self.range_history.rows.len().saturating_sub(1);
     }
 
+    /// Enters the file-search page. A page that never produced results opens
+    /// the query form; an existing result stays browsable, and `f` reopens
+    /// the form seeded from the last run.
+    pub fn open_file_search(&mut self) {
+        let state = &mut self.file_search;
+        state.return_screen = self.screen;
+        state.message = None;
+        if !state.ran || state.form.is_some() {
+            state.form = Some(FileSearchForm {
+                query: state.spec.query.clone(),
+            });
+            state.selected = 0;
+        }
+        self.screen = Screen::FileSearch;
+    }
+
+    /// Opens the query form from inside the page (the `f` action). Unlike
+    /// entry, it never touches `return_screen` or the browsed selection.
+    pub fn open_file_search_form(&mut self) {
+        let state = &mut self.file_search;
+        state.form = Some(FileSearchForm {
+            query: state.spec.query.clone(),
+        });
+        state.message = None;
+    }
+
+    /// Leaves the page (Esc). An open history or form is closed first, so Esc
+    /// only ever unwinds one step.
+    pub fn close_file_search(&mut self) {
+        if self.file_search.history.take().is_some() {
+            self.file_search.message = None;
+            return;
+        }
+        if self.file_search.form.take().is_some() {
+            self.file_search.message = None;
+            return;
+        }
+        self.file_search.message = None;
+        self.screen = self.file_search.return_screen;
+    }
+
+    pub fn edit_file_search_form(&mut self, input: CommitInput) {
+        if let Some(form) = self.file_search.form.as_mut() {
+            form.edit(input);
+        }
+    }
+
+    /// Validates the form and starts the concurrent workspace-wide search.
+    pub fn submit_file_search(&mut self) {
+        let Some(form) = self.file_search.form.as_ref() else {
+            return;
+        };
+        if let Err(error) = form.validate() {
+            self.file_search.message = Some((true, error.to_string()));
+            return;
+        }
+        let spec = FileSearchSpec {
+            query: form.query.trim().to_owned(),
+        };
+        self.file_search.form = None;
+        self.file_search.message = None;
+        self.run_file_search(spec);
+    }
+
+    /// Re-runs the last query against the current project scope.
+    pub fn rerun_file_search(&mut self) {
+        self.run_file_search(self.file_search.spec.clone());
+    }
+
+    fn file_search_projects(&self) -> Vec<Project> {
+        self.workspace
+            .projects
+            .iter()
+            .filter(|project| {
+                self.selected_projects.is_empty() || self.selected_projects.contains(&project.id)
+            })
+            .cloned()
+            .collect()
+    }
+
+    fn run_file_search(&mut self, spec: FileSearchSpec) {
+        let projects = self.file_search_projects();
+        if projects.is_empty() {
+            self.file_search.message = Some((true, "no repositories in scope".to_owned()));
+            return;
+        }
+        self.file_search.generation = self.file_search.generation.wrapping_add(1);
+        let generation = self.file_search.generation;
+        self.file_search.spec = spec.clone();
+        self.file_search.projects = projects
+            .iter()
+            .map(|project| ProjectFileMatches {
+                project_id: project.id.clone(),
+                project_name: project.name.clone(),
+                files: Vec::new(),
+                capped: false,
+                error: None,
+            })
+            .collect();
+        self.file_search.expected = projects.len();
+        self.file_search.reported = 0;
+        self.file_search.loading = true;
+        self.file_search.ran = true;
+        self.file_search.rows.clear();
+        self.file_search.selected = 0;
+        // A new result set invalidates the history opened from the old one.
+        self.file_search.history = None;
+        self.screen = Screen::FileSearch;
+        file_search::spawn_file_search(
+            projects,
+            spec,
+            generation,
+            self.concurrency,
+            self.file_search_tx.clone(),
+        );
+    }
+
+    /// Merges one streamed repository result, ignoring stale generations.
+    pub fn apply_file_search(&mut self, result: FileSearchResult) {
+        if result.generation != self.file_search.generation {
+            return;
+        }
+        if let Some(slot) = self
+            .file_search
+            .projects
+            .iter_mut()
+            .find(|value| value.project_id == result.project_id)
+        {
+            match result.result {
+                Ok(files) => {
+                    slot.files = files;
+                    slot.capped = false;
+                    slot.error = None;
+                }
+                Err(error) => {
+                    slot.files = Vec::new();
+                    slot.capped = false;
+                    slot.error = Some(error.to_string());
+                }
+            }
+        }
+        self.file_search.reported = self.file_search.reported.saturating_add(1);
+        if self.file_search.reported >= self.file_search.expected {
+            self.file_search.loading = false;
+        }
+        self.rebuild_file_search_rows();
+    }
+
+    /// Rebuilds the flat row index in workspace order; the per-repository
+    /// files stay in the order Git listed them. Rebuilt only when a result
+    /// arrives, never per frame.
+    pub fn rebuild_file_search_rows(&mut self) {
+        let mut rows = Vec::new();
+        for (project_index, project) in self.file_search.projects.iter().enumerate() {
+            rows.extend((0..project.files.len()).map(|file_index| (project_index, file_index)));
+        }
+        self.file_search.rows = rows;
+        if self.file_search.selected >= self.file_search.rows.len() {
+            self.file_search.selected = self.file_search.rows.len().saturating_sub(1);
+        }
+    }
+
+    /// Flattened result row: owning repository and the matched path.
+    pub fn file_search_row(&self, index: usize) -> Option<(&ProjectFileMatches, usize, &str)> {
+        let (project_index, file_index) = *self.file_search.rows.get(index)?;
+        let project = self.file_search.projects.get(project_index)?;
+        let file = project.files.get(file_index)?;
+        Some((project, project_index, file))
+    }
+
+    pub fn file_search_total(&self) -> usize {
+        self.file_search.rows.len()
+    }
+
+    /// Repository project index of a flattened row, used to keep the group
+    /// heading logic independent of the flat table.
+    pub fn file_search_row_project_index(&self, index: usize) -> Option<usize> {
+        self.file_search
+            .rows
+            .get(index)
+            .map(|(project, _)| *project)
+    }
+
+    /// Repository owning a flattened row, by row index.
+    pub fn file_search_row_repository(&self, index: usize) -> Option<&ProjectFileMatches> {
+        let (project, _, _) = self.file_search_row(index)?;
+        Some(project)
+    }
+
+    /// Flat (project index, file index) rows, in display order.
+    pub fn file_search_rows(&self) -> &[(usize, usize)] {
+        &self.file_search.rows
+    }
+
+    pub fn file_search_message(&self) -> Option<(bool, String)> {
+        if let Some(message) = self.file_search.message.as_ref() {
+            return Some(message.clone());
+        }
+        if self.file_search.loading {
+            return None;
+        }
+        if self.file_search.ran && self.file_search.rows.is_empty() {
+            return Some((false, "no matching files".to_owned()));
+        }
+        None
+    }
+
+    /// Moves the result-list selection, clamped to the current row count.
+    pub fn move_file_search_selection(&mut self, delta: isize) {
+        let len = self.file_search.rows.len();
+        if len == 0 {
+            self.file_search.selected = 0;
+            return;
+        }
+        let current = self.file_search.selected.min(len - 1) as isize;
+        self.file_search.selected = (current + delta).clamp(0, len as isize - 1) as usize;
+    }
+
+    pub fn file_search_first(&mut self) {
+        self.file_search.selected = 0;
+    }
+
+    pub fn file_search_last(&mut self) {
+        self.file_search.selected = self.file_search.rows.len().saturating_sub(1);
+    }
+
+    /// Opens the selected row's commit history, loading it asynchronously.
+    pub fn open_file_history(&mut self) {
+        if self.file_search.form.is_some() || self.file_search.loading {
+            return;
+        }
+        let Some((project, _, file)) = self.file_search_row(self.file_search.selected) else {
+            return;
+        };
+        let path = file.to_owned();
+        let Some(owner) = self
+            .workspace
+            .projects
+            .iter()
+            .find(|candidate| candidate.id == project.project_id)
+            .cloned()
+        else {
+            self.file_search.message = Some((
+                true,
+                "that repository is no longer in the workspace".to_owned(),
+            ));
+            return;
+        };
+        let generation = self
+            .file_search
+            .history
+            .as_ref()
+            .map_or(1, |view| view.generation.wrapping_add(1));
+        self.file_search.history = Some(FileHistoryView {
+            project: owner.clone(),
+            path: path.clone(),
+            entries: Vec::new(),
+            capped: false,
+            loading: true,
+            error: None,
+            selected: 0,
+            generation,
+            commit_view: None,
+        });
+        file_search::spawn_file_history(owner, path, generation, self.file_history_tx.clone());
+    }
+
+    /// Merges one streamed file history, ignoring stale generations and any
+    /// response for a file other than the one currently open.
+    pub fn apply_file_history(&mut self, result: FileHistoryResult) {
+        let Some(view) = self.file_search.history.as_mut() else {
+            return;
+        };
+        if view.generation != result.generation
+            || view.project.id != result.project_id
+            || view.path != result.path
+        {
+            return;
+        }
+        view.loading = false;
+        match result.result {
+            Ok(log) => {
+                view.entries = log.entries;
+                view.capped = log.capped;
+                view.selected = 0;
+            }
+            Err(error) => view.error = Some(error.to_string()),
+        }
+    }
+
+    /// Closes the history view. When a commit is open on top of it, Esc only
+    /// unwinds that one step so escape always moves a single level.
+    pub fn close_file_history(&mut self) {
+        if let Some(view) = self.file_search.history.as_mut() {
+            if view.commit_view.take().is_some() {
+                return;
+            }
+        }
+        self.file_search.history = None;
+    }
+
+    /// Whether a commit is open on top of the file history.
+    pub fn file_commit_view_open(&self) -> bool {
+        self.file_search
+            .history
+            .as_ref()
+            .is_some_and(|history| history.commit_view.is_some())
+    }
+
+    pub fn move_file_history_selection(&mut self, delta: isize) {
+        let Some(view) = self.file_search.history.as_mut() else {
+            return;
+        };
+        let len = view.entries.len();
+        if len == 0 {
+            view.selected = 0;
+            return;
+        }
+        let current = view.selected.min(len - 1) as isize;
+        view.selected = (current + delta).clamp(0, len as isize - 1) as usize;
+    }
+
+    pub fn file_history_first(&mut self) {
+        if let Some(view) = self.file_search.history.as_mut() {
+            view.selected = 0;
+        }
+    }
+
+    pub fn file_history_last(&mut self) {
+        if let Some(view) = self.file_search.history.as_mut() {
+            view.selected = view.entries.len().saturating_sub(1);
+        }
+    }
+
+    /// Jumps to the owning repository's Graph page with the selected history
+    /// entry's commit selected.
+    pub fn locate_file_history_commit(&mut self) {
+        let Some(view) = self.file_search.history.as_ref() else {
+            return;
+        };
+        let Some(entry) = view.entries.get(view.selected) else {
+            return;
+        };
+        let owner = view.project.clone();
+        let oid = entry.commit.oid.clone();
+        self.file_search.history = None;
+        self.locate_graph_commit(owner, oid);
+    }
+
+    /// Opens the selected history entry's commit detail, loading the patch
+    /// asynchronously on the file-history page's own patch channel.
+    pub fn open_file_history_commit(&mut self) {
+        let Some(view) = self.file_search.history.as_ref() else {
+            return;
+        };
+        if view.loading || view.error.is_some() {
+            return;
+        }
+        let Some(entry) = view.entries.get(view.selected).cloned() else {
+            return;
+        };
+        let owner = view.project.clone();
+        let project_name = view.project.name.clone();
+        let Some(view) = self.file_search.history.as_mut() else {
+            return;
+        };
+        let generation = view
+            .commit_view
+            .as_ref()
+            .map_or(1, |value| value.generation.wrapping_add(1));
+        let oid = entry.commit.oid.clone();
+        view.commit_view = Some(RangeCommitView {
+            short_oid: short_oid(&oid).to_owned(),
+            oid: oid.clone(),
+            project_name,
+            commit: entry.commit,
+            project: owner.clone(),
+            loading: true,
+            error: None,
+            text: String::new(),
+            line_count: 0,
+            scroll: 0,
+            generation,
+        });
+        let sender = self.file_commit_tx.clone();
+        tokio::spawn(async move {
+            let result = git::commit_patch(&owner.path, &oid).await;
+            let _ = sender.send(RangeCommitResult {
+                generation,
+                oid,
+                result,
+            });
+        });
+    }
+
+    /// Merges one streamed patch for the file-history commit view.
+    pub fn apply_file_commit_patch(&mut self, result: RangeCommitResult) {
+        let Some(view) = self
+            .file_search
+            .history
+            .as_mut()
+            .and_then(|history| history.commit_view.as_mut())
+        else {
+            return;
+        };
+        if view.generation != result.generation || view.oid != result.oid {
+            return;
+        }
+        view.loading = false;
+        match result.result {
+            Ok(text) => {
+                view.line_count = text.lines().count();
+                view.text = text;
+            }
+            Err(error) => view.error = Some(error.to_string()),
+        }
+    }
+
+    pub fn scroll_file_commit_view(&mut self, delta: isize) {
+        let Some(view) = self
+            .file_search
+            .history
+            .as_mut()
+            .and_then(|history| history.commit_view.as_mut())
+        else {
+            return;
+        };
+        let current = view.scroll as isize;
+        view.scroll =
+            (current + delta).clamp(0, view.line_count.saturating_sub(1) as isize) as usize;
+    }
+
+    pub fn close_file_commit_view(&mut self) {
+        if let Some(view) = self.file_search.history.as_mut() {
+            view.commit_view = None;
+        }
+    }
+
     pub fn graph_objects(&self) -> Vec<GraphObject> {
         let Some(graph) = self.graph.as_ref() else {
             return Vec::new();
@@ -2952,8 +3503,9 @@ impl App {
             Screen::Graph => self.graph.as_ref().map(|graph| graph.project.clone()),
             Screen::Changes => self.changes.as_ref().map(|changes| changes.project.clone()),
             Screen::Repository => self.repository.as_ref().map(|state| state.project.clone()),
-            // The range page has no single repository; Esc there returns first.
-            Screen::RangeHistory => return,
+            // The range and file pages have no single repository; Esc there
+            // returns first.
+            Screen::RangeHistory | Screen::FileSearch => return,
         };
         if let Some(project) = project {
             self.screen = Screen::Changes;
@@ -4113,7 +4665,7 @@ impl App {
                 .changes
                 .as_ref()
                 .map(|changes| (changes.project.clone(), changes.operation)),
-            Screen::Graph | Screen::Repository | Screen::RangeHistory => None,
+            Screen::Graph | Screen::Repository | Screen::RangeHistory | Screen::FileSearch => None,
         };
         let Some((project, Some(operation))) = selected else {
             match origin {
@@ -4127,7 +4679,7 @@ impl App {
                         changes.message = Some((true, "No Git operation is active".to_owned()));
                     }
                 }
-                Screen::Graph | Screen::Repository | Screen::RangeHistory => {}
+                Screen::Graph | Screen::Repository | Screen::RangeHistory | Screen::FileSearch => {}
             }
             return;
         };
@@ -4161,7 +4713,7 @@ impl App {
                 }
                 self.screen = Screen::Changes;
             }
-            Screen::Workspace | Screen::Repository | Screen::RangeHistory => {
+            Screen::Workspace | Screen::Repository | Screen::RangeHistory | Screen::FileSearch => {
                 if let Some(state) = self.repository.as_mut() {
                     state.message = Some((is_error, message));
                 }
@@ -4177,8 +4729,9 @@ impl App {
             Screen::Graph => self.graph.as_ref().map(|state| state.project.clone()),
             Screen::Changes => self.changes.as_ref().map(|state| state.project.clone()),
             Screen::Repository => self.repository.as_ref().map(|state| state.project.clone()),
-            // The range page has no single repository; Esc there returns first.
-            Screen::RangeHistory => return,
+            // The range and file pages have no single repository; Esc there
+            // returns first.
+            Screen::RangeHistory | Screen::FileSearch => return,
         };
         if let Some(project) = project {
             self.screen = Screen::Repository;
@@ -4593,7 +5146,7 @@ impl App {
                             state.detail = detail;
                         }
                     }
-                    Screen::RangeHistory => {}
+                    Screen::RangeHistory | Screen::FileSearch => {}
                 }
             }
             Err(error) => {
@@ -4628,6 +5181,7 @@ impl App {
             }
             Screen::Graph => self.screen = Screen::Workspace,
             Screen::RangeHistory => self.close_range_history(),
+            Screen::FileSearch => self.close_file_search(),
             Screen::Changes => {
                 if let Some(changes) = self.changes.as_mut() {
                     if changes.confirmation.take().is_some() {
@@ -6923,5 +7477,138 @@ mod tests {
         let graph = app.graph.as_ref().unwrap();
         assert!(graph.locate_oid.is_none());
         assert!(graph.message.as_ref().is_some_and(|(error, _)| *error));
+    }
+
+    #[tokio::test]
+    async fn file_search_groups_rows_and_opens_a_file_history() {
+        let alpha = project("alpha");
+        let beta = project("beta");
+        let workspace = Workspace {
+            root: PathBuf::from("/tmp"),
+            kind: WorkspaceKind::Repo,
+            projects: vec![alpha.clone(), beta.clone()],
+        };
+        let mut app = App::new(workspace, 2);
+        app.run_file_search(FileSearchSpec {
+            query: "util".into(),
+        });
+        assert_eq!(app.screen, Screen::FileSearch);
+        let generation = app.file_search.generation;
+        app.apply_file_search(FileSearchResult {
+            generation,
+            project_id: alpha.id.clone(),
+            project_name: alpha.name.clone(),
+            result: Ok(vec!["src/util.rs".into(), "docs/util.md".into()]),
+        });
+        app.apply_file_search(FileSearchResult {
+            generation,
+            project_id: beta.id.clone(),
+            project_name: beta.name.clone(),
+            result: Ok(vec!["vendor/util.c".into()]),
+        });
+
+        // Rows stay grouped in workspace order and keep Git's listing order
+        // inside each repository.
+        assert_eq!(app.file_search_total(), 3);
+        let files = (0..app.file_search_total())
+            .map(|index| app.file_search_row(index).unwrap().2.to_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(files, vec!["src/util.rs", "docs/util.md", "vendor/util.c"]);
+        assert_eq!(
+            app.file_search_row_repository(0).unwrap().project_name,
+            "alpha"
+        );
+        assert_eq!(
+            app.file_search_row_repository(2).unwrap().project_name,
+            "beta"
+        );
+
+        // Selection clamps at both ends.
+        app.file_search_first();
+        assert_eq!(app.file_search.selected, 0);
+        app.move_file_search_selection(-1);
+        assert_eq!(app.file_search.selected, 0);
+        app.file_search_last();
+        assert_eq!(app.file_search.selected, 2);
+        app.move_file_search_selection(5);
+        assert_eq!(app.file_search.selected, 2);
+
+        // Opening the selected file starts an async history load whose
+        // response fills the page; a stale generation is ignored.
+        app.open_file_history();
+        let view = app.file_search.history.as_ref().expect("history opened");
+        assert_eq!(view.path, "vendor/util.c");
+        let history_generation = view.generation;
+        app.apply_file_history(FileHistoryResult {
+            generation: history_generation + 1,
+            project_id: beta.id.clone(),
+            path: "vendor/util.c".into(),
+            result: Ok(git::FileLog::default()),
+        });
+        assert!(
+            app.file_search.history.as_ref().unwrap().loading,
+            "a stale response must not clear loading"
+        );
+        app.apply_file_history(FileHistoryResult {
+            generation: history_generation,
+            project_id: beta.id.clone(),
+            path: "vendor/util.c".into(),
+            result: Ok(git::FileLog {
+                entries: vec![git::FileHistoryEntry {
+                    commit: Commit {
+                        oid: "bb22".into(),
+                        parents: Vec::new(),
+                        refs: Vec::new(),
+                        author: "Ada".into(),
+                        timestamp: 200,
+                        subject: "touch util".into(),
+                        body: String::new(),
+                    },
+                    path: "vendor/util.c".into(),
+                    status: "M".into(),
+                }],
+                capped: true,
+            }),
+        });
+        let view = app.file_search.history.as_ref().unwrap();
+        assert!(!view.loading);
+        assert!(view.capped);
+        assert_eq!(view.entries.len(), 1);
+
+        // Esc unwinds the history first, then the page itself.
+        app.close_file_history();
+        assert!(app.file_search.history.is_none());
+        assert_eq!(app.screen, Screen::FileSearch);
+        app.close_file_search();
+        assert_eq!(app.screen, Screen::Workspace);
+    }
+
+    #[tokio::test]
+    async fn file_search_form_rejects_an_empty_query_and_reopens_seeded() {
+        let alpha = project("alpha");
+        let workspace = Workspace {
+            root: PathBuf::from("/tmp"),
+            kind: WorkspaceKind::Repo,
+            projects: vec![alpha.clone()],
+        };
+        let mut app = App::new(workspace, 1);
+        app.open_file_search();
+        assert_eq!(app.screen, Screen::FileSearch);
+        assert!(app.file_search.form.is_some(), "first visit opens the form");
+        // An empty query is rejected with a message instead of scanning.
+        app.submit_file_search();
+        assert!(app.file_search.message.as_ref().is_some_and(|(e, _)| *e));
+        assert!(app.file_search.form.is_some());
+        app.edit_file_search_form(CommitInput::Text("util".into()));
+        app.submit_file_search();
+        assert!(app.file_search.form.is_none());
+        assert!(app.file_search.ran);
+
+        // A later visit browses the cached results and `f` reseeds the form.
+        app.close_file_search();
+        app.open_file_search();
+        assert!(app.file_search.form.is_none());
+        app.open_file_search_form();
+        assert_eq!(app.file_search.form.as_ref().unwrap().query, "util");
     }
 }

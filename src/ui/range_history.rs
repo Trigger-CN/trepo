@@ -51,7 +51,7 @@ pub(super) fn render(frame: &mut Frame, app: &App) {
 /// Renders one located commit: metadata, its full message, then the diffstat
 /// and patch produced by `git show`. Only the visible lines are drawn, so a
 /// large patch costs the same as a small one.
-fn render_commit_view(
+pub(super) fn render_commit_view(
     frame: &mut Frame,
     app: &App,
     view: &crate::app::state::RangeCommitView,
@@ -155,7 +155,7 @@ fn render_commit_view(
 
 /// Colours the patch like the Changes diff: additions green, removals red,
 /// hunk headers cyan and file headers yellow.
-fn patch_lines(text: &str, width: usize) -> Vec<Line<'static>> {
+pub(super) fn patch_lines(text: &str, width: usize) -> Vec<Line<'static>> {
     text.lines()
         .map(|line| {
             let style = if line.starts_with("+++") || line.starts_with("---") {

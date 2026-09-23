@@ -1897,6 +1897,26 @@ pub struct RangeLog {
     pub capped: bool,
 }
 
+/// One commit that touched a tracked file, together with the path the file had
+/// in that commit so history reads correctly across renames.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileHistoryEntry {
+    pub commit: Commit,
+    /// Repository-relative path recorded in this commit; differs from the
+    /// queried path when the commit predates a rename.
+    pub path: String,
+    /// Status letter from `--name-status` (`A`, `M`, `D`, `R100`, ...).
+    pub status: String,
+}
+
+/// One file's history: the commits that touched it, newest first.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FileLog {
+    pub entries: Vec<FileHistoryEntry>,
+    /// True when the file had more commits than the requested cap.
+    pub capped: bool,
+}
+
 /// Loads commits across all refs whose commit date falls inside the filter
 /// window, optionally narrowed by author and message text, stopping after
 /// `max_count` matches (0 means unlimited).
@@ -1943,6 +1963,169 @@ pub async fn log_range(path: &Path, filter: &LogRangeFilter, max_count: usize) -
     }
     Ok(RangeLog { commits, capped })
 }
+/// Lists every file Git tracks in `path`, plus non-ignored untracked files,
+/// as repository-relative paths. `--exclude-standard` keeps ignored build
+/// output out of the list while `--others` still surfaces new files, so a
+/// search finds both committed and just-created files without flooding the
+/// UI with `target/`-style noise.
+///
+/// Matching itself happens in the UI layer: pushing a user-supplied pattern
+/// into Git would reintroduce glob and pathspec semantics (and their escape
+/// rules) for what is documented as a plain substring search.
+pub async fn list_files(path: &Path) -> Result<Vec<String>> {
+    let bytes = git_output(
+        path,
+        [
+            "ls-files",
+            "-z",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+        ],
+    )
+    .await?;
+    let mut files = Vec::new();
+    for field in bytes.split(|byte| *byte == 0) {
+        if field.is_empty() {
+            continue;
+        }
+        files.push(String::from_utf8_lossy(field).into_owned());
+    }
+    Ok(files)
+}
+
+const FILE_LOG_FORMAT: &str = "--pretty=format:%x00%H%x00%P%x00%an%x00%at%x00%s%x00%B%x00";
+
+/// Loads the commit history of one file, following renames (`--follow`) and
+/// stopping after `max_count` entries (0 means unlimited).
+///
+/// With `-z` the stream is a flat NUL-separated field list. Each record is
+/// the six [`LOG_FORMAT`] fields, then the `--name-status` entry: the status
+/// (prefixed by the newline Git inserts, e.g. `\nR100`) and one path — or
+/// two for renames and copies, where the *last* path is the name the file
+/// had in that commit, so a rename reads as its own historical name instead
+/// of a path that did not exist yet. A commit Git reports without any
+/// name-status entry (merges during `--follow`) simply has no trailing
+/// fields; `parse_file_log` keeps such a record instead of misreading the
+/// next commit's header as its path.
+///
+/// `--follow` accepts exactly one path and cannot be combined with `--all`,
+/// so this walks the history reachable from `HEAD` — the file's own commit
+/// record rather than the union of every branch that ever touched it. Path
+/// values are validated as single arguments and passed after `--`, keeping a
+/// file called `--cached` from being read as an option.
+pub async fn file_log(path: &Path, file: &str, max_count: usize) -> Result<FileLog> {
+    if file.is_empty() || file.starts_with('-') || file.contains('\0') {
+        bail!("invalid file path: {file:?}");
+    }
+    let mut args = vec![
+        OsString::from("log"),
+        OsString::from("--follow"),
+        OsString::from("--date-order"),
+        OsString::from("-z"),
+        OsString::from("--name-status"),
+        OsString::from(FILE_LOG_FORMAT),
+    ];
+    if max_count > 0 {
+        // One extra entry so a truncated result is detectable.
+        args.push(OsString::from(format!("--max-count={}", max_count + 1)));
+    }
+    args.push(OsString::from("--"));
+    args.push(OsString::from(file));
+    let bytes = git_output(path, args).await?;
+    parse_file_log(&bytes, max_count)
+}
+
+/// Parses the `file_log` protocol into commits plus the path each commit
+/// recorded for the file. Every commit is six header fields; a commit that
+/// Git reported with no `--name-status` entry (a merge during `--follow`)
+/// keeps its header with empty status/path rather than consuming the next
+/// commit's OID as a path.
+pub fn parse_file_log(bytes: &[u8], max_count: usize) -> Result<FileLog> {
+    if bytes.iter().all(|byte| byte.is_ascii_whitespace()) {
+        return Ok(FileLog::default());
+    }
+    let fields: Vec<&[u8]> = bytes.split(|byte| *byte == 0).collect();
+    let mut entries = Vec::new();
+    let mut offset = 0;
+    while offset < fields.len() {
+        let oid = trim_record_separator(fields[offset]);
+        if oid.is_empty() {
+            offset += 1;
+            continue;
+        }
+        if offset + 6 > fields.len() {
+            bail!("incomplete git log record");
+        }
+        let timestamp = text(fields[offset + 3])
+            .trim()
+            .parse::<i64>()
+            .context("invalid commit timestamp")?;
+        let commit = Commit {
+            oid: text(oid).into_owned(),
+            parents: text(fields[offset + 1])
+                .split_whitespace()
+                .map(str::to_owned)
+                .collect(),
+            refs: Vec::new(),
+            author: text(fields[offset + 2]).into_owned(),
+            timestamp,
+            subject: text(fields[offset + 4]).trim_end().to_owned(),
+            body: text(fields[offset + 5]).trim_end().to_owned(),
+        };
+        offset += 6;
+        // The status field still carries the newline Git inserts before
+        // `--name-status` output, so compare after stripping it.
+        let mut status = String::new();
+        let mut path = String::new();
+        if let Some(candidate) = fields.get(offset) {
+            let value = text(trim_record_separator(candidate));
+            let value = value.trim();
+            if is_file_status(value) {
+                status = value.to_owned();
+                offset += 1;
+                if status.starts_with('R') || status.starts_with('C') {
+                    // Rename and copy entries list the source path first and
+                    // the recorded name second; the latter is the path this
+                    // commit knew the file by.
+                    offset += 1;
+                    if let Some(new_path) = fields.get(offset) {
+                        path = text(new_path).trim_end().to_owned();
+                        offset += 1;
+                    }
+                } else if let Some(recorded) = fields.get(offset) {
+                    path = text(recorded).trim_end().to_owned();
+                    offset += 1;
+                }
+            }
+        }
+        entries.push(FileHistoryEntry {
+            commit,
+            path,
+            status,
+        });
+    }
+    let capped = max_count > 0 && entries.len() > max_count;
+    if capped {
+        entries.truncate(max_count);
+    }
+    Ok(FileLog { entries, capped })
+}
+
+/// Whether a `--name-status` value is a status token (`A`, `M`, `R100`, ...)
+/// rather than the next commit's OID. Statuses are short and upper-case with
+/// a single leading letter, which no 40/64-character hexadecimal OID is.
+fn is_file_status(value: &str) -> bool {
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !matches!(first, 'A' | 'C' | 'D' | 'M' | 'R' | 'T' | 'U' | 'X' | 'B') {
+        return false;
+    }
+    value.len() <= 5 && chars.all(|character| character.is_ascii_digit())
+}
+
 /// Loads one commit's metadata plus its patch and diffstat as plain text.
 ///
 /// `--format=` suppresses the header that [`Commit`] already carries, and
@@ -2788,6 +2971,106 @@ u UU N... 100644 100644 100644 100644 a b c conflict.txt\x00\
             .unwrap();
         assert_eq!(unlimited.commits.len(), 3);
         assert!(!unlimited.capped);
+    }
+
+    #[tokio::test]
+    async fn list_files_reports_tracked_and_non_ignored_untracked_files() {
+        let temp = tempdir().unwrap();
+        run_git(temp.path(), &["init", "-q", "-b", "main"]);
+        fs::create_dir_all(temp.path().join("src")).unwrap();
+        commit_file(temp.path(), "src/main.rs", "fn main() {}\n", "add source");
+        fs::create_dir_all(temp.path().join("docs")).unwrap();
+        commit_file(temp.path(), "docs/guide.md", "guide\n", "add docs");
+        fs::create_dir_all(temp.path().join("vendor/deep")).unwrap();
+        fs::write(temp.path().join("vendor/deep/new.txt"), "new\n").unwrap();
+        fs::write(temp.path().join(".gitignore"), "ignored/\n").unwrap();
+        fs::create_dir_all(temp.path().join("ignored")).unwrap();
+        fs::write(temp.path().join("ignored/blob.bin"), "x\n").unwrap();
+
+        let files = list_files(temp.path()).await.unwrap();
+        // Tracked files and non-ignored untracked files are both listed, and
+        // the ignored tree stays out of the result.
+        assert!(files.contains(&"src/main.rs".to_owned()));
+        assert!(files.contains(&"docs/guide.md".to_owned()));
+        assert!(files.contains(&"vendor/deep/new.txt".to_owned()));
+        assert!(!files.iter().any(|file| file.starts_with("ignored/")));
+    }
+
+    #[tokio::test]
+    async fn file_log_follows_renames_and_caps_the_result() {
+        let temp = tempdir().unwrap();
+        run_git(temp.path(), &["init", "-q", "-b", "main"]);
+        commit_file(temp.path(), "a.txt", "one\n", "create file");
+        commit_file(temp.path(), "a.txt", "two\n", "edit file");
+        run_git(temp.path(), &["mv", "a.txt", "b.txt"]);
+        run_git(
+            temp.path(),
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.com",
+                "commit",
+                "-q",
+                "-m",
+                "rename file",
+            ],
+        );
+        commit_file(temp.path(), "b.txt", "three\n", "edit after rename");
+        // An unrelated file must not leak into this file's history.
+        commit_file(temp.path(), "other.txt", "other\n", "unrelated");
+
+        let log = file_log(temp.path(), "b.txt", 0).await.unwrap();
+        assert!(!log.capped);
+        let subjects = log
+            .entries
+            .iter()
+            .map(|entry| entry.commit.subject.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            subjects,
+            vec![
+                "edit after rename",
+                "rename file",
+                "edit file",
+                "create file"
+            ]
+        );
+        // `--follow` reports the historical name of the file: the commits
+        // before the rename name `a.txt`, and the rename itself is flagged.
+        let before_rename = log
+            .entries
+            .iter()
+            .find(|entry| entry.commit.subject == "edit file")
+            .unwrap();
+        assert_eq!(before_rename.path, "a.txt");
+        let rename = log
+            .entries
+            .iter()
+            .find(|entry| entry.commit.subject == "rename file")
+            .unwrap();
+        assert!(rename.status.starts_with('R'), "got {:?}", rename.status);
+        assert_eq!(rename.path, "b.txt");
+        let created = log
+            .entries
+            .iter()
+            .find(|entry| entry.commit.subject == "create file")
+            .unwrap();
+        assert_eq!(created.status, "A");
+
+        // A cap below the history size truncates and flags it.
+        let capped = file_log(temp.path(), "b.txt", 2).await.unwrap();
+        assert!(capped.capped);
+        assert_eq!(capped.entries.len(), 2);
+
+        // Unknown files produce an empty, unflagged history.
+        let missing = file_log(temp.path(), "nope.txt", 0).await.unwrap();
+        assert!(missing.entries.is_empty());
+        assert!(!missing.capped);
+
+        // Option-like and empty paths are rejected outright.
+        assert!(file_log(temp.path(), "--help", 0).await.is_err());
+        assert!(file_log(temp.path(), "", 0).await.is_err());
     }
 
     #[tokio::test]

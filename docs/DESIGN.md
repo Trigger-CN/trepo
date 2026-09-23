@@ -194,6 +194,9 @@ Git 与 Repo 的参数面很大，而且会随版本、插件和服务端扩展�
 - 提交详情：`Enter` 后用 `git::commit_patch` 异步执行 `git show --no-ext-diff --no-color --stat --patch --format= -m --first-parent <oid>`（固定 argv，拒绝空/`-` 开头/含 NUL 的 oid），返回 `RangeCommitResult { generation, oid, result }`，由 `RangeCommitView` 校验 generation+OID 后落地。`-m --first-parent` 是必要的：默认对 merge 不输出任何 diff，会让“查看改动”对 merge 静默变空。视图复用 Graph 的元数据行风格与 Changes 的 diff 配色，按终端宽度 wrap/truncate 并支持 `j`/`k`、`PageUp`/`PageDown` 滚动；无文本改动时给出明确文案而不是空白页。
 - 定位：`GraphState` 新增 `locate_oid`。`locate_graph_commit` 总是重新加载目标仓库历史再设置 `locate_oid`（因此同一仓库也能生效），`apply_graph` 在历史到达后：目标可见则选中；被当前 filter 隐藏则清空 filter、关闭表单并提示；已不可达则置错误且不移动选择。定位请求在每次应用后消费，不会影响后续刷新。
 - 异步：结果携带 generation，过期结果不覆盖新一轮；`reported`/`expected` 计数使 loading 在零命中时也能正确结束。
+- 跨仓库文件检索（`Screen::FileSearch`，Workspace 按 `F`）复用同一页式形态与分组呈现：单个大小写不敏感子串先与仓库相对路径比较；含路径分隔符（如 `/`）的查询再与「仓库目录 + 相对路径」的完整路径比较（`FileSearchSpec::matches`），因此文件名、路径片段、粘贴的完整路径以及跨越仓库目录的片段都能命中；每仓库并发执行 `git ls-files -z --cached --others --exclude-standard`（含未跟踪、尊重 ignore），每仓库上限 `PER_REPOSITORY_FILE_LIMIT = 4000`。用户输入不进入 Git 参数，避免路径规格/通配符语义与转义问题。
+- 文件历史：`Enter` 后用 `git::file_log` 执行 `git log --follow --date-order -z --name-status --pretty=<FILE_LOG_FORMAT> -- <path>`（单文件、固定 argv、`--` 分隔、拒绝空/`-` 开头/含 NUL 的路径）解析为 `FileLog { entries: Vec<FileHistoryEntry { commit, path, status }>, capped }`。`-z` 下 status 与路径是相邻的 NUL 字段，rename/copy 带源与目标两个路径（取最后一个 = 该提交内的名字）；merge 在 `--follow` 下可能没有 status/path 字段，解析器用状态字母判定而不把下一条记录的 OID 误读为路径。历史项再 `Enter` 复用提交详情/补丁通道（`FileHistoryView.commit_view`），`l` 复用 `locate_graph_commit`，`Esc` 按 提交详情 → 文件历史 → 结果列表 → 表单/返回 逐层退栈。
+- 异步：文件搜索与文件历史各自独立通道（`FileSearchResult`/`FileHistoryResult`/`RangeCommitResult`），文件历史结果同时校验 generation、project_id 与 path，过期或错文件的响应不落地。
 
 ## 6. Repository 页面
 
@@ -483,6 +486,8 @@ Upload 执行前展示 project 和准确 argv。M4 capture 模式只执行 `--cu
 | refs 与 upstream | `git for-each-ref` + 自定义 NUL/字段格式 |
 | commit DAG | `git log --date-order --parents` + 显式记录/字段分隔符 |
 | 跨仓库时间范围提交 | `git log --date-order --all --max-count/--since-as-filter/--until/--author/--grep` + 同一 NUL 字段格式，每仓库一次独立调用，每仓库最多 500 条 |
+| 跨仓库文件检索 | `git ls-files -z --cached --others --exclude-standard`，每仓库一次独立调用，匹配在 UI 侧做子串比较，每仓库最多 4000 条 |
+| 单文件提交历史 | `git log --follow --date-order -z --name-status --pretty=<NUL 格式> -- <path>`，单文件、`--` 分隔、rename 跟随、最多 4000 条 |
 | commit detail | `git show --no-patch` + 显式格式
 | 单个提交改动 | `git show --no-ext-diff --no-color --stat --patch --format= -m --first-parent <oid>`（merge 取相对第一父的 diff）|
 | diff/name status | `git diff --raw/-z`、`--numstat -z`、`--patch` |

@@ -185,6 +185,8 @@ impl Language {
             "Files" => "文件",
             "Diff" => "差异",
             "file" => "文件",
+            "Path" => "路径",
+            "Status" => "状态",
             "hunk" => "区块",
             "line" => "行",
             "Staged" => "已暂存",

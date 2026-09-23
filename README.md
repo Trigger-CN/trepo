@@ -88,8 +88,9 @@ git push origin v0.5.0
 | `m` / `a` / `w` | Changes: open Commit / Amend `HEAD` / Reword `HEAD` directly; Amend and Reword preload the current message, and a key pressed during Stage refresh opens the editor as soon as loading finishes |
 | `p` | Workspace: open a prefilled Push refspec form for the cursor repository after a fresh snapshot — Remote defaults to `origin` or the first remote, Refspec to `HEAD:refs/for/<current-branch>` (`master` when detached) — then confirm `git push <remote> <refspec>` |
 | `H` | Workspace: open the cross-repository commit range search page (Since/Until window with optional Author and message Query), scanning every repository in scope concurrently |
-| `Enter` | Range history: open the selected commit's detail and diff; other pages: open graph, object menu, or insert a newline |
-| `l` | Range history: jump to the owning repository's Graph page with that commit selected |
+| `F` | Workspace: open the cross-repository file search page (one case-insensitive path query), scanning every repository in scope concurrently |
+| `Enter` | Range history: open the selected commit's detail and diff; file search: open the selected file's commit history (and a history entry's commit detail); other pages: open graph, object menu, or insert a newline |
+| `l` | Range history / file history: jump to the owning repository's Graph page with that commit selected |
 | `Ctrl-A` / `Ctrl-U` / `Ctrl-G` | Toggle Commit/Amend compatibility mode / sign-off / signing in the Changes commit dialog |
 | `o` | Open Repository management from Workspace, Graph, or Changes |
 | `PageUp` / `PageDown` | Scroll the selected diff |
@@ -116,6 +117,7 @@ Implemented:
 - the range search caps every repository at 500 newest matches (a title note counts capped repositories, each capped group is also marked at its header) and renders only the rows inside the viewport, so an unfiltered query over a large workspace stays responsive
 - `Enter` on a range-search row opens that commit's detail page: metadata, the full message, and the `git show --stat --patch -m --first-parent` diffstat plus colour-coded patch (merges show their diff against the first parent instead of nothing), scrollable and with explicit empty text when a commit changes nothing
 - `l` on a range-search row jumps to the owning repository's Graph page with that commit selected; a Graph filter that hides it is cleared and reported, and a commit that is no longer reachable reports an error instead of moving the selection
+- cross-repository file search from Workspace `F`, presented as the same grouped page shape as the range search: a single case-insensitive string matched as a substring against every repository-relative path and, for a query containing `/`, against the repository directory joined with it (a bare file name, a path fragment, and a full pasted path all work), so tracked files and non-ignored untracked files are found across the workspace concurrently; results are grouped by repository in workspace order with the same two-line group header (full repository name and full directory), and `Enter` on a match opens that file's commit history (`git log --follow`, newest first, showing the rename's recorded path and `--name-status` letter, `l` locates a history entry in the owning Graph, and `Enter` again opens the commit's detail and diff)
 - Graph two-level object menu: select a commit node, choose its commit/HEAD/local branch/remote branch/tag/stash object, then choose a fixed contextual action
 - Graph contextual Commit/Amend actions route into the same multiline Changes editor instead of a separate empty-message form; Amend remains limited to the current HEAD object and preloads its message
 - Graph repository forms and confirmations reuse the protected RepositoryAction/OperationRunner workflow; local branches expose separate Push and force-with-lease actions while remote branches expose only valid local operations

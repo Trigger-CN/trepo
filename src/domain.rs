@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorkspaceKind {
@@ -845,6 +845,46 @@ impl RangeHistorySpec {
     }
 }
 
+/// One workspace-wide file search: a single user-typed query matched against
+/// repository-relative paths. The pattern is a case-insensitive substring, so
+/// a bare file name, a path fragment, and a full path all work.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FileSearchSpec {
+    pub query: String,
+}
+
+impl FileSearchSpec {
+    /// Compact one-line summary used by the page header.
+    pub fn summary(&self) -> String {
+        format!("path:{}", self.query)
+    }
+
+    /// Whether a repository-relative path matches this query.
+    ///
+    /// A plain case-insensitive substring match lets a bare file name find
+    /// files in any directory while a longer fragment narrows the same way,
+    /// and `*`/`?` stay ordinary characters instead of wildcards. A query
+    /// that looks like a path (it contains a separator) is also compared
+    /// against `root` joined with the relative path, so a pasted full path
+    /// or a fragment reaching above the repository directory still matches.
+    pub fn matches(&self, relative: &str, root: &Path) -> bool {
+        if self.query.is_empty() {
+            return false;
+        }
+        let query = self.query.to_lowercase();
+        if relative.to_lowercase().contains(&query) {
+            return true;
+        }
+        if !query.contains(['/', '\\']) {
+            return false;
+        }
+        root.join(relative)
+            .to_string_lossy()
+            .to_lowercase()
+            .contains(&query)
+    }
+}
+
 /// One repository's slice of a workspace range query, kept grouped by project
 /// so the UI can show provenance and per-repository errors.
 #[derive(Debug, Clone)]
@@ -856,4 +896,58 @@ pub struct ProjectRangeHistory {
     /// so `commits` is a bounded newest-first slice.
     pub capped: bool,
     pub error: Option<String>,
+}
+
+/// One repository's slice of a workspace file search: the repository-relative
+/// paths whose path matched the query.
+#[derive(Debug, Clone)]
+pub struct ProjectFileMatches {
+    pub project_id: ProjectId,
+    pub project_name: String,
+    pub files: Vec<String>,
+    /// True when the repository listed more files than the per-repository cap,
+    /// so the search result is a bounded slice.
+    pub capped: bool,
+    pub error: Option<String>,
+}
+
+/// The file whose history the file-search page is showing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileHistorySpec {
+    /// Repository-relative path as reported by the search result.
+    pub path: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn spec(query: &str) -> FileSearchSpec {
+        FileSearchSpec {
+            query: query.to_owned(),
+        }
+    }
+
+    const ROOT: &str = "/home/me/ws/alpha";
+
+    #[test]
+    fn file_search_matches_names_fragments_and_pasted_paths() {
+        let root = Path::new(ROOT);
+        // A bare file name finds files in any directory, case-insensitively.
+        assert!(spec("main.rs").matches("src/main.rs", root));
+        assert!(spec("MAIN.RS").matches("src/main.rs", root));
+        assert!(!spec("main.rs").matches("src/lib.rs", root));
+        // A path fragment narrows the same way.
+        assert!(spec("src/main").matches("src/main.rs", root));
+        // A path-shaped query also matches the rooted path, so a pasted
+        // full path and a fragment spanning the repository directory hit.
+        assert!(spec(&format!("{ROOT}/src/main.rs")).matches("src/main.rs", root));
+        assert!(spec("ws/alpha/src/main").matches("src/main.rs", root));
+        // A bare word that only occurs above the repository must not match
+        // every file, and `*` stays a literal character.
+        assert!(!spec("home").matches("src/main.rs", root));
+        assert!(!spec("*.rs").matches("src/main.rs", root));
+        // An empty query never matches.
+        assert!(!spec("").matches("src/main.rs", root));
+    }
 }

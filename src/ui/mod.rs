@@ -1,5 +1,6 @@
 mod change_tree;
 mod changes;
+mod file_search;
 mod graph;
 mod graph_layout;
 mod range_history;
@@ -22,6 +23,7 @@ pub fn render(frame: &mut Frame, app: &App) {
         Screen::Changes => changes::render(frame, app),
         Screen::Repository => repository::render(frame, app),
         Screen::RangeHistory => range_history::render(frame, app),
+        Screen::FileSearch => file_search::render(frame, app),
     }
     if app.help {
         render_help(frame, app);
@@ -60,6 +62,7 @@ fn render_help(frame: &mut Frame, app: &App) {
             Line::raw("m/a/w           提交 / 修订 HEAD / 改写 HEAD；Ctrl-Enter/S 确认"),
             Line::raw("t / p           Git 配置模板 / 打开预填 refspec 表单"),
             Line::raw("H               工作区时间段提交检索；列表 Enter 看详情、l 定位"),
+            Line::raw("F               工作区文件检索；列表 Enter 看该文件提交记录"),
             Line::raw("r               刷新当前页面"),
             Line::raw("Esc / q / ?     返回 / 退出 / 切换帮助"),
             Line::raw(""),
@@ -90,6 +93,7 @@ fn render_help(frame: &mut Frame, app: &App) {
             Line::raw("m/a/w          Commit / Amend HEAD / Reword HEAD; Ctrl-Enter/S submit"),
             Line::raw("t / p          Commit template / prefilled refspec push form"),
             Line::raw("H              Workspace range search; Enter detail, l locate in graph"),
+            Line::raw("F              Workspace file search; Enter shows that file's history"),
             Line::raw("r              Refresh current page"),
             Line::raw("Esc / q / ?    Back / quit Workspace / toggle help"),
             Line::raw(""),
@@ -1711,6 +1715,112 @@ mod tests {
             let text = draw_text(&app, width, height);
             assert!(text.contains("added line"));
             assert!(text.contains("Ada"));
+        }
+    }
+
+    #[tokio::test]
+    async fn renders_file_search_form_results_and_history_at_supported_sizes() {
+        let mut app = app();
+        app.open_file_search();
+        for (width, height) in [(80, 24), (120, 40)] {
+            let text = draw_text(&app, width, height);
+            assert!(compact_text(&text).contains("Path"));
+        }
+
+        // Simulate the post-run state: two repositories, each with matches.
+        app.file_search.form = None;
+        app.file_search.ran = true;
+        let first = app.workspace.projects[0].clone();
+        let second = Project {
+            id: ProjectId(PathBuf::from("/tmp/demo/vendor/long-module-name")),
+            name: "platform/second".into(),
+            path: PathBuf::from("/tmp/demo/vendor/long-module-name"),
+            relative_path: PathBuf::from("vendor/long-module-name"),
+        };
+        app.workspace.projects.push(second.clone());
+        app.file_search.projects = vec![
+            crate::domain::ProjectFileMatches {
+                project_id: first.id.clone(),
+                project_name: first.name.clone(),
+                files: vec!["src/widget.rs".into(), "docs/widget.md".into()],
+                capped: false,
+                error: None,
+            },
+            crate::domain::ProjectFileMatches {
+                project_id: second.id.clone(),
+                project_name: second.name.clone(),
+                files: vec!["vendor/deep/widget.c".into()],
+                capped: true,
+                error: None,
+            },
+        ];
+        app.rebuild_file_search_rows();
+        for (width, height) in [(80, 24), (120, 40)] {
+            let text = draw_text(&app, width, height);
+            for expected in [
+                "platform/demo",
+                "/tmp/demo",
+                "platform/second",
+                "/tmp/demo/vendor/long-module-name",
+                "src/widget.rs",
+                "vendor/deep/widget.c",
+                "capped",
+            ] {
+                assert!(
+                    text.contains(expected),
+                    "{expected:?} missing at {width}x{height}:\n{text}"
+                );
+            }
+        }
+
+        // The file history replaces the list and shows rename provenance and
+        // the rename status letter.
+        app.open_file_history();
+        let view = app.file_search.history.as_mut().unwrap();
+        let generation = view.generation;
+        let path = view.path.clone();
+        let project_id = view.project.id.clone();
+        app.apply_file_history(crate::services::file_search::FileHistoryResult {
+            generation,
+            project_id,
+            path,
+            result: Ok(crate::adapters::git::FileLog {
+                entries: vec![crate::adapters::git::FileHistoryEntry {
+                    commit: Commit {
+                        oid: "bb22bb22".into(),
+                        parents: Vec::new(),
+                        refs: Vec::new(),
+                        author: "Bo".into(),
+                        timestamp: 1_600_000_000,
+                        subject: "rename the widget".into(),
+                        body: String::new(),
+                    },
+                    path: "src/old_widget.rs".into(),
+                    status: "R100".into(),
+                }],
+                capped: false,
+            }),
+        });
+        for (width, height) in [(80, 24), (120, 40)] {
+            let text = draw_text(&app, width, height);
+            // The rename's recorded path is truncated only when the subject
+            // leaves no room; the status letter and commit OID always fit.
+            assert!(
+                text.contains("rename t"),
+                "history subject missing at {width}x{height}:\n{text}"
+            );
+            assert!(
+                text.contains("was src/old_widget.rs"),
+                "rename provenance missing at {width}x{height}:\n{text}"
+            );
+            assert!(
+                text.contains("R100"),
+                "rename status missing at {width}x{height}:\n{text}"
+            );
+            assert!(
+                text.contains("bb22bb22"),
+                "commit oid missing at {width}x{height}:\n{text}"
+            );
         }
     }
 }
