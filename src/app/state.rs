@@ -42,6 +42,9 @@ pub enum WorkspaceView {
     All,
     Changed,
     ChangedWithFiles,
+    /// Only repositories that lead or trail their upstream, i.e. that have
+    /// commits to push or pull relative to the tracked remote branch.
+    Diverged,
 }
 
 impl WorkspaceView {
@@ -49,7 +52,8 @@ impl WorkspaceView {
         match self {
             Self::All => Self::Changed,
             Self::Changed => Self::ChangedWithFiles,
-            Self::ChangedWithFiles => Self::All,
+            Self::ChangedWithFiles => Self::Diverged,
+            Self::Diverged => Self::All,
         }
     }
 
@@ -58,11 +62,26 @@ impl WorkspaceView {
             Self::All => 0,
             Self::Changed => 1,
             Self::ChangedWithFiles => 2,
+            Self::Diverged => 3,
         }
     }
 
-    pub fn filters_changed(self) -> bool {
-        self != Self::All
+    /// Whether a repository belongs to this view. `All` keeps everything;
+    /// `Changed`/`ChangedWithFiles` keep dirty or mid-operation repositories;
+    /// `Diverged` keeps only repositories whose upstream holds commits to
+    /// exchange, which is how a repository shows as out of sync with its
+    /// remote.
+    pub fn includes(self, snapshot: &ProjectSnapshot) -> bool {
+        match self {
+            Self::All => true,
+            Self::Changed | Self::ChangedWithFiles => {
+                snapshot.worktree.is_dirty() || snapshot.operation.is_some()
+            }
+            Self::Diverged => snapshot
+                .upstream
+                .as_ref()
+                .is_some_and(|upstream| upstream.ahead > 0 || upstream.behind > 0),
+        }
     }
 
     pub fn expands_files(self) -> bool {
@@ -1254,7 +1273,7 @@ pub struct App {
     pub search: String,
     pub search_mode: bool,
     pub workspace_view: WorkspaceView,
-    pub workspace_layouts: [WorkspaceLayout; 3],
+    pub workspace_layouts: [WorkspaceLayout; 4],
     pub language: Language,
     pub help: bool,
     pub generation: u64,
@@ -1365,6 +1384,7 @@ impl App {
                 WorkspaceLayout::List,
                 WorkspaceLayout::List,
                 WorkspaceLayout::Tree,
+                WorkspaceLayout::List,
             ],
             language,
             help: false,
@@ -1475,9 +1495,7 @@ impl App {
             .iter()
             .enumerate()
             .filter(|(_, snapshot)| {
-                (!self.workspace_view.filters_changed()
-                    || snapshot.worktree.is_dirty()
-                    || snapshot.operation.is_some())
+                self.workspace_view.includes(snapshot)
                     && (query.is_empty()
                         || snapshot.project.name.to_lowercase().contains(&query)
                         || snapshot
@@ -5309,8 +5327,8 @@ mod tests {
 
     use super::*;
     use crate::domain::{
-        BranchEntry, ChangeHunk, CommitRef, CommitRefKind, RemoteEntry, WorkspaceKind,
-        WorktreeSummary,
+        BranchEntry, ChangeHunk, CommitRef, CommitRefKind, RemoteEntry, UpstreamState,
+        WorkspaceKind, WorktreeSummary,
     };
 
     fn project(name: &str) -> Project {
@@ -5362,6 +5380,17 @@ mod tests {
         app.projects[3].worktree.untracked = 1;
         app.projects[4].worktree.conflicted = 1;
         app.projects[0].operation = Some(GitOperationKind::Rebase);
+        app.projects[3].upstream = Some(UpstreamState {
+            name: "origin/main".into(),
+            ahead: 1,
+            behind: 0,
+        });
+        // An upstream that is level is not a divergence.
+        app.projects[4].upstream = Some(UpstreamState {
+            name: "origin/main".into(),
+            ahead: 0,
+            behind: 0,
+        });
         app.selected = 2;
 
         app.cycle_workspace_view();
@@ -5376,6 +5405,13 @@ mod tests {
         app.restore_workspace_selection(Some(&untracked_id));
         app.cycle_workspace_view();
         assert_eq!(app.workspace_view, WorkspaceView::ChangedWithFiles);
+        assert_eq!(app.selected_project().unwrap().project.name, "untracked");
+
+        // Only the repository that actually leads or trails its upstream is
+        // kept; an up-to-date upstream is not a divergence.
+        app.cycle_workspace_view();
+        assert_eq!(app.workspace_view, WorkspaceView::Diverged);
+        assert_eq!(app.filtered_indices(), vec![3]);
         assert_eq!(app.selected_project().unwrap().project.name, "untracked");
 
         app.cycle_workspace_view();
@@ -5424,6 +5460,8 @@ mod tests {
         app.cycle_workspace_view();
         assert_eq!(app.workspace_layout(), WorkspaceLayout::Tree);
         app.toggle_workspace_layout();
+        assert_eq!(app.workspace_layout(), WorkspaceLayout::List);
+        app.cycle_workspace_view();
         assert_eq!(app.workspace_layout(), WorkspaceLayout::List);
         app.cycle_workspace_view();
         assert_eq!(app.workspace_layout(), WorkspaceLayout::Tree);

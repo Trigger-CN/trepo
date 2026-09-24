@@ -53,7 +53,7 @@ fn render_help(frame: &mut Frame, app: &App) {
             Line::raw("Enter           打开提交图 / 提交信息中换行"),
             Line::raw("Space / A       选择当前 / 全部仓库或改动文件"),
             Line::raw("S/Z/D           对光标仓库 / 已选仓库执行暂存 / 储藏 / 丢弃"),
-            Line::raw("d               切换全部 / 仅改动 / 改动与文件范围"),
+            Line::raw("d               切换全部 / 仅改动 / 改动与文件 / 与远端有差异范围"),
             Line::raw("t               切换当前范围的列表 / 树形布局"),
             Line::raw("a               Workspace Repo 操作；Changes 修订 HEAD"),
             Line::raw("f, /, x         提交图过滤 / 搜索 / 清除；x 也可终止活动 Git 操作"),
@@ -82,7 +82,7 @@ fn render_help(frame: &mut Frame, app: &App) {
             Line::raw(
                 "S/Z/D          Workspace cursor / selected repositories: Stage / Stash / Discard",
             ),
-            Line::raw("d              Switch all / changed / changed with files scope"),
+            Line::raw("d              Switch all / changed / changed with files / diverged scope"),
             Line::raw("t              Toggle List / Tree for the current scope"),
             Line::raw("a              Workspace Repo actions; Changes Amend HEAD"),
             Line::raw(
@@ -143,8 +143,8 @@ mod tests {
         ChangePreview, Commit, CommitMode, CommitRef, CommitRefKind, GitOperationKind, HunkSource,
         OperationKind, OperationTarget, Project, ProjectId, RemoteBranchEntry, RemoteEntry,
         RepoBatchAction, RepoBatchSpec, RepoProjectResult, RepoProjectState, RepositoryAction,
-        RepositorySnapshot, StashEntry, TagEntry, Workspace, WorkspaceGitAction, WorkspaceGitSpec,
-        WorkspaceGitTarget, WorkspaceKind, WorktreeSummary,
+        RepositorySnapshot, StashEntry, TagEntry, UpstreamState, Workspace, WorkspaceGitAction,
+        WorkspaceGitSpec, WorkspaceGitTarget, WorkspaceKind, WorktreeSummary,
     };
 
     fn app() -> App {
@@ -491,6 +491,34 @@ mod tests {
         assert!(file_list.contains("changed + files [List]"));
         assert!(file_list.contains("M.  src/dirty-0.rs"));
         assert!(file_list.contains("more files"));
+
+        app.cycle_workspace_view();
+        assert_eq!(
+            app.workspace_view,
+            crate::app::state::WorkspaceView::Diverged
+        );
+        assert_eq!(
+            app.workspace_layout(),
+            crate::app::state::WorkspaceLayout::List
+        );
+        // An upstream that is level is not a divergence, so the scope is
+        // empty but still named in the header and title.
+        let diverged_empty = draw_text(&app, 120, 40);
+        assert!(diverged_empty.contains("Diverged"));
+        assert!(diverged_empty.contains("diverged [List]"));
+        draw(&app, 80, 24);
+
+        // A repository that leads and trails its upstream is kept, and the
+        // Upstream column shows the counts.
+        app.projects[0].upstream = Some(UpstreamState {
+            name: "origin/main".into(),
+            ahead: 2,
+            behind: 1,
+        });
+        let diverged = draw_text(&app, 120, 40);
+        assert!(diverged.contains("diverged [List]"));
+        assert!(diverged.contains("+2 -1"));
+        draw(&app, 80, 24);
 
         app.cycle_workspace_view();
         assert_eq!(app.workspace_view, crate::app::state::WorkspaceView::All);

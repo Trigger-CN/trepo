@@ -87,8 +87,10 @@ fn render_header(frame: &mut Frame, app: &App, area: Rect) {
             (_, WorkspaceView::All) => "",
             (false, WorkspaceView::Changed) => "  Changed only",
             (false, WorkspaceView::ChangedWithFiles) => "  Changed + files",
+            (false, WorkspaceView::Diverged) => "  Diverged",
             (true, WorkspaceView::Changed) => "  仅改动",
             (true, WorkspaceView::ChangedWithFiles) => "  改动与文件",
+            (true, WorkspaceView::Diverged) => "  与远端有差异",
         };
         if !app.search.is_empty() {
             format!(
@@ -137,8 +139,10 @@ fn workspace_view_suffix(app: &App) -> &'static str {
         (_, WorkspaceView::All) => "",
         (false, WorkspaceView::Changed) => " changed only",
         (false, WorkspaceView::ChangedWithFiles) => " changed + files",
+        (false, WorkspaceView::Diverged) => " diverged",
         (true, WorkspaceView::Changed) => " 仅改动",
         (true, WorkspaceView::ChangedWithFiles) => " 改动与文件",
+        (true, WorkspaceView::Diverged) => " 与远端有差异",
     }
 }
 

@@ -52,7 +52,7 @@ M1 是所有后续里程碑的共同数据与交互基础。M4 可以在 M2 后�
 
 - 从任意子目录识别 Repo 工作区或单 Git 仓库，并并发扫描状态。
 - Workspace、完整 all-refs Graph、Changes 和 Repository 管理页面均已可用。
-- Workspace 支持稳定 ProjectId 多选、命名搜索；`d` 独立切换全部、仅改动、改动仓库及文件三种范围，`t` 独立切换每种范围的列表/树形布局并分别记忆。活动 merge/rebase/cherry-pick/revert 会显示在列表和 Inspector，并可经新鲜快照确认后终止。
+- Workspace 支持稳定 ProjectId 多选、命名搜索；`d` 独立切换全部、仅改动、改动仓库及文件、与远端有差异四种范围，`t` 独立切换每种范围的列表/树形布局并分别记忆。活动 merge/rebase/cherry-pick/revert 会显示在列表和 Inspector，并可经新鲜快照确认后终止。
 - Graph 支持 commit/HEAD/local branch/remote branch/tag/stash 两级上下文操作及 typed form；Commit 可从 commit/HEAD 对象进入，Amend 仅在 HEAD 对象提供。Subject 按显示列宽多行渲染，Inspector 保留 body 原始换行，本地分支直接提供普通 Push 与 Force push with lease。
 - Changes 支持文件多选批量 Stage/Unstage、selected-path Stash 和完整 Discard，提供 Commit/Amend/Reword 显式编辑入口，并展示及终止活动 Git 操作；文件/hunk/changed-line、commit/stash/conflict、refs/integration 和 remotes 写操作受锁、token 和 generation 保护。
 - 提交消息模板存于仓库本地 `trepo.commitTemplate`，可在 Changes 按 `t` 编辑；模板只预填全新的 Commit 草稿，Amend/Reword 仍预载 HEAD message。
@@ -176,8 +176,8 @@ cargo run -- doctor .
 - 表格展示状态、project/path、HEAD、upstream 和错误。
 - Summary 展示总数、dirty、conflict、ahead、behind、error。
 - `j/k`、方向键、`g/G` 导航。
-- `/` 搜索 project/path/branch，`Esc` 清空搜索或退出；`d` 按“全部 → 仅改动 → 改动与文件”循环数据范围，两个改动范围与搜索按 AND 组合。
-- `t` 切换当前范围的 List/Tree，三个范围分别记忆布局；前两个范围的 Tree 展示仓库相对路径树，第三个范围的 Tree/List 展示文件目录树/完整路径列表。
+- `/` 搜索 project/path/branch，`Esc` 清空搜索或退出；`d` 按“全部 → 仅改动 → 改动与文件 → 与远端有差异”循环数据范围，两个改动范围与搜索按 AND 组合，“与远端有差异”只保留 upstream 存在且 ahead/behind 非零的仓库。
+- `t` 切换当前范围的 List/Tree，四个范围分别记忆布局；前两个范围的 Tree 展示仓库相对路径树，第三个范围的 Tree/List 展示文件目录树/完整路径列表。
 - `r` 刷新，`Enter` 打开选中仓库，`?` 显示帮助。
 - 仓库树目录行和文件行不可独立选择；`j/k`、Enter、Space、Workspace Git 和 Repo 批量操作始终解析到稳定 `ProjectId`。宽屏 Inspector 继续显示完整仓库详情。
 
@@ -427,6 +427,7 @@ cargo build
 - Stash 高级模式、index 恢复、branch/clear，以及 selected-file/selected-repository Stash 和整仓 Stage 的领域映射、范围确认和 80x24/120x40 可见性均有测试覆盖。
 - 跨仓库时间范围检索（`H`）在真实临时仓库上验证窗口、Author、Query 与三者组合过滤，并用非单调日期 fixture 证明 `--since-as-filter` 保留窗口内超出遍历边界的提交；每仓库 `--max-count` 上限另用真实仓库验证截断返回恰好 cap 条且 `capped=true`、未截断与 unlimited 不丢条目；`git show -m --first-parent` 在含 merge 的真实仓库上验证恰好一份 diff 且携带 stat；状态机覆盖显式选择优先、页面进入/返回与表单重开、按仓库分组（工作区顺序 + 组内时间降序）、提交详情异步落地与 stale generation/OID 拒绝、滚动夹紧、跨仓库定位与过滤器揭示/不可达报错、流式归并、新增行缓存（分组显示行 + 选择夹紧）、零命中结束与 stale generation，UI 覆盖 80x24 与 120x40（含详情页的补丁与元数据渲染，以及双仓库两个组标题的完整名称、完整目录与 `capped` 标记断言）。
 - 跨仓库文件检索（`F`）在真实临时仓库上验证 `git ls-files` 同时列出已跟踪与非忽略的未跟踪文件、忽略目录不出现，以及匹配规则（单元测试覆盖文件名/路径片段/含分隔符的完整路径与跨越仓库目录的片段命中、`*` 保持普通字符、空查询不命中）与每仓库上限；`git log --follow -z --name-status` 在含重命名的真实仓库上验证 commit/path/status 解析（rename 展示当次记录的旧路径、`A` 状态与截断标记），并用实测确认 merge 在 `--follow` 下无 status/path 字段时解析器不吞下一条记录；状态机覆盖按仓库分组顺序、选择夹紧、历史异步落地与 stale generation/错文件拒绝、Esc 逐层退栈与表单重开回填，UI 覆盖 80x24 与 120x40（含双仓库组标题、完整目录、`capped`、文件历史的 `R100` 状态、`(was …)` 旧路径与 OID），真实 TTY 冒烟覆盖 `F` 检索、粘贴完整路径命中、文件历史/提交详情、`l` 定位与逐层 `Esc`。
+- Workspace “与远端有差异”范围在状态机单测中验证只保留 ahead/behind 非零的仓库（level upstream 与未跟踪 upstream 均被排除）、与搜索按 AND 组合及选择夹紧，UI 覆盖 80x24 与 120x40（范围名称与空态、`+N -M` 计数），真实 TTY 冒烟覆盖 `d` 循环到该范围、过滤结果与计数显示。
 - Repo 批处理保留凭据脱敏日志；Workspace Git 批任务保留逐仓库 pending/running/success/failure。两者均不承诺跨仓库回滚并在结束后复扫事实状态。
 - Graph Subject 和 Workspace 展开仓库使用真实视觉行高；Changes diff 每个源行固定一行，显示列宽安全层已覆盖中文宽字符、控制字符与长转短重绘残留。
 - Language 注入 App，默认 English；精确 `-zh`/`-en` 在 Clap 前规范化，标准 `--zh`/`--en` 同时受支持且互斥。

@@ -83,7 +83,7 @@ git push origin v0.5.0
 | `Tab` | Cycle file / hunk / line mode in Changes; switch tabs or form fields |
 | `z` | Changes: confirm stashing the selected files, including untracked files |
 | `s` / `u` | Stage / unstage selected Changes files, or the active file, hunk, or line when no file selection exists |
-| `d` | Workspace: cycle the data scope through all projects → changed projects → changed projects with files; Changes: confirm complete Discard for selected files or discard the active file/hunk/line |
+| `d` | Workspace: cycle the data scope through all projects → changed projects → changed projects with files → repositories diverged from their upstream (commits to push or pull); Changes: confirm complete Discard for selected files or discard the active file/hunk/line |
 | `t` | Workspace: toggle List / Tree layout for the current scope; each scope remembers its own layout; Changes: edit the repository-local commit message template |
 | `m` / `a` / `w` | Changes: open Commit / Amend `HEAD` / Reword `HEAD` directly; Amend and Reword preload the current message, and a key pressed during Stage refresh opens the editor as soon as loading finishes |
 | `p` | Workspace: open a prefilled Push refspec form for the cursor repository after a fresh snapshot — Remote defaults to `origin` or the first remote, Refspec to `HEAD:refs/for/<current-branch>` (`master` when detached) — then confirm `git push <remote> <refspec>` |
@@ -108,7 +108,7 @@ Implemented:
 - Repo and single-Git workspace discovery
 - Concurrent porcelain v2 status scanning
 - staged, unstaged, untracked, conflict, HEAD, ahead/behind, and active merge/rebase/cherry-pick/revert state captured during status scans
-- searchable responsive Workspace page where `d` cycles all projects, changed projects, and changed projects with files while `t` independently switches each scope between List and Tree; the first two scopes can render repository path trees, the third can render a change tree or flat full-path file list, and repository selection remains bound to stable project identity
+- searchable responsive Workspace page where `d` cycles all projects, changed projects, changed projects with files, and repositories diverged from their upstream (commits ahead of or behind the tracked branch), while `t` independently switches each scope between List and Tree; the first two scopes can render repository path trees, the third can render a change tree or flat full-path file list, and repository selection remains bound to stable project identity
 - complete all-refs commit graph covering local branches, remote branches, tags, HEAD, and every stash entry, ordered with commit-date order (newest first, parents always after their children) and showing UTC calendar dates
 - compact pipe-based topology lanes with left-shifting continuations, solid split/merge connectors, explicit `~N` hidden-lane markers, and `◉` missing-parent boundaries
 - responsive Graph columns preserve topology, wrapped subject text, and important refs first; rows use their real visual height, commit body keeps original line breaks, and dense remote/tag badges fold into `R:+N`/`T:+N` while Inspector/object menus retain every ref
