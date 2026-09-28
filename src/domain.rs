@@ -485,6 +485,16 @@ pub struct BatchOperationSpec {
     pub kind: OperationKind,
 }
 
+/// A frozen patch-export request: the repository, the exact changes to export,
+/// and the file the patch is written to. The Changes page builds it and lists
+/// `items` in the confirmation before anything is written.
+#[derive(Debug, Clone)]
+pub struct ExportSpec {
+    pub project: Project,
+    pub items: Vec<ChangeEntry>,
+    pub output: PathBuf,
+}
+
 #[derive(Debug, Clone)]
 pub struct OperationOutcome {
     pub kind: OperationKind,

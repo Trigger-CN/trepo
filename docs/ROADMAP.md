@@ -54,7 +54,7 @@ M1 是所有后续里程碑的共同数据与交互基础。M4 可以在 M2 后�
 - Workspace、完整 all-refs Graph、Changes 和 Repository 管理页面均已可用。
 - Workspace 支持稳定 ProjectId 多选、命名搜索；`d` 独立切换全部、仅改动、改动仓库及文件、与远端有差异四种范围，`t` 独立切换每种范围的列表/树形布局并分别记忆。活动 merge/rebase/cherry-pick/revert 会显示在列表和 Inspector，并可经新鲜快照确认后终止。
 - Graph 支持 commit/HEAD/local branch/remote branch/tag/stash 两级上下文操作及 typed form；Commit 可从 commit/HEAD 对象进入，Amend 仅在 HEAD 对象提供。Subject 按显示列宽多行渲染，Inspector 保留 body 原始换行，本地分支直接提供普通 Push 与 Force push with lease。
-- Changes 支持文件多选批量 Stage/Unstage、selected-path Stash 和完整 Discard，提供 Commit/Amend/Reword 显式编辑入口，并展示及终止活动 Git 操作；文件/hunk/changed-line、commit/stash/conflict、refs/integration 和 remotes 写操作受锁、token 和 generation 保护。
+- Changes 支持文件多选批量 Stage/Unstage、selected-path Stash、完整 Discard 与导出 patch（`E`，有选择导出所选、否则全部，确认框先列文件与输出路径，写入仓库根 `changes.patch`），提供 Commit/Amend/Reword 显式编辑入口，并展示及终止活动 Git 操作；文件/hunk/changed-line、commit/stash/conflict、refs/integration 和 remotes 写操作受锁、token 和 generation 保护。
 - 提交消息模板存于仓库本地 `trepo.commitTemplate`，可在 Changes 按 `t` 编辑；模板只预填全新的 Commit 草稿，Amend/Reword 仍预载 HEAD message。
 - Repository → Remotes 提供独立 Push refspec 入口；Workspace 按 `p` 先从最新快照预填 Remote 与 `HEAD:refs/for/<branch>`（detached HEAD 回退 `master`），在可编辑表单中修改目标后才进入同一 RemoteWrite 确认流程。
 - Workspace 按 `H` 进入跨仓库时间范围检索页（与 Graph 提交列表同版式但不含分支树列，`Esc` 返回）：`YYYY-MM-DD` Since/Until 窗口加可选 Author/Query，下界使用 `--since-as-filter`（Git ≥ 2.29）以免漏掉非单调时间内的提交；有显式选择时查选择集合，否则查全部仓库，并发加载并按仓库分组展示，组顺序沿用工作区仓库顺序，组标题固定两行：第 1 行仓库名与 `(N commits)`（截断时追加 `capped`），第 2 行完整目录，名称与目录各占一行、不被表格列压缩；组内提交按时间降序。每仓库最多保留 500 条命中并在标题提示 `, N capped`，只渲染当前视口，空条件检索也不会拖慢界面。结果行按 `Enter` 查看该提交的完整信息与改动（`git show --stat --patch -m --first-parent`，merge 看第一父提交的 diff），按 `l` 直接跳到所属仓库提交图并选中该提交（被过滤器隐藏时先清空并提示）。
@@ -236,7 +236,7 @@ cargo run -- doctor .
 范围：
 
 - Workspace Inspector 与 Changes 共享展开式文件树，目录连接符不改变稳定文件身份。
-- Changes 文件多选和批量 Stage/Unstage、selected-path Stash、完整 Discard；文件、hunk、changed-line 单目标 Stage/Unstage/Discard。
+- Changes 文件多选和批量 Stage/Unstage、selected-path Stash、完整 Discard 和导出 patch（`E`）；文件、hunk、changed-line 单目标 Stage/Unstage/Discard。
 - 多行 Commit/Amend/Reword 编辑器支持光标导航、当前位置输入与粘贴、HEAD message 预载、signoff/signing、hook 输出和 message/cursor 恢复；Reword 保留 staged index。
 - stash list/show/push/apply/pop/branch/drop/clear；push 支持 include-untracked、keep-index、staged-only，apply/pop 支持恢复 index。
 - operation state 在 Workspace、Changes 和 Repository 一致展示；冲突列表、ours/theirs/mark-resolved 和 continue/skip/abort 复用受保护执行路径。
@@ -252,7 +252,7 @@ cargo run -- doctor .
 - bracketed paste 与显式 `Ctrl-V` 剪贴板读取保留提交正文换行，并按与按键相同的优先级路由到提交模板、commit 编辑器、Graph filter/action、Repository、Repo 批量表单和 Workspace 搜索；Unicode 光标移动、中间插入/删除、行首尾和跨行移动有状态测试覆盖。`Ctrl-V` 读取在后台任务中完成且不阻塞输入循环，助手按平台固定 argv 依次尝试并带超时，全部不可用时在编辑器内提示改用终端粘贴。Amend/Reword 预载 HEAD message，无 HEAD 时明确拒绝。
 - Workspace/Changes 的 Abort 在确认前重新读取 RepositorySnapshot 并校验 operation 类型，确认后以 snapshot token、workspace/project lock 和 index-lock 前置检查执行。
 - 80x24/120x40 TestBackend 验证 Changes/Workspace Git 确认与结果、活动 operation/abort 确认、Message 边框、Options/Keys 分隔区和真实 cursor；Changes 文件名 cell 直接覆盖 staged、unstaged、mixed、untracked、conflict 状态色及选中态覆盖。
-- 真实临时仓库覆盖 Reword 保留 staged index/tree、selected-path Stash、完整 Discard、双仓库 Stage/Stash/Discard、冲突拒绝、stale 全批零写入，以及高级 stash、conflict 和 operation abort 工作流。
+- 真实临时仓库覆盖 Reword 保留 staged index/tree、selected-path Stash、完整 Discard、导出 patch（staged+worktree+untracked 合并后 `git apply --check` 通过、子集选择、unborn HEAD 空树基线）、双仓库 Stage/Stash/Discard、冲突拒绝、stale 全批零写入，以及高级 stash、conflict 和 operation abort 工作流。
 
 关键基础设施：
 
@@ -347,7 +347,7 @@ cargo run -- doctor .
 
 - reflog、bisect、blame、range-diff。
 - worktree、submodule、sparse-checkout。
-- format-patch/apply/am。
+- format-patch mailbox（`git format-patch`）与 `git apply`/`git am` 应用流程（Changes 的 `E` 已能导出可 apply 的工作区 diff patch）。
 - maintenance/gc/fsck。
 - Git LFS 和配置化外部动作。
 - 保存视图、主题和快捷键 preset。
@@ -397,7 +397,7 @@ cargo run -- doctor .
 | M1 工作区发现 | Done | 单 Git + fake Repo client 端到端通过 |
 | M1 状态扫描 | Done | porcelain fixture + 真实 Git + 缺失项目隔离通过 |
 | M1 Workspace UI | Done | 80x24/120x40 渲染和真实导航通过 |
-| M2 Changes/commit | Done | 文件树、批量 Stage/Unstage/Stash/Discard、可导航多行 editor、file/hunk/line、stale/index lock 和真实 Git 通过 |
+| M2 Changes/commit | Done | 文件树、批量 Stage/Unstage/Stash/Discard、导出 patch、可导航多行 editor、file/hunk/line、stale/index lock 和真实 Git 通过 |
 | M2 stash/conflict | Done | staged/keep-index/index restore/branch/clear、非法组合拒绝、ours/theirs/resolved、continue/skip/abort 通过 |
 | M3 refs/integration | Done | branch/tag、merge/rebase/cherry-pick/revert 与 Graph 本地分支 Push/Force Push 矩阵通过 |
 | M3 remotes | Done | bare remote 普通 push、非快进拒绝、陈旧/当前 lease、fetch/pull/upstream/prune 与 remote 管理通过 |

@@ -308,6 +308,9 @@ fn drain_background_messages(app: &mut App) {
     while let Ok(result) = app.preview_rx.try_recv() {
         app.apply_preview(result);
     }
+    while let Ok(result) = app.export_rx.try_recv() {
+        app.apply_export(result);
+    }
     while let Ok(result) = app.batch_prepare_rx.try_recv() {
         app.apply_batch_prepare(result);
     }
@@ -620,6 +623,18 @@ fn handle_key(app: &mut App, key: KeyEvent) {
     if app
         .changes
         .as_ref()
+        .is_some_and(|changes| changes.export_confirmation.is_some())
+    {
+        match key.code {
+            KeyCode::Char('y') | KeyCode::Char('Y') => app.confirm_export(true),
+            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => app.confirm_export(false),
+            _ => {}
+        }
+        return;
+    }
+    if app
+        .changes
+        .as_ref()
         .is_some_and(|changes| changes.template_editing)
     {
         match key.code {
@@ -764,6 +779,7 @@ fn handle_key(app: &mut App, key: KeyEvent) {
             KeyCode::Char('o') => app.open_repository(),
             KeyCode::Char(' ') => app.toggle_change_selected(),
             KeyCode::Char('A') => app.toggle_all_changes_selected(),
+            KeyCode::Char('E') => app.begin_export(),
             KeyCode::Char('s') => app.begin_operation(trepo::domain::OperationKind::Stage),
             KeyCode::Char('u') => app.begin_operation(trepo::domain::OperationKind::Unstage),
             KeyCode::Char('z') => app.begin_operation(trepo::domain::OperationKind::Stash),
@@ -904,6 +920,9 @@ mod tests {
             selected_hunk_identity: None,
             selected_line: 0,
             selected_line_identity: None,
+            export_confirmation: None,
+            export_running: false,
+            export_generation: 0,
             loading: false,
             error: None,
             generation: 1,

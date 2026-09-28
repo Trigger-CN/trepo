@@ -273,6 +273,7 @@ Changes 页面分为文件树、hunk 列表、diff 检查器和提交对话框�
 - 批量 Stage/Unstage 在同一 workspace/project lock 内重新读取所有条目，先验证全部文件的适用性与 diff token，再开始逐项写入；任一 token 陈旧时不写任何目标。
 - 批量 Stash/Discard 在显示确认框前异步冻结全部路径和内容 token；确认框列出动作、文件数、`XY` 状态和路径。确认后 Runner 在同一锁内复验冻结范围。Stash 固定包含 selected tracked/untracked 路径；Discard 恢复 tracked index/worktree、删除 staged-added/untracked，并正确处理 rename 的原路径与新路径，未选择路径不受影响。
 - hunk 与 changed-line 级 stage、unstage、discard；行操作使用当前 diff 重建零上下文 patch，执行 `git apply --check --unidiff-zero` 后写入。
+- 导出 patch（`E`）：在 Changes 文件模式下，有文件选择时导出所选、无选择时导出全部改动；先显示确认框列出仓库、文件数、每个文件的 `XY` 状态与路径，以及输出路径（仓库根目录的 `changes.patch`），按 `y` 写入。`git::export_patch` 对 tracked（staged + worktree + conflicted）条目执行一次 `git diff --binary --no-ext-diff --no-color <base> -- <paths...>`（base 为 `HEAD`，unborn HEAD 时用空树 hash `4b825dc...`，由 `git rev-parse --verify --quiet HEAD` 判定），对每个 untracked 文件单独执行 `git diff --no-index --binary ... /dev/null -- <path>`（允许退出码 0/1），只拼接 Git 输出、argv 全部独立且经 `validate_path`。写文件在后台任务中完成，结果带 project/changes/export generation 校验，陈旧结果不落地；成功后刷新 Changes（`changes.patch` 本身作为未跟踪改动出现）。
 - diff 模式支持 unified、side-by-side、word diff、忽略空白。
 - 二进制、重命名、submodule、mode change、大文件和不可解码文件明确降级。
 - commit 对话框使用独立 bordered message editor、options 区和带顶部分隔线的快捷键区；提示文本不与消息内容共用连续文本区域。

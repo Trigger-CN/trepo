@@ -291,6 +291,10 @@ flowchart TD
     B -->|s/u| BW[批量 Stage/Unstage，直接执行]
     B -->|z| BS[冻结文件与 token，确认 selected-path Stash]
     B -->|d| BD[冻结文件与 token，确认完整 Discard]
+    B -->|E| BE[确认导出 patch：列文件与输出路径]
+    F -->|E| BE
+    BE -->|y| X
+    BE -->|n/Esc| C
     BS -->|y| X[锁内复验并执行]
     BD -->|y| X
     BS -->|n/Esc| C
@@ -323,6 +327,7 @@ flowchart TD
 | `s` | Stage 当前作用域；有文件多选时批量 Stage |
 | `u` | Unstage 当前作用域；有文件多选时批量 Unstage |
 | `d` | 有文件多选时完整 Discard 所选 tracked index/worktree 与 untracked；否则丢弃当前 file/hunk/line；必须确认 |
+| `E` | 将仓库改动导出为 patch：有文件多选时导出所选，无多选时导出全部；确认框先列出文件与输出路径，按 `y` 写入仓库根目录的 `changes.patch` |
 | `PageUp/PageDown` | 滚动 diff |
 | `t` | 在 Changes 打开仓库提交消息模板编辑器（存于仓库本地 `trepo.commitTemplate`） |
 | `m` | 在 Changes 原地打开 Commit 编辑器，提交暂存区；若正在 Stage/刷新则排队自动打开 |
@@ -333,6 +338,10 @@ flowchart TD
 某个动作不适用于当前来源时会被拒绝，例如 staged hunk 不能再次 Stage，worktree hunk不能 Unstage。二进制文件或没有可选择文本 hunk 的文件不能进入对应细粒度模式。
 
 Graph 中 HEAD 对象的 Commit/Amend 也会进入同一个 Changes 多行编辑器，不再显示需要重新填写消息的独立空表单。
+
+### 导出 patch 流程
+
+在 Changes 按 `E` 打开导出确认：有文件多选时只导出所选文件，无多选时导出全部改动。确认框先列出仓库、文件数、每个文件的状态与路径，以及输出路径（仓库根目录的 `changes.patch`），按 `y` 写入，按 `n`/`Esc` 取消。生成的 patch 合并 tracked（staged + worktree）与 untracked 改动，可用 `git apply` 应用；若仓库尚无任何提交（unborn HEAD），以空树为基线，所有改动都导出为新文件。写入完成后状态栏显示字节数，`changes.patch` 本身会作为未跟踪改动出现在列表中。
 
 ### Commit/Amend/Reword 流程
 

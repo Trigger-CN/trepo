@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
+use anyhow::Context;
 use tokio::sync::mpsc;
 
 use crate::adapters::{clipboard, git};
@@ -9,10 +10,10 @@ use crate::app::repository::{
 };
 use crate::domain::{
     BatchOperationItem, BatchOperationSpec, ChangeEntry, ChangePreview, Commit, CommitMode,
-    CommitOutcome, CommitSpec, FileSearchSpec, GitOperationKind, HunkSource, OperationKind,
-    OperationOutcome, OperationSpec, OperationTarget, Project, ProjectFileMatches, ProjectId,
-    ProjectRangeHistory, ProjectSnapshot, RangeHistorySpec, RepoBatchAction, RepoBatchSpec,
-    RepoProjectResult, RepoProjectState, RepositoryAction, RepositoryActionOutcome,
+    CommitOutcome, CommitSpec, ExportSpec, FileSearchSpec, GitOperationKind, HunkSource,
+    OperationKind, OperationOutcome, OperationSpec, OperationTarget, Project, ProjectFileMatches,
+    ProjectId, ProjectRangeHistory, ProjectSnapshot, RangeHistorySpec, RepoBatchAction,
+    RepoBatchSpec, RepoProjectResult, RepoProjectState, RepositoryAction, RepositoryActionOutcome,
     RepositoryActionSpec, RepositorySnapshot, RiskLevel, Workspace, WorkspaceGitAction,
     WorkspaceGitSpec, WorkspaceKind, WorkspaceSummary,
 };
@@ -798,6 +799,15 @@ pub struct TemplateResult {
 }
 
 #[derive(Debug)]
+pub struct ExportResult {
+    pub project_id: ProjectId,
+    pub changes_generation: u64,
+    pub export_generation: u64,
+    /// Byte length of the written patch on success.
+    pub result: anyhow::Result<usize>,
+}
+
+#[derive(Debug)]
 pub struct ClipboardResult {
     pub generation: u64,
     pub result: anyhow::Result<String>,
@@ -898,6 +908,11 @@ pub struct ChangesState {
     pub operation_running: bool,
     pub operation_generation: u64,
     pub confirmation: Option<PendingOperation>,
+    /// Pending patch export awaiting confirmation. The confirmation lists the
+    /// exact files that will be written and the destination path.
+    pub export_confirmation: Option<ExportSpec>,
+    pub export_running: bool,
+    pub export_generation: u64,
     pub message: Option<(bool, String)>,
     pub commit_message: String,
     pub commit_cursor: usize,
@@ -1295,6 +1310,8 @@ pub struct App {
     pub changes_rx: mpsc::UnboundedReceiver<ChangesResult>,
     preview_tx: mpsc::UnboundedSender<PreviewResult>,
     pub preview_rx: mpsc::UnboundedReceiver<PreviewResult>,
+    export_tx: mpsc::UnboundedSender<ExportResult>,
+    pub export_rx: mpsc::UnboundedReceiver<ExportResult>,
     pub operation_tx: mpsc::UnboundedSender<OperationResult>,
     pub operation_rx: mpsc::UnboundedReceiver<OperationResult>,
     batch_prepare_tx: mpsc::UnboundedSender<BatchPrepareResult>,
@@ -1366,6 +1383,7 @@ impl App {
         let (file_search_tx, file_search_rx) = mpsc::unbounded_channel();
         let (file_history_tx, file_history_rx) = mpsc::unbounded_channel();
         let (file_commit_tx, file_commit_rx) = mpsc::unbounded_channel();
+        let (export_tx, export_rx) = mpsc::unbounded_channel();
         let projects = workspace
             .projects
             .iter()
@@ -1407,6 +1425,8 @@ impl App {
             changes_rx,
             preview_tx,
             preview_rx,
+            export_tx,
+            export_rx,
             operation_tx,
             operation_rx,
             batch_prepare_tx,
@@ -3563,6 +3583,9 @@ impl App {
             selected_hunk_identity: None,
             selected_line: 0,
             selected_line_identity: None,
+            export_confirmation: None,
+            export_running: false,
+            export_generation: 0,
             loading: true,
             error: None,
             preview_loading: false,
@@ -4088,6 +4111,100 @@ impl App {
                 Some(PendingOperation::Batch(spec)) => self.spawn_prepared_batch(spec),
                 None => {}
             }
+        }
+    }
+
+    /// Opens the patch-export confirmation. With files selected it exports
+    /// exactly those; with none selected it exports every change. The list is
+    /// shown before anything is written.
+    pub fn begin_export(&mut self) {
+        let Some(changes) = self.changes.as_mut() else {
+            return;
+        };
+        if changes.export_running || changes.operation_running || changes.commit_running {
+            return;
+        }
+        if changes.mode != ChangesMode::File {
+            changes.message = Some((true, "Switch to file mode to export".to_owned()));
+            return;
+        }
+        let items = if changes.selected_files.is_empty() {
+            changes.entries.clone()
+        } else {
+            changes
+                .entries
+                .iter()
+                .filter(|entry| changes.selected_files.contains(&entry.path))
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        if items.is_empty() {
+            changes.message = Some((true, "There are no changes to export".to_owned()));
+            return;
+        }
+        changes.message = None;
+        changes.export_confirmation = Some(ExportSpec {
+            project: changes.project.clone(),
+            items,
+            output: changes.project.path.join("changes.patch"),
+        });
+    }
+
+    pub fn confirm_export(&mut self, accepted: bool) {
+        let spec = self
+            .changes
+            .as_mut()
+            .and_then(|changes| changes.export_confirmation.take());
+        if !accepted {
+            return;
+        }
+        let Some(spec) = spec else {
+            return;
+        };
+        let Some(changes) = self.changes.as_mut() else {
+            return;
+        };
+        changes.export_running = true;
+        changes.message = None;
+        changes.export_generation = changes.export_generation.wrapping_add(1);
+        let export_generation = changes.export_generation;
+        let changes_generation = changes.generation;
+        let project_id = spec.project.id.clone();
+        let sender = self.export_tx.clone();
+        tokio::spawn(async move {
+            let result = async {
+                let patch = git::export_patch(&spec.project.path, &spec.items).await?;
+                tokio::fs::write(&spec.output, patch.as_bytes())
+                    .await
+                    .with_context(|| format!("failed to write {}", spec.output.display()))?;
+                Ok(patch.len())
+            }
+            .await;
+            let _ = sender.send(ExportResult {
+                project_id,
+                changes_generation,
+                export_generation,
+                result,
+            });
+        });
+    }
+
+    pub fn apply_export(&mut self, result: ExportResult) {
+        let Some(changes) = self.changes.as_mut() else {
+            return;
+        };
+        if changes.project.id != result.project_id
+            || changes.generation != result.changes_generation
+            || changes.export_generation != result.export_generation
+        {
+            return;
+        }
+        changes.export_running = false;
+        match result.result {
+            Ok(bytes) => {
+                changes.message = Some((false, format!("Exported {bytes} bytes to changes.patch")));
+            }
+            Err(error) => changes.message = Some((true, error.to_string())),
         }
     }
 
@@ -5205,7 +5322,10 @@ impl App {
                     if changes.confirmation.take().is_some() {
                         return;
                     }
-                    if changes.operation_running {
+                    if changes.export_confirmation.take().is_some() {
+                        return;
+                    }
+                    if changes.operation_running || changes.export_running {
                         changes.message =
                             Some((true, "Wait for the operation to finish".to_owned()));
                         return;
@@ -5506,6 +5626,9 @@ mod tests {
             selected_hunk_identity: None,
             selected_line: 0,
             selected_line_identity: None,
+            export_confirmation: None,
+            export_running: false,
+            export_generation: 0,
             loading: true,
             error: None,
             generation: 2,
@@ -5592,6 +5715,9 @@ mod tests {
             selected_hunk_identity: None,
             selected_line: 0,
             selected_line_identity: None,
+            export_confirmation: None,
+            export_running: false,
+            export_generation: 0,
             loading: false,
             error: None,
             generation: 4,
@@ -5712,6 +5838,9 @@ mod tests {
             selected_hunk_identity: None,
             selected_line: 0,
             selected_line_identity: None,
+            export_confirmation: None,
+            export_running: false,
+            export_generation: 0,
             loading: false,
             error: None,
             generation: 1,
@@ -5891,6 +6020,140 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn export_confirmation_lists_selected_files_and_validates_generations() {
+        let value = project("alpha");
+        let workspace = Workspace {
+            root: PathBuf::from("/tmp"),
+            kind: WorkspaceKind::Git,
+            projects: vec![value.clone()],
+        };
+        let mut app = App::new(workspace, 1);
+        let entries = ["a.txt", "b.txt"]
+            .into_iter()
+            .map(|path| ChangeEntry {
+                path: PathBuf::from(path),
+                original_path: None,
+                index: None,
+                worktree: Some(crate::domain::ChangeCode::Modified),
+                untracked: false,
+                conflicted: false,
+            })
+            .collect::<Vec<_>>();
+        app.changes = Some(ChangesState {
+            project: value.clone(),
+            return_screen: Screen::Workspace,
+            entries: entries.clone(),
+            operation: None,
+            head_message: None,
+            selected: 0,
+            selected_files: HashSet::new(),
+            mode: ChangesMode::File,
+            selected_hunk: 0,
+            selected_hunk_identity: None,
+            selected_line: 0,
+            selected_line_identity: None,
+            export_confirmation: None,
+            export_running: false,
+            export_generation: 0,
+            loading: false,
+            error: None,
+            generation: 1,
+            preview: None,
+            preview_path: None,
+            preview_loading: false,
+            preview_generation: 0,
+            preview_scroll: 0,
+            operation_running: false,
+            operation_generation: 0,
+            confirmation: None,
+            message: None,
+            commit_message: String::new(),
+            commit_cursor: 0,
+            commit_editing: false,
+            pending_commit_mode: None,
+            commit_template: None,
+            template_editing: false,
+            template_draft: String::new(),
+            template_cursor: 0,
+            template_running: false,
+            template_generation: 0,
+            commit_mode: CommitMode::Commit,
+            commit_signoff: false,
+            commit_signing: false,
+            commit_running: false,
+            commit_generation: 0,
+        });
+
+        // No selection exports every change; the destination is shown in full.
+        app.begin_export();
+        let spec = app
+            .changes
+            .as_ref()
+            .unwrap()
+            .export_confirmation
+            .clone()
+            .unwrap();
+        assert_eq!(spec.items.len(), 2);
+        assert_eq!(spec.output, value.path.join("changes.patch"));
+        app.confirm_export(false);
+        assert!(app.changes.as_ref().unwrap().export_confirmation.is_none());
+
+        // A selection narrows the export to exactly those files.
+        app.changes
+            .as_mut()
+            .unwrap()
+            .selected_files
+            .insert(PathBuf::from("b.txt"));
+        app.begin_export();
+        let spec = app
+            .changes
+            .as_ref()
+            .unwrap()
+            .export_confirmation
+            .clone()
+            .unwrap();
+        assert_eq!(spec.items.len(), 1);
+        assert_eq!(spec.items[0].path, PathBuf::from("b.txt"));
+        app.confirm_export(false);
+
+        // An empty repository has nothing to export.
+        app.changes.as_mut().unwrap().entries.clear();
+        app.changes.as_mut().unwrap().selected_files.clear();
+        app.begin_export();
+        assert!(app.changes.as_ref().unwrap().export_confirmation.is_none());
+        assert!(app
+            .changes
+            .as_ref()
+            .unwrap()
+            .message
+            .as_ref()
+            .is_some_and(|(error, _)| *error));
+
+        // A stale generation is dropped; a matching one reports the byte count.
+        app.changes.as_mut().unwrap().export_running = true;
+        app.changes.as_mut().unwrap().export_generation = 5;
+        app.apply_export(ExportResult {
+            project_id: value.id.clone(),
+            changes_generation: 99,
+            export_generation: 5,
+            result: Ok(12),
+        });
+        assert!(app.changes.as_ref().unwrap().export_running);
+        app.apply_export(ExportResult {
+            project_id: value.id,
+            changes_generation: 1,
+            export_generation: 5,
+            result: Ok(12),
+        });
+        let changes = app.changes.as_ref().unwrap();
+        assert!(!changes.export_running);
+        assert!(changes
+            .message
+            .as_ref()
+            .is_some_and(|(error, message)| !error && message.contains("12")));
+    }
+
+    #[tokio::test]
     async fn commit_template_editor_persists_clears_and_seeds_only_empty_drafts() {
         let value = project("alpha");
         let workspace = Workspace {
@@ -5923,6 +6186,9 @@ mod tests {
             selected_hunk_identity: None,
             selected_line: 0,
             selected_line_identity: None,
+            export_confirmation: None,
+            export_running: false,
+            export_generation: 0,
             loading: false,
             error: None,
             generation: 1,
@@ -6098,6 +6364,9 @@ mod tests {
             selected_hunk_identity: None,
             selected_line: 0,
             selected_line_identity: None,
+            export_confirmation: None,
+            export_running: false,
+            export_generation: 0,
             loading: false,
             error: None,
             generation: 1,

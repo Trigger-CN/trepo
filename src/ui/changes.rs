@@ -78,6 +78,9 @@ pub fn render(frame: &mut Frame, app: &App) {
     if changes.confirmation.is_some() {
         render_confirmation(frame, app, changes);
     }
+    if changes.export_confirmation.is_some() {
+        render_export_confirmation(frame, app, changes);
+    }
     if app.repository.as_ref().is_some_and(|state| {
         state.return_screen == crate::app::state::Screen::Changes && state.pending.is_some()
     }) {
@@ -371,8 +374,8 @@ fn render_preview(frame: &mut Frame, app: &App, changes: &ChangesState, area: Re
 
 fn render_footer(frame: &mut Frame, app: &App, changes: &ChangesState, area: Rect) {
     let primary = Line::raw(app.language.text(
-        "m Commit   a Amend HEAD   w Reword HEAD   t Template   |   s Stage   u Unstage   z Stash   d Discard",
-        "m 提交   a 修订 HEAD   w 改写 HEAD   t 模板   |   s 暂存   u 取消暂存   z 储藏   d 丢弃",
+        "m Commit   a Amend HEAD   w Reword HEAD   t Template   |   s Stage   u Unstage   z Stash   d Discard   E Export patch",
+        "m 提交   a 修订 HEAD   w 改写 HEAD   t 模板   |   s 暂存   u 取消暂存   z 储藏   d 丢弃   E 导出 patch",
     ));
     let status = if changes.commit_running {
         Line::styled(
@@ -546,6 +549,75 @@ fn render_confirmation(frame: &mut Frame, app: &App, changes: &ChangesState) {
     frame.render_widget(
         Paragraph::new(lines)
             .block(Block::default().title(title).borders(Borders::ALL))
+            .wrap(Wrap { trim: false }),
+        area,
+    );
+}
+
+fn render_export_confirmation(frame: &mut Frame, app: &App, changes: &ChangesState) {
+    let Some(spec) = &changes.export_confirmation else {
+        return;
+    };
+    let area = centered_rect(76, 62, frame.area());
+    let mut lines = Vec::new();
+    lines.push(Line::styled(
+        app.language.text(
+            "Write the listed changes to a patch file.",
+            "将下列改动写入 patch 文件。",
+        ),
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    ));
+    lines.push(Line::raw(format!(
+        "{}: {}   {}: {}",
+        app.language.text("Repository", "仓库"),
+        spec.project.relative_path.display(),
+        app.language.label("Files"),
+        spec.items.len()
+    )));
+    lines.push(Line::raw(super::text::truncate(
+        &format!(
+            "{}: {}",
+            app.language.text("Output", "输出"),
+            spec.output.display()
+        ),
+        area.width.saturating_sub(2) as usize,
+    )));
+    lines.push(Line::raw(""));
+    let budget = usize::from(area.height.saturating_sub(10));
+    for item in spec.items.iter().take(budget) {
+        lines.push(Line::raw(super::text::truncate(
+            &format!("  {}  {}", item.status_label(), item.path.display()),
+            area.width.saturating_sub(2) as usize,
+        )));
+    }
+    if spec.items.len() > budget {
+        lines.push(Line::raw(format!(
+            "  ... {} {}",
+            spec.items.len() - budget,
+            app.language.text("more files", "个更多文件")
+        )));
+    }
+    lines.push(Line::raw(""));
+    lines.push(Line::raw(format!(
+        "{} {}{}",
+        app.language.text("Press y to", "按 y "),
+        app.language.text("export", "导出"),
+        app.language
+            .text(" or n/Esc to cancel.", "，按 n/Esc 取消。")
+    )));
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(
+                Block::default()
+                    .title(
+                        app.language
+                            .text(" Confirm patch export ", " 确认导出 patch "),
+                    )
+                    .borders(Borders::ALL),
+            )
             .wrap(Wrap { trim: false }),
         area,
     );

@@ -363,6 +363,78 @@ pub async fn change_token(root: &Path, entry: &ChangeEntry) -> Result<u64> {
     Ok(token_for_parts(&status_bytes, &parts))
 }
 
+/// Git's empty tree hash, the diff base for a repository whose `HEAD` is
+/// unborn: `git diff HEAD` fails there, but diffing against the empty tree
+/// still reports every staged and worktree change as a new file.
+pub const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+
+/// Builds a unified patch for the given changes, ready to be written to disk and
+/// applied with `git apply`.
+///
+/// Tracked entries (staged, worktree, and conflicted) are diffed against the
+/// current `HEAD` in one `git diff --binary` call, which already reports the
+/// combined staged and worktree state. Untracked files are not part of `HEAD`,
+/// so each one is diffed separately against `/dev/null`. `--binary` keeps binary
+/// changes applicable. Arguments stay separate entries: only Git's own output is
+/// concatenated, never a command line.
+pub async fn export_patch(root: &Path, entries: &[ChangeEntry]) -> Result<String> {
+    let base = if head_exists(root).await? {
+        "HEAD".to_owned()
+    } else {
+        EMPTY_TREE.to_owned()
+    };
+    let mut tracked: Vec<PathBuf> = Vec::new();
+    let mut untracked: Vec<PathBuf> = Vec::new();
+    for entry in entries {
+        if entry.untracked {
+            untracked.push(entry.path.clone());
+        } else {
+            tracked.push(entry.path.clone());
+        }
+    }
+
+    let mut patch = String::new();
+    if !tracked.is_empty() {
+        let mut args = vec![
+            OsString::from("diff"),
+            OsString::from("--binary"),
+            OsString::from("--no-ext-diff"),
+            OsString::from("--no-color"),
+            OsString::from(base),
+        ];
+        let paths: Vec<&Path> = tracked.iter().map(PathBuf::as_path).collect();
+        append_paths(&mut args, &paths)?;
+        let bytes = git_output(root, args).await?;
+        patch.push_str(&String::from_utf8_lossy(&bytes));
+    }
+    for path in &untracked {
+        validate_path(path)?;
+        let args = path_args(
+            &[
+                "diff",
+                "--no-index",
+                "--binary",
+                "--no-ext-diff",
+                "--no-color",
+                "/dev/null",
+            ],
+            path,
+        );
+        let bytes = git_output_allow(root, args, &[0, 1]).await?;
+        if !patch.is_empty() && !patch.ends_with('\n') {
+            patch.push('\n');
+        }
+        patch.push_str(&String::from_utf8_lossy(&bytes));
+    }
+    Ok(patch)
+}
+
+async fn head_exists(root: &Path) -> Result<bool> {
+    let bytes =
+        git_output_allow(root, ["rev-parse", "--verify", "--quiet", "HEAD"], &[0, 1]).await?;
+    Ok(!bytes.is_empty())
+}
+
 pub(crate) async fn resolve_hunks(
     root: &Path,
     entry: &ChangeEntry,
@@ -4239,5 +4311,113 @@ u UU N... 100644 100644 100644 100644 a b c conflict.txt\x00\
             .status()
             .unwrap();
         assert!(!branch.success());
+    }
+
+    fn entry_for<'a>(entries: &'a [ChangeEntry], path: &str) -> &'a ChangeEntry {
+        entries
+            .iter()
+            .find(|entry| entry.path == Path::new(path))
+            .unwrap_or_else(|| panic!("missing change for {path}"))
+    }
+
+    fn apply_check(root: &Path, patch: &Path) -> bool {
+        std::process::Command::new("git")
+            .args(["apply", "--check", patch.to_str().unwrap()])
+            .current_dir(root)
+            .output()
+            .unwrap()
+            .status
+            .success()
+    }
+
+    #[tokio::test]
+    async fn export_patch_covers_staged_worktree_and_untracked_changes() {
+        let temp = tempdir().unwrap();
+        run_git(temp.path(), &["init", "-q", "-b", "main"]);
+        run_git(temp.path(), &["config", "user.name", "Test"]);
+        run_git(temp.path(), &["config", "user.email", "test@example.com"]);
+        commit_file(temp.path(), "tracked.txt", "base\n", "base");
+        commit_file(temp.path(), "plain.txt", "plain\n", "plain");
+
+        // One file staged, one file worktree-only, one untracked.
+        fs::write(temp.path().join("tracked.txt"), "base\nstaged\n").unwrap();
+        run_git(temp.path(), &["add", "tracked.txt"]);
+        fs::write(temp.path().join("plain.txt"), "plain\nworktree\n").unwrap();
+        fs::write(temp.path().join("new.txt"), "untracked\n").unwrap();
+
+        let entries = changes(temp.path()).await.unwrap();
+        let patch = export_patch(temp.path(), &entries).await.unwrap();
+        assert!(patch.contains("+staged"), "{patch}");
+        assert!(patch.contains("+worktree"), "{patch}");
+        assert!(patch.contains("+untracked"), "{patch}");
+        assert!(patch.contains("--- /dev/null"), "{patch}");
+
+        // The combined patch applies cleanly onto the same base state.
+        let target = tempdir().unwrap();
+        run_git(target.path(), &["init", "-q", "-b", "main"]);
+        run_git(target.path(), &["config", "user.name", "Test"]);
+        run_git(target.path(), &["config", "user.email", "test@example.com"]);
+        commit_file(target.path(), "tracked.txt", "base\n", "base");
+        commit_file(target.path(), "plain.txt", "plain\n", "plain");
+        let patch_path = target.path().join("out.patch");
+        fs::write(&patch_path, &patch).unwrap();
+        assert!(apply_check(target.path(), &patch_path), "{patch}");
+    }
+
+    #[tokio::test]
+    async fn export_patch_honours_a_subset_selection() {
+        let temp = tempdir().unwrap();
+        run_git(temp.path(), &["init", "-q", "-b", "main"]);
+        run_git(temp.path(), &["config", "user.name", "Test"]);
+        run_git(temp.path(), &["config", "user.email", "test@example.com"]);
+        commit_file(temp.path(), "first.txt", "first\n", "first");
+        commit_file(temp.path(), "second.txt", "second\n", "second");
+        fs::write(temp.path().join("first.txt"), "first\nchanged\n").unwrap();
+        fs::write(temp.path().join("second.txt"), "second\nchanged\n").unwrap();
+
+        let entries = changes(temp.path()).await.unwrap();
+        let selected = vec![entry_for(&entries, "first.txt").clone()];
+        let patch = export_patch(temp.path(), &selected).await.unwrap();
+        assert!(patch.contains("first.txt"), "{patch}");
+        assert!(!patch.contains("second.txt"), "{patch}");
+    }
+
+    #[tokio::test]
+    async fn export_patch_uses_the_empty_tree_when_head_is_unborn() {
+        let temp = tempdir().unwrap();
+        run_git(temp.path(), &["init", "-q", "-b", "main"]);
+        run_git(temp.path(), &["config", "user.name", "Test"]);
+        run_git(temp.path(), &["config", "user.email", "test@example.com"]);
+        fs::write(temp.path().join("staged.txt"), "staged\n").unwrap();
+        run_git(temp.path(), &["add", "staged.txt"]);
+        fs::write(temp.path().join("untracked.txt"), "untracked\n").unwrap();
+
+        let entries = changes(temp.path()).await.unwrap();
+        let patch = export_patch(temp.path(), &entries).await.unwrap();
+        assert!(patch.contains("new file mode"), "{patch}");
+        assert!(patch.contains("+staged"), "{patch}");
+        assert!(patch.contains("+untracked"), "{patch}");
+    }
+
+    #[tokio::test]
+    async fn export_patch_keeps_binary_changes_applicable() {
+        let temp = tempdir().unwrap();
+        run_git(temp.path(), &["init", "-q", "-b", "main"]);
+        run_git(temp.path(), &["config", "user.name", "Test"]);
+        run_git(temp.path(), &["config", "user.email", "test@example.com"]);
+        commit_file(temp.path(), "seed.txt", "seed\n", "seed");
+        fs::write(temp.path().join("blob.bin"), [0u8, 1, 2, 3, 255]).unwrap();
+
+        let entries = changes(temp.path()).await.unwrap();
+        let patch = export_patch(temp.path(), &entries).await.unwrap();
+        assert!(patch.contains("GIT binary patch"), "{patch}");
+        let target = tempdir().unwrap();
+        run_git(target.path(), &["init", "-q", "-b", "main"]);
+        run_git(target.path(), &["config", "user.name", "Test"]);
+        run_git(target.path(), &["config", "user.email", "test@example.com"]);
+        commit_file(target.path(), "seed.txt", "seed\n", "seed");
+        let patch_path = target.path().join("out.patch");
+        fs::write(&patch_path, &patch).unwrap();
+        assert!(apply_check(target.path(), &patch_path), "{patch}");
     }
 }

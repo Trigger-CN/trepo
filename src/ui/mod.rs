@@ -59,6 +59,7 @@ fn render_help(frame: &mut Frame, app: &App) {
             Line::raw("f, /, x         提交图过滤 / 搜索 / 清除；x 也可终止活动 Git 操作"),
             Line::raw("Tab             切换改动模式或表单字段"),
             Line::raw("z/s/u           储藏 / 暂存 / 取消暂存"),
+            Line::raw("E               Changes 导出 patch（有选中导出选中，否则全部）"),
             Line::raw("m/a/w           提交 / 修订 HEAD / 改写 HEAD；Ctrl-Enter/S 确认"),
             Line::raw("t / p           Git 配置模板 / 打开预填 refspec 表单"),
             Line::raw("H               工作区时间段提交检索；列表 Enter 看详情、l 定位"),
@@ -90,6 +91,7 @@ fn render_help(frame: &mut Frame, app: &App) {
             ),
             Line::raw("Tab            Toggle Changes mode or active form field"),
             Line::raw("z/s/u          Stash files / Stage / Unstage in Changes"),
+            Line::raw("E              Changes export patch (selected files, else all)"),
             Line::raw("m/a/w          Commit / Amend HEAD / Reword HEAD; Ctrl-Enter/S submit"),
             Line::raw("t / p          Commit template / prefilled refspec push form"),
             Line::raw("H              Workspace range search; Enter detail, l locate in graph"),
@@ -140,11 +142,11 @@ mod tests {
     };
     use crate::domain::{
         BatchOperationItem, BranchEntry, ChangeCode, ChangeEntry, ChangeHunk, ChangeLine,
-        ChangePreview, Commit, CommitMode, CommitRef, CommitRefKind, GitOperationKind, HunkSource,
-        OperationKind, OperationTarget, Project, ProjectId, RemoteBranchEntry, RemoteEntry,
-        RepoBatchAction, RepoBatchSpec, RepoProjectResult, RepoProjectState, RepositoryAction,
-        RepositorySnapshot, StashEntry, TagEntry, UpstreamState, Workspace, WorkspaceGitAction,
-        WorkspaceGitSpec, WorkspaceGitTarget, WorkspaceKind, WorktreeSummary,
+        ChangePreview, Commit, CommitMode, CommitRef, CommitRefKind, ExportSpec, GitOperationKind,
+        HunkSource, OperationKind, OperationTarget, Project, ProjectId, RemoteBranchEntry,
+        RemoteEntry, RepoBatchAction, RepoBatchSpec, RepoProjectResult, RepoProjectState,
+        RepositoryAction, RepositorySnapshot, StashEntry, TagEntry, UpstreamState, Workspace,
+        WorkspaceGitAction, WorkspaceGitSpec, WorkspaceGitTarget, WorkspaceKind, WorktreeSummary,
     };
 
     fn app() -> App {
@@ -1038,6 +1040,9 @@ mod tests {
             selected_hunk_identity: Some((HunkSource::Worktree, 7)),
             selected_line: 0,
             selected_line_identity: None,
+            export_confirmation: None,
+            export_running: false,
+            export_generation: 0,
             loading: false,
             error: None,
             generation: 1,
@@ -1240,6 +1245,91 @@ mod tests {
     }
 
     #[test]
+    fn renders_export_patch_confirmation_with_files_and_destination() {
+        let mut app = app();
+        app.screen = Screen::Changes;
+        let project = app.workspace.projects[0].clone();
+        let entries = ["src/app.rs", "src/main.rs"]
+            .into_iter()
+            .map(|path| ChangeEntry {
+                path: PathBuf::from(path),
+                original_path: None,
+                index: None,
+                worktree: Some(ChangeCode::Modified),
+                untracked: false,
+                conflicted: false,
+            })
+            .collect::<Vec<_>>();
+        let mut changes = ChangesState {
+            project: project.clone(),
+            return_screen: Screen::Workspace,
+            entries: entries.clone(),
+            operation: None,
+            head_message: None,
+            selected: 0,
+            selected_files: Default::default(),
+            mode: ChangesMode::File,
+            selected_hunk: 0,
+            selected_hunk_identity: None,
+            selected_line: 0,
+            selected_line_identity: None,
+            export_confirmation: None,
+            export_running: false,
+            export_generation: 0,
+            loading: false,
+            error: None,
+            generation: 1,
+            preview: None,
+            preview_path: None,
+            preview_loading: false,
+            preview_generation: 0,
+            preview_scroll: 0,
+            operation_running: false,
+            operation_generation: 0,
+            confirmation: None,
+            message: None,
+            commit_message: String::new(),
+            commit_cursor: 0,
+            commit_editing: false,
+            pending_commit_mode: None,
+            commit_template: None,
+            template_editing: false,
+            template_draft: String::new(),
+            template_cursor: 0,
+            template_running: false,
+            template_generation: 0,
+            commit_mode: CommitMode::Commit,
+            commit_signoff: false,
+            commit_signing: false,
+            commit_running: false,
+            commit_generation: 0,
+        };
+        changes.export_confirmation = Some(ExportSpec {
+            project: project.clone(),
+            items: entries.clone(),
+            output: project.path.join("changes.patch"),
+        });
+        app.changes = Some(changes);
+        for (width, height) in [(80, 24), (120, 40)] {
+            let text = draw_text(&app, width, height);
+            assert!(
+                text.contains("Confirm patch export"),
+                "export title missing at {width}x{height}:\n{text}"
+            );
+            assert!(text.contains("src/main.rs"), "{text}");
+            assert!(text.contains("changes.patch"), "{text}");
+            assert!(text.contains("Press y to"), "{text}");
+        }
+        app.language = crate::i18n::Language::Zh;
+        for (width, height) in [(80, 24), (120, 40)] {
+            let text = compact_text(&draw_text(&app, width, height));
+            assert!(text.contains("确认导出patch"), "{text}");
+            assert!(text.contains("changes.patch"), "{text}");
+            assert!(text.contains("src/main.rs"), "{text}");
+        }
+    }
+
+    #[test]
     fn renders_commit_template_dialog_at_both_sizes() {
         let mut app = app();
         let project = app.workspace.projects[0].clone();
@@ -1257,6 +1347,9 @@ mod tests {
             selected_hunk_identity: None,
             selected_line: 0,
             selected_line_identity: None,
+            export_confirmation: None,
+            export_running: false,
+            export_generation: 0,
             loading: false,
             error: None,
             generation: 1,
@@ -1346,6 +1439,9 @@ mod tests {
             selected_hunk_identity: None,
             selected_line: 0,
             selected_line_identity: None,
+            export_confirmation: None,
+            export_running: false,
+            export_generation: 0,
             loading: false,
             error: None,
             generation: 1,
@@ -1407,6 +1503,9 @@ mod tests {
             selected_hunk_identity: None,
             selected_line: 0,
             selected_line_identity: None,
+            export_confirmation: None,
+            export_running: false,
+            export_generation: 0,
             loading: false,
             error: None,
             generation: 1,

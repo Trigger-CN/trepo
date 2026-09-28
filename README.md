@@ -77,6 +77,7 @@ git push origin v0.5.0
 | `Space` | Select/unselect a Workspace repository or a file in Changes; toggle an option in forms |
 | `A` | Select/unselect all repositories in the current Workspace filter or all files in Changes |
 | `S` / `Z` / `D` | Workspace: confirm Stage / Stash / complete Discard for the repository under the cursor, or only the explicit `Space` / `A` selection when non-empty |
+| `E` | Changes: export the repository changes as a patch; exports the selected files, or every change when none is selected, after listing them for confirmation |
 | `a` | Workspace: open Repo batch actions; Changes: Amend current `HEAD`; Repository: open fixed actions |
 | `c` | Open Changes; cancel a running Repo task from its task view |
 | `f` | Graph: open structured Branch/Query/Author/Since/Until filters; Range history: reopen the range filter form; Repo task: retry only failed projects |
@@ -131,6 +132,7 @@ Implemented:
 - background upload uses the explicitly reviewed `--current-branch --yes` mode; interactive authentication and advanced upload parameters wait for M5 PTY takeover
 - shared directory-tree rendering for changed files in Workspace main-list expansion, Workspace Inspector, and Changes, while operations remain bound to exact repository/file identities; Changes keeps `XY` visible and colors file names by staged, unstaged, mixed, untracked, or conflicted state
 - stable Changes file multi-selection with all-token-preflight batch Stage/Unstage, confirmed selected-path Stash, and confirmed complete Discard of tracked index/worktree plus untracked paths
+- Changes patch export with `E`: writes the selected files, or every change when nothing is selected, to `changes.patch` in the repository root; the confirmation lists every file and the destination first, tracked and untracked changes are combined into one applicable patch (`git diff --binary HEAD` plus per-file `--no-index` for untracked, with the empty tree as the base when `HEAD` is unborn)
 - guarded file-, hunk-, and changed-line stage, unstage, and discard with lock-time patch reconstruction
 - `git apply --check`, stale token/fingerprint rejection, destructive confirmation, and failure-state preservation
 - multiline Commit/Amend/Reword input and paste directly from Changes, with both an explicit `Ctrl-V` clipboard read and bracketed paste delivered to whichever editor or form currently has focus (commit template, commit dialog, Graph filter/action, Repository, Repo batch, Workspace search), always-visible commit shortcuts at supported terminal widths, queued editor entry during Stage refresh, current-message preload for Amend/Reword, sign-off, signing, hook output, and message recovery; Reword uses `--amend --only` so staged changes remain staged
