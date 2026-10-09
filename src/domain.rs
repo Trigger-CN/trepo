@@ -495,6 +495,17 @@ pub struct ExportSpec {
     pub output: PathBuf,
 }
 
+/// One commit's patch written to disk from the Graph page. The commit is
+/// identified by OID so the file name stays stable, and `short_oid` is what
+/// the confirmation and the reported message show.
+#[derive(Debug, Clone)]
+pub struct CommitPatchSpec {
+    pub project: Project,
+    pub oid: String,
+    pub short_oid: String,
+    pub output: PathBuf,
+}
+
 #[derive(Debug, Clone)]
 pub struct OperationOutcome {
     pub kind: OperationKind,
@@ -680,6 +691,11 @@ pub enum RepositoryAction {
     Revert {
         oid: String,
     },
+    /// Detaches `HEAD` at a commit: the selected object is not a branch, so
+    /// checking it out can only produce a detached `HEAD`.
+    CheckoutCommit {
+        oid: String,
+    },
     RemoteAdd {
         name: String,
         url: String,
@@ -746,6 +762,7 @@ impl RepositoryAction {
             Self::Rebase { .. } => "Rebase",
             Self::CherryPick { .. } => "Cherry-pick",
             Self::Revert { .. } => "Revert",
+            Self::CheckoutCommit { .. } => "Checkout commit",
             Self::RemoteAdd { .. } => "Add remote",
             Self::RemoteSetUrl { .. } => "Set remote URL",
             Self::RemoteRemove { .. } => "Remove remote",

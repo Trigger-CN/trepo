@@ -7,7 +7,7 @@ use ratatui::widgets::{Block, Borders, Cell, Clear, List, ListItem, Paragraph, R
 use ratatui::Frame;
 
 use crate::app::repository::{action_preview_with_language, FormField};
-use crate::app::state::{graph_actions, App, GraphObjectKind, GraphState};
+use crate::app::state::{graph_actions, App, GraphActionChoice, GraphObjectKind, GraphState};
 use crate::domain::{CommitRef, CommitRefKind, RiskLevel};
 
 pub fn render(frame: &mut Frame, app: &App) {
@@ -67,6 +67,18 @@ pub fn render(frame: &mut Frame, app: &App) {
         vertical[0],
     );
 
+    if let Some(view) = graph.commit_view.as_ref() {
+        super::range_history::render_commit_view(frame, app, view, vertical[1]);
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::raw(app.language.text(
+                "j/k Scroll  PageUp/PageDown Page  Esc Back",
+                "j/k 滚动  PageUp/PageDown 翻页  Esc 返回",
+            )))),
+            vertical[2],
+        );
+        return;
+    }
+
     if area.width >= 100 {
         let body = Layout::default()
             .direction(Direction::Horizontal)
@@ -116,6 +128,9 @@ pub fn render(frame: &mut Frame, app: &App) {
     }
     if graph.filter_form.is_some() {
         render_filter_form(frame, app, graph);
+    }
+    if graph.patch_confirmation.is_some() {
+        render_patch_confirmation(frame, app, graph);
     }
     if app
         .repository
@@ -275,6 +290,55 @@ fn render_graph_form(frame: &mut Frame, app: &App, graph: &GraphState) {
             .block(
                 Block::default()
                     .title(format!(" {} ", app.language.action(form.choice.label())))
+                    .borders(Borders::ALL),
+            )
+            .wrap(Wrap { trim: false }),
+        area,
+    );
+}
+
+/// Lists the commit and the exact destination path for "Create patch file"
+/// before anything is written, and states the keys that answer it.
+fn render_patch_confirmation(frame: &mut Frame, app: &App, graph: &GraphState) {
+    let Some(spec) = graph.patch_confirmation.as_ref() else {
+        return;
+    };
+    let area = centered_rect(70, 34, frame.area());
+    frame.render_widget(Clear, area);
+    let width = area.width.saturating_sub(2) as usize;
+    let lines = vec![
+        Line::styled(
+            app.language.text(
+                "This writes a patch file next to the repository.",
+                "此操作会在仓库目录写入一个 patch 文件。",
+            ),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Line::raw(""),
+        Line::raw(super::text::truncate(
+            &format!("{}: {}", app.language.label("Commit"), spec.short_oid),
+            width,
+        )),
+        Line::raw(super::text::truncate(
+            &format!("{}: {}", app.language.label("Path"), spec.output.display()),
+            width,
+        )),
+        Line::raw(""),
+        Line::raw(app.language.text(
+            "Press y to create the patch or n/Esc to cancel.",
+            "按 y 创建 patch，按 n/Esc 取消。",
+        )),
+    ];
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(
+                Block::default()
+                    .title(format!(
+                        " {} ",
+                        app.language.action(GraphActionChoice::CreatePatch.label())
+                    ))
                     .borders(Borders::ALL),
             )
             .wrap(Wrap { trim: false }),

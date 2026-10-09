@@ -323,6 +323,12 @@ fn drain_background_messages(app: &mut App) {
     while let Ok(result) = app.graph_commit_rx.try_recv() {
         app.apply_graph_commit(result);
     }
+    while let Ok(result) = app.graph_view_rx.try_recv() {
+        app.apply_graph_view_patch(result);
+    }
+    while let Ok(result) = app.graph_patch_rx.try_recv() {
+        app.apply_graph_patch(result);
+    }
     while let Ok(result) = app.template_rx.try_recv() {
         app.apply_template(result);
     }
@@ -505,6 +511,30 @@ fn handle_key(app: &mut App, key: KeyEvent) {
             KeyCode::Char(character) if form => {
                 app.edit_repo_batch_form(trepo::app::state::CommitInput::Character(character))
             }
+            _ => {}
+        }
+        return;
+    }
+    // "Create patch file" asks for confirmation before writing anything.
+    if app.screen == Screen::Graph && app.graph_patch_pending() {
+        match key.code {
+            KeyCode::Char('y') | KeyCode::Char('Y') => app.confirm_graph_patch(true),
+            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                app.confirm_graph_patch(false)
+            }
+            _ => {}
+        }
+        return;
+    }
+    // A commit opened with "View commit changes" owns scrolling until closed.
+    if app.screen == Screen::Graph && app.graph_commit_view_open() {
+        match key.code {
+            KeyCode::Esc => app.close_graph_commit_view(),
+            KeyCode::Char('?') => app.help = true,
+            KeyCode::Down | KeyCode::Char('j') => app.scroll_graph_commit_view(1),
+            KeyCode::Up | KeyCode::Char('k') => app.scroll_graph_commit_view(-1),
+            KeyCode::PageDown => app.scroll_graph_commit_view(10),
+            KeyCode::PageUp => app.scroll_graph_commit_view(-10),
             _ => {}
         }
         return;

@@ -232,15 +232,17 @@ Graph 是进入仓库后的默认页，由提交列表和详情检查器组成�
 - 过滤只作用于已异步加载的完整 all-refs commits，不启动额外 Git 子进程，也不重建或裁剪用于 topology lane 的完整 DAG。可见行保存完整 commits 的绝对索引，导航、详情和对象菜单继续绑定真实 OID。
 - 应用、清空或重载时优先按 OID 保留选择；原 OID 不可见时回退首条可见提交。零匹配时表格为空、详情显示 `No matching commits`，对象菜单不可打开。无效日期或 Since 晚于 Until 时保留表单和草稿并显示错误，不应用过滤。
 - 查看完整 commit metadata、message、parents、notes、签名和变更统计。
-- 查看 commit、commit range 或单文件 diff。
-- 从提交创建 branch/tag、checkout、reset、revert、cherry-pick、rebase onto。
+- 查看 commit、commit range 或单文件 diff。在提交/HEAD 对象的动作菜单中选择 `View commit changes`，Graph 页内直接展示该提交的元数据、完整 message、diffstat 与着色 patch（`git show --no-ext-diff --no-color --stat --patch --format= -m --first-parent <oid>`），`j`/`k`/`PageUp`/`PageDown` 滚动、`Esc` 返回；它复用范围检索页与文件历史页的 `RangeCommitView` + `render_commit_view` 渲染，并与打开工作区 Changes 页的 `Open Changes` 分开，因此查看历史提交不再依赖工作树是否干净。
+- 从提交创建 branch/tag、checkout、reset、revert、cherry-pick、rebase onto。已实现的 checkout 是 `Checkout this commit`：它是 `RepositoryAction::CheckoutCommit { oid }`，argv 为固定的 `git switch --detach -- <oid>`（`--` 必需，oid 来自用户数据路径），风险等级 ReversibleWrite，因此走既有的意图→快照→`OperationRunner`→刷新链路而不需额外确认。
+- 将提交导出为 patch 文件：`Create patch file` 是 Graph 专属动作，复用 `git::commit_patch` 的内容（与页内 diff 完全一致，merge 取第一父提交）写入仓库根的 `commit-<short8>.patch`。不采用 `git format-patch`：实测 `git format-patch -1 --stdout <merge>` 会跳过 merge 提交并输出其父提交的补丁（`--diff-merges=first-parent`、`-m --first-parent` 均不能修正），会静默产出错误提交的补丁。确认框先列出提交与目标路径，`y` 才写；写入在后台任务中完成，结果带 project/graph/patch generation 校验，陈旧结果不落地。无新增依赖。
+- 待续：reset、bisect、交互式 rebase，以及从父/子提交间跳转。
 - 复制 OID、subject 或生成可执行命令；从父/子提交间跳转。
 - path、tag、stash 和 manifest revision 的独立过滤仍属于后续扩展；当前 Commit 模型尚未携带 changed-path 数据。
 
 ### 6.2 Commit graph 布局算法
 Graph 是仓库操作的首要发现入口。用户在提交树中选中节点并按 `Enter`，先看到该节点的对象菜单：提交本身、HEAD、本地分支、远端分支、标签以及挂在该节点上的 stash entry。再次按 `Enter` 进入所选对象的固定动作菜单。
 
-- 提交和 HEAD：打开 Changes、提交/amend、创建 branch/tag、stash、merge、rebase、cherry-pick 和 revert。
+- 提交和 HEAD：查看提交改动（页内 diff）、checkout 到该提交（分离 HEAD）、导出该提交为 patch 文件、打开 Changes、提交/amend、创建 branch/tag、stash、merge、rebase、cherry-pick 和 revert。
 - 本地分支：switch、普通 push、force-with-lease push、merge、rebase、rename 和 delete。
 - 远端分支：以创建本地分支、merge、rebase、cherry-pick 和 revert 为主，不暴露本地 rename/delete 或 push。
 - 标签：创建 branch、merge、rebase、cherry-pick、revert 和 delete。

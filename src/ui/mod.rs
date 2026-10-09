@@ -630,6 +630,10 @@ mod tests {
             commit_amend: false,
             commit_running: false,
             commit_generation: 0,
+            commit_view: None,
+            patch_confirmation: None,
+            patch_running: false,
+            patch_generation: 0,
         });
         draw(&app, 80, 24);
         draw(&app, 120, 40);
@@ -684,6 +688,10 @@ mod tests {
             commit_amend: false,
             commit_running: false,
             commit_generation: 0,
+            commit_view: None,
+            patch_confirmation: None,
+            patch_running: false,
+            patch_generation: 0,
         });
 
         let narrow = draw_text(&app, 80, 24);
@@ -744,6 +752,10 @@ mod tests {
             commit_amend: false,
             commit_running: false,
             commit_generation: 0,
+            commit_view: None,
+            patch_confirmation: None,
+            patch_running: false,
+            patch_generation: 0,
         });
 
         let narrow = draw_text(&app, 80, 24);
@@ -834,6 +846,10 @@ mod tests {
             commit_amend: false,
             commit_running: false,
             commit_generation: 0,
+            commit_view: None,
+            patch_confirmation: None,
+            patch_running: false,
+            patch_generation: 0,
         });
 
         for (width, height) in [(80, 24), (120, 40)] {
@@ -921,6 +937,10 @@ mod tests {
             commit_amend: false,
             commit_running: false,
             commit_generation: 0,
+            commit_view: None,
+            patch_confirmation: None,
+            patch_running: false,
+            patch_generation: 0,
         });
         for (width, height) in [(80, 24), (120, 40)] {
             let text = draw_text(&app, width, height);
@@ -1947,6 +1967,167 @@ mod tests {
             assert!(
                 text.contains("bb22bb22"),
                 "commit oid missing at {width}x{height}:\n{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn renders_graph_commit_view_with_patch_and_footer_at_supported_sizes() {
+        let mut app = app();
+        let project = app.workspace.projects[0].clone();
+        app.screen = Screen::Graph;
+        let commit = Commit {
+            oid: "bb22bb22".into(),
+            parents: vec!["aa11aa11".into()],
+            refs: Vec::new(),
+            author: "Ada".into(),
+            timestamp: 1_700_000_000,
+            subject: "fix the widget".into(),
+            body: "fix the widget\n\nlonger explanation".into(),
+        };
+        app.graph = Some(GraphState {
+            project: project.clone(),
+            commits: vec![commit.clone()],
+            selected: 0,
+            loading: false,
+            error: None,
+            generation: 1,
+            object_menu: false,
+            object_selected: 0,
+            action_menu: false,
+            action_selected: 0,
+            selected_object: None,
+            form: None,
+            message: None,
+            selected_oid: None,
+            locate_oid: None,
+            filter: crate::app::state::GraphFilter::default(),
+            filter_form: None,
+            filter_error: None,
+            commit_message: String::new(),
+            commit_amend: false,
+            commit_running: false,
+            commit_generation: 0,
+            commit_view: Some(crate::app::state::RangeCommitView {
+                oid: commit.oid.clone(),
+                short_oid: "bb22bb22".into(),
+                project_name: project.name.clone(),
+                commit,
+                project,
+                loading: false,
+                error: None,
+                text: " a.txt | 1 +\ndiff --git a/a.txt b/a.txt\n@@ -0,0 +1 @@\n+two\n".into(),
+                line_count: 4,
+                scroll: 0,
+                generation: 1,
+            }),
+            patch_confirmation: None,
+            patch_running: false,
+            patch_generation: 0,
+        });
+        for (width, height) in [(80, 24), (120, 40)] {
+            let text = draw_text(&app, width, height);
+            assert!(
+                text.contains("fix the widget"),
+                "commit subject missing at {width}x{height}:\n{text}"
+            );
+            assert!(
+                text.contains("bb22bb22"),
+                "short oid missing at {width}x{height}:\n{text}"
+            );
+            assert!(
+                text.contains("+two"),
+                "patch body missing at {width}x{height}:\n{text}"
+            );
+            assert!(
+                text.contains("Esc Back"),
+                "footer hint missing at {width}x{height}:\n{text}"
+            );
+        }
+
+        app.language = crate::i18n::Language::Zh;
+        for (width, height) in [(80, 24), (120, 40)] {
+            let text = compact_text(&draw_text(&app, width, height));
+            assert!(
+                text.contains("Esc返回"),
+                "localized footer missing at {width}x{height}:\n{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn renders_graph_create_patch_confirmation_at_supported_sizes() {
+        let mut app = app();
+        let project = app.workspace.projects[0].clone();
+        app.screen = Screen::Graph;
+        let output = project.path.join("commit-bb22bb22.patch");
+        app.graph = Some(GraphState {
+            project: project.clone(),
+            commits: vec![Commit {
+                oid: "bb22bb22".into(),
+                parents: Vec::new(),
+                refs: Vec::new(),
+                author: "Ada".into(),
+                timestamp: 1_700_000_000,
+                subject: "fix the widget".into(),
+                body: String::new(),
+            }],
+            selected: 0,
+            loading: false,
+            error: None,
+            generation: 1,
+            object_menu: false,
+            object_selected: 0,
+            action_menu: false,
+            action_selected: 0,
+            selected_object: None,
+            form: None,
+            message: None,
+            selected_oid: None,
+            locate_oid: None,
+            filter: crate::app::state::GraphFilter::default(),
+            filter_form: None,
+            filter_error: None,
+            commit_message: String::new(),
+            commit_amend: false,
+            commit_running: false,
+            commit_generation: 0,
+            commit_view: None,
+            patch_confirmation: Some(crate::domain::CommitPatchSpec {
+                project,
+                oid: "bb22bb22".into(),
+                short_oid: "bb22bb22".into(),
+                output,
+            }),
+            patch_running: false,
+            patch_generation: 0,
+        });
+        for (width, height) in [(80, 24), (120, 40)] {
+            let text = draw_text(&app, width, height);
+            assert!(
+                text.contains("Create patch file"),
+                "confirmation title missing at {width}x{height}:\n{text}"
+            );
+            assert!(
+                text.contains("commit-bb22bb22.patch"),
+                "output path missing at {width}x{height}:\n{text}"
+            );
+            assert!(
+                text.contains("Press y to create the patch"),
+                "confirmation keys missing at {width}x{height}:\n{text}"
+            );
+        }
+
+        app.language = crate::i18n::Language::Zh;
+        for (width, height) in [(80, 24), (120, 40)] {
+            let text = compact_text(&draw_text(&app, width, height));
+            assert!(
+                text.contains("创建patch文件"),
+                "localized title missing at {width}x{height}:\n{text}"
+            );
+            assert!(
+                text.contains("按y创建patch"),
+                "localized keys missing at {width}x{height}:\n{text}"
             );
         }
     }

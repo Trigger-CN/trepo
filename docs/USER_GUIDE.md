@@ -232,6 +232,12 @@ flowchart TD
     K --> R[Remote branch]
     K --> T[Tag]
     K --> S[Stash]
+    C --> V[View commit changes: 页内 diff, j/k 滚动, Esc 返回]
+    H --> V
+    C --> K2[Checkout this commit: 分离 HEAD]
+    H --> K2
+    C --> P2[Create patch file: y/n 确认后写 commit-<short>.patch]
+    H --> P2
     C --> A[对象动作菜单]
     H --> A
     L --> A
@@ -254,8 +260,8 @@ flowchart TD
 
 | 对象 | 可用动作 |
 | --- | --- |
-| Commit | Open Changes、Commit staged changes、Create stash、Create branch here、Create tag here、Cherry-pick、Revert、Merge、Rebase |
-| HEAD | Open Changes、Commit staged changes、Amend current commit、Create stash、Create branch here、Create tag here、Cherry-pick、Revert、Merge、Rebase |
+| Commit | View commit changes、Checkout this commit、Create patch file、Open Changes、Commit staged changes、Create stash、Create branch here、Create tag here、Cherry-pick、Revert、Merge、Rebase |
+| HEAD | View commit changes、Checkout this commit、Create patch file、Open Changes、Commit staged changes、Amend current commit、Create stash、Create branch here、Create tag here、Cherry-pick、Revert、Merge、Rebase |
 | Local branch | Switch、Push、Force push with lease、Merge、Rebase、Rename、Delete |
 | Remote branch | Create local branch、Merge、Rebase、Cherry-pick、Revert |
 | Tag | Create branch、Cherry-pick、Revert、Merge、Rebase、Delete tag |
@@ -266,6 +272,9 @@ flowchart TD
 - Graph 的 Commit 使用当前暂存区；Amend 只在当前 HEAD 对象提供并修订当前 HEAD，历史 commit 对象不提供 Amend。
 - Graph 的 Apply/Pop 默认不恢复 index。需要 `Restore index` 时，从 Repository → Stashes 操作。
 - Graph 本地分支的强推始终为 `--force-with-lease`，不提供裸 `--force`。
+- `View commit changes` 在 Graph 页内直接展示该提交的元数据、完整 message、diffstat 与着色 patch（`git show --stat --patch -m --first-parent`），`j`/`k`/`PageUp`/`PageDown` 滚动、`Esc` 返回；它与打开工作区改动页的 `Open Changes` 是两个不同动作，历史提交的改动不再依赖工作树是否干净。
+- `Checkout this commit` 执行 `git switch --detach -- <commit>`，把 HEAD 分离到该提交；它属于可逆写操作，会先加载一次仓库快照再执行，工作区有冲突改动时由 Git 自行拒绝。回到分支上用本地分支的 `Switch`。
+- `Create patch file` 先弹出确认框（列出提交短 OID 与目标的完整路径），按 `y` 后才写文件，按 `n`/`Esc` 取消；输出为仓库根目录的 `commit-<short-oid>.patch`，内容与页内 `View commit changes` 相同（`git show --stat --patch -m --first-parent`），因此 merge 提交给出的是相对第一父提交的 diff。
 
 ## 7. Changes 文件改动页
 

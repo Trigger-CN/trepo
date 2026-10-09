@@ -1518,7 +1518,9 @@ fn validate_repository_action_values(action: &RepositoryAction) -> Result<()> {
         RepositoryAction::Merge { reference } | RepositoryAction::Rebase { reference } => {
             values.push(("reference", reference))
         }
-        RepositoryAction::CherryPick { oid } | RepositoryAction::Revert { oid } => {
+        RepositoryAction::CherryPick { oid }
+        | RepositoryAction::Revert { oid }
+        | RepositoryAction::CheckoutCommit { oid } => {
             values.push(("commit", oid));
         }
         RepositoryAction::RemoteAdd { name, url }
@@ -1726,6 +1728,9 @@ fn action_args(action: &RepositoryAction) -> Result<(Vec<OsString>, bool)> {
         }
         RepositoryAction::Revert { oid } => {
             args.extend(["revert".into(), "--no-edit".into(), "--".into(), oid.into()]);
+        }
+        RepositoryAction::CheckoutCommit { oid } => {
+            args.extend(["switch".into(), "--detach".into(), "--".into(), oid.into()]);
         }
         RepositoryAction::RemoteAdd { name, url } => {
             args.extend(["remote".into(), "add".into(), name.into(), url.into()]);
@@ -4419,5 +4424,36 @@ u UU N... 100644 100644 100644 100644 a b c conflict.txt\x00\
         let patch_path = target.path().join("out.patch");
         fs::write(&patch_path, &patch).unwrap();
         assert!(apply_check(target.path(), &patch_path), "{patch}");
+    }
+
+    #[tokio::test]
+    async fn repository_action_checks_out_a_commit_detached() {
+        let temp = tempdir().unwrap();
+        run_git(temp.path(), &["init", "-q", "-b", "main"]);
+        run_git(temp.path(), &["config", "user.name", "Test"]);
+        run_git(temp.path(), &["config", "user.email", "test@example.com"]);
+        commit_file(temp.path(), "tracked.txt", "base\n", "base");
+        let first = run_git(temp.path(), &["rev-parse", "HEAD"]);
+        commit_file(temp.path(), "tracked.txt", "base\nsecond\n", "second");
+        assert_ne!(run_git(temp.path(), &["rev-parse", "HEAD"]), first);
+        assert_eq!(
+            run_git(temp.path(), &["rev-parse", "--abbrev-ref", "HEAD"]),
+            "main"
+        );
+
+        execute_repository_action(
+            temp.path(),
+            &RepositoryAction::CheckoutCommit { oid: first.clone() },
+            false,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(run_git(temp.path(), &["rev-parse", "HEAD"]), first);
+        // Git reports the literal name HEAD only when HEAD is detached.
+        assert_eq!(
+            run_git(temp.path(), &["rev-parse", "--abbrev-ref", "HEAD"]),
+            "HEAD"
+        );
     }
 }

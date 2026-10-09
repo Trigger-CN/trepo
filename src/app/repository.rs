@@ -297,6 +297,9 @@ pub fn action_preview_with_language(
         | RepositoryAction::RemoteRemove { name: remote } => {
             vec![format!("{}: {remote}", language.label("Remote"))]
         }
+        RepositoryAction::CheckoutCommit { oid } => {
+            vec![format!("{}: {oid}", language.label("Commit"),)]
+        }
         RepositoryAction::SetUpstream { branch, upstream } => vec![
             format!("{}: {branch}", language.label("Branch")),
             format!("{}: {upstream}", language.label("Upstream")),

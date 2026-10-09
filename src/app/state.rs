@@ -10,12 +10,12 @@ use crate::app::repository::{
 };
 use crate::domain::{
     BatchOperationItem, BatchOperationSpec, ChangeEntry, ChangePreview, Commit, CommitMode,
-    CommitOutcome, CommitSpec, ExportSpec, FileSearchSpec, GitOperationKind, HunkSource,
-    OperationKind, OperationOutcome, OperationSpec, OperationTarget, Project, ProjectFileMatches,
-    ProjectId, ProjectRangeHistory, ProjectSnapshot, RangeHistorySpec, RepoBatchAction,
-    RepoBatchSpec, RepoProjectResult, RepoProjectState, RepositoryAction, RepositoryActionOutcome,
-    RepositoryActionSpec, RepositorySnapshot, RiskLevel, Workspace, WorkspaceGitAction,
-    WorkspaceGitSpec, WorkspaceKind, WorkspaceSummary,
+    CommitOutcome, CommitPatchSpec, CommitSpec, ExportSpec, FileSearchSpec, GitOperationKind,
+    HunkSource, OperationKind, OperationOutcome, OperationSpec, OperationTarget, Project,
+    ProjectFileMatches, ProjectId, ProjectRangeHistory, ProjectSnapshot, RangeHistorySpec,
+    RepoBatchAction, RepoBatchSpec, RepoProjectResult, RepoProjectState, RepositoryAction,
+    RepositoryActionOutcome, RepositoryActionSpec, RepositorySnapshot, RiskLevel, Workspace,
+    WorkspaceGitAction, WorkspaceGitSpec, WorkspaceKind, WorkspaceSummary,
 };
 use crate::i18n::Language;
 use crate::services::file_search::{self, FileHistoryResult, FileSearchResult};
@@ -139,6 +139,11 @@ pub struct GraphObject {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GraphActionChoice {
+    ViewChanges,
+    /// Detaches `HEAD` at the selected commit.
+    CheckoutCommit,
+    /// Writes the selected commit's patch to a file after confirmation.
+    CreatePatch,
     Changes,
     Commit,
     Amend,
@@ -164,6 +169,9 @@ pub enum GraphActionChoice {
 impl GraphActionChoice {
     pub fn label(self) -> &'static str {
         match self {
+            Self::ViewChanges => "View commit changes",
+            Self::CheckoutCommit => "Checkout this commit",
+            Self::CreatePatch => "Create patch file",
             Self::Changes => "Open Changes",
             Self::Commit => "Commit staged changes",
             Self::Amend => "Amend current commit",
@@ -301,6 +309,9 @@ pub fn graph_actions(kind: GraphObjectKind) -> &'static [GraphActionChoice] {
     use GraphActionChoice as C;
     match kind {
         GraphObjectKind::Commit => &[
+            C::ViewChanges,
+            C::CheckoutCommit,
+            C::CreatePatch,
             C::Changes,
             C::Commit,
             C::StashCreate,
@@ -312,6 +323,9 @@ pub fn graph_actions(kind: GraphObjectKind) -> &'static [GraphActionChoice] {
             C::Rebase,
         ],
         GraphObjectKind::Head => &[
+            C::ViewChanges,
+            C::CheckoutCommit,
+            C::CreatePatch,
             C::Changes,
             C::Commit,
             C::Amend,
@@ -605,6 +619,14 @@ pub struct GraphState {
     pub commit_amend: bool,
     pub commit_running: bool,
     pub commit_generation: u64,
+    /// Commit opened with "View commit changes" on the Graph page: the same
+    /// metadata-plus-patch view the range and file pages reuse.
+    pub commit_view: Option<RangeCommitView>,
+    /// "Create patch file" confirmation: the commit and destination path the
+    /// user must approve before anything is written.
+    pub patch_confirmation: Option<CommitPatchSpec>,
+    pub patch_running: bool,
+    pub patch_generation: u64,
 }
 
 impl GraphState {
@@ -803,6 +825,17 @@ pub struct ExportResult {
     pub project_id: ProjectId,
     pub changes_generation: u64,
     pub export_generation: u64,
+    /// Byte length of the written patch on success.
+    pub result: anyhow::Result<usize>,
+}
+
+/// One commit's patch written to disk from the Graph page. Generations are
+/// validated against the open Graph state before the message is shown.
+#[derive(Debug)]
+pub struct GraphPatchResult {
+    pub project_id: ProjectId,
+    pub graph_generation: u64,
+    pub patch_generation: u64,
     /// Byte length of the written patch on success.
     pub result: anyhow::Result<usize>,
 }
@@ -1320,6 +1353,10 @@ pub struct App {
     pub commit_rx: mpsc::UnboundedReceiver<CommitResult>,
     graph_commit_tx: mpsc::UnboundedSender<GraphCommitResult>,
     pub graph_commit_rx: mpsc::UnboundedReceiver<GraphCommitResult>,
+    graph_view_tx: mpsc::UnboundedSender<RangeCommitResult>,
+    pub graph_view_rx: mpsc::UnboundedReceiver<RangeCommitResult>,
+    graph_patch_tx: mpsc::UnboundedSender<GraphPatchResult>,
+    pub graph_patch_rx: mpsc::UnboundedReceiver<GraphPatchResult>,
     template_tx: mpsc::UnboundedSender<TemplateResult>,
     pub template_rx: mpsc::UnboundedReceiver<TemplateResult>,
     clipboard_tx: mpsc::UnboundedSender<ClipboardResult>,
@@ -1371,6 +1408,8 @@ impl App {
         let (preview_tx, preview_rx) = mpsc::unbounded_channel();
         let (commit_tx, commit_rx) = mpsc::unbounded_channel();
         let (graph_commit_tx, graph_commit_rx) = mpsc::unbounded_channel();
+        let (graph_view_tx, graph_view_rx) = mpsc::unbounded_channel();
+        let (graph_patch_tx, graph_patch_rx) = mpsc::unbounded_channel();
         let (template_tx, template_rx) = mpsc::unbounded_channel();
         let (clipboard_tx, clipboard_rx) = mpsc::unbounded_channel();
         let (repository_tx, repository_rx) = mpsc::unbounded_channel();
@@ -1435,6 +1474,10 @@ impl App {
             commit_rx,
             graph_commit_tx,
             graph_commit_rx,
+            graph_view_tx,
+            graph_view_rx,
+            graph_patch_tx,
+            graph_patch_rx,
             template_tx,
             template_rx,
             clipboard_tx,
@@ -2276,6 +2319,10 @@ impl App {
             commit_amend: false,
             commit_running: false,
             commit_generation: 0,
+            commit_view: None,
+            patch_confirmation: None,
+            patch_running: false,
+            patch_generation: 0,
         });
         let sender = self.graph_tx.clone();
         tokio::spawn(async move {
@@ -3381,6 +3428,25 @@ impl App {
             return;
         };
         match choice {
+            GraphActionChoice::ViewChanges => {
+                self.open_graph_commit_view(object.oid.clone());
+                return;
+            }
+            GraphActionChoice::CheckoutCommit => {
+                if let Some(graph) = self.graph.as_mut() {
+                    graph.action_menu = false;
+                    graph.object_menu = false;
+                    graph.selected_object = None;
+                }
+                self.open_graph_repository_action(RepositoryAction::CheckoutCommit {
+                    oid: object.oid.clone(),
+                });
+                return;
+            }
+            GraphActionChoice::CreatePatch => {
+                self.begin_graph_patch(object.oid.clone());
+                return;
+            }
             GraphActionChoice::Changes => {
                 if let Some(graph) = self.graph.as_mut() {
                     graph.action_menu = false;
@@ -3414,6 +3480,204 @@ impl App {
         if let Some(action) = graph_action(choice, &object) {
             self.open_graph_repository_action(action);
         }
+    }
+
+    /// Opens the selected commit's diff inside the Graph page, reusing the
+    /// shared metadata-plus-patch view the range and file pages already show.
+    fn open_graph_commit_view(&mut self, oid: String) {
+        let Some(graph) = self.graph.as_mut() else {
+            return;
+        };
+        if graph.loading || graph.commit_view.is_some() {
+            return;
+        }
+        let Some(commit) = graph
+            .commits
+            .iter()
+            .find(|commit| commit.oid == oid)
+            .cloned()
+        else {
+            graph.message = Some((true, "that commit is no longer loaded".to_owned()));
+            return;
+        };
+        graph.action_menu = false;
+        graph.object_menu = false;
+        graph.selected_object = None;
+        graph.message = None;
+        let generation = graph
+            .commit_view
+            .as_ref()
+            .map_or(1, |view| view.generation.wrapping_add(1));
+        let project = graph.project.clone();
+        let project_name = graph.project.name.clone();
+        let short = short_oid(&oid).to_owned();
+        graph.commit_view = Some(RangeCommitView {
+            short_oid: short,
+            oid: oid.clone(),
+            project_name,
+            commit,
+            project: project.clone(),
+            loading: true,
+            error: None,
+            text: String::new(),
+            line_count: 0,
+            scroll: 0,
+            generation,
+        });
+        let sender = self.graph_view_tx.clone();
+        tokio::spawn(async move {
+            let result = git::commit_patch(&project.path, &oid).await;
+            let _ = sender.send(RangeCommitResult {
+                generation,
+                oid,
+                result,
+            });
+        });
+    }
+
+    /// Merges one streamed patch for the Graph commit view.
+    pub fn apply_graph_view_patch(&mut self, result: RangeCommitResult) {
+        let Some(view) = self
+            .graph
+            .as_mut()
+            .and_then(|graph| graph.commit_view.as_mut())
+        else {
+            return;
+        };
+        if view.generation != result.generation || view.oid != result.oid {
+            return;
+        }
+        view.loading = false;
+        match result.result {
+            Ok(text) => {
+                view.line_count = text.lines().count();
+                view.text = text;
+            }
+            Err(error) => view.error = Some(error.to_string()),
+        }
+    }
+
+    pub fn scroll_graph_commit_view(&mut self, delta: isize) {
+        let Some(view) = self
+            .graph
+            .as_mut()
+            .and_then(|graph| graph.commit_view.as_mut())
+        else {
+            return;
+        };
+        let current = view.scroll as isize;
+        view.scroll =
+            (current + delta).clamp(0, view.line_count.saturating_sub(1) as isize) as usize;
+    }
+
+    pub fn close_graph_commit_view(&mut self) {
+        if let Some(graph) = self.graph.as_mut() {
+            graph.commit_view = None;
+        }
+    }
+
+    pub fn graph_commit_view_open(&self) -> bool {
+        self.graph
+            .as_ref()
+            .is_some_and(|graph| graph.commit_view.is_some())
+    }
+
+    /// Starts "Create patch file" for one commit: it closes the Graph menus and
+    /// asks for confirmation, listing the commit and the exact output path,
+    /// before anything is written.
+    fn begin_graph_patch(&mut self, oid: String) {
+        let Some(graph) = self.graph.as_mut() else {
+            return;
+        };
+        if graph.patch_running {
+            return;
+        }
+        let Some(commit) = graph.commits.iter().find(|commit| commit.oid == oid) else {
+            graph.message = Some((true, "that commit is no longer loaded".to_owned()));
+            return;
+        };
+        let short = short_oid(&oid);
+        let subject = commit.subject.clone();
+        graph.action_menu = false;
+        graph.object_menu = false;
+        graph.selected_object = None;
+        let project = graph.project.clone();
+        graph.patch_confirmation = Some(CommitPatchSpec {
+            output: project.path.join(format!("commit-{short}.patch")),
+            project,
+            oid,
+            short_oid: short.clone(),
+        });
+        graph.message = Some((false, format!("Create a patch for {short} {subject}?")));
+    }
+
+    /// Cancels or accepts the pending "Create patch file" confirmation.
+    pub fn confirm_graph_patch(&mut self, accepted: bool) {
+        let spec = self
+            .graph
+            .as_mut()
+            .and_then(|graph| graph.patch_confirmation.take());
+        if !accepted {
+            return;
+        }
+        let Some(spec) = spec else {
+            return;
+        };
+        let Some(graph) = self.graph.as_mut() else {
+            return;
+        };
+        graph.patch_running = true;
+        graph.message = None;
+        graph.patch_generation = graph.patch_generation.wrapping_add(1);
+        let patch_generation = graph.patch_generation;
+        let graph_generation = graph.generation;
+        let project_id = spec.project.id.clone();
+        let sender = self.graph_patch_tx.clone();
+        tokio::spawn(async move {
+            let result = async {
+                let patch = git::commit_patch(&spec.project.path, &spec.oid).await?;
+                tokio::fs::write(&spec.output, patch.as_bytes())
+                    .await
+                    .with_context(|| format!("failed to write {}", spec.output.display()))?;
+                Ok(patch.len())
+            }
+            .await;
+            let _ = sender.send(GraphPatchResult {
+                project_id,
+                graph_generation,
+                patch_generation,
+                result,
+            });
+        });
+    }
+
+    pub fn apply_graph_patch(&mut self, result: GraphPatchResult) {
+        let Some(graph) = self.graph.as_ref() else {
+            return;
+        };
+        if graph.project.id != result.project_id
+            || graph.generation != result.graph_generation
+            || graph.patch_generation != result.patch_generation
+        {
+            return;
+        }
+        let Some(graph) = self.graph.as_mut() else {
+            return;
+        };
+        graph.patch_running = false;
+        match result.result {
+            Ok(bytes) => {
+                graph.message =
+                    Some((false, format!("Exported {bytes} bytes to the commit patch")));
+            }
+            Err(error) => graph.message = Some((true, error.to_string())),
+        }
+    }
+
+    pub fn graph_patch_pending(&self) -> bool {
+        self.graph
+            .as_ref()
+            .is_some_and(|graph| graph.patch_confirmation.is_some())
     }
 
     pub fn edit_graph_form(&mut self, input: CommitInput) {
@@ -5314,7 +5578,16 @@ impl App {
                     self.screen = Screen::Workspace;
                 }
             }
-            Screen::Graph => self.screen = Screen::Workspace,
+            Screen::Graph => {
+                if self
+                    .graph
+                    .as_mut()
+                    .is_some_and(|graph| graph.commit_view.take().is_some())
+                {
+                    return;
+                }
+                self.screen = Screen::Workspace;
+            }
             Screen::RangeHistory => self.close_range_history(),
             Screen::FileSearch => self.close_file_search(),
             Screen::Changes => {
@@ -6580,7 +6853,7 @@ mod tests {
             object_menu: false,
             object_selected: 0,
             action_menu: true,
-            action_selected: 2,
+            action_selected: 5,
             selected_object: Some(GraphObject {
                 kind: GraphObjectKind::Head,
                 name: "HEAD".into(),
@@ -6597,6 +6870,10 @@ mod tests {
             commit_amend: false,
             commit_running: false,
             commit_generation: 0,
+            commit_view: None,
+            patch_confirmation: None,
+            patch_running: false,
+            patch_generation: 0,
         });
 
         app.select_graph_action();
@@ -6700,6 +6977,10 @@ mod tests {
             commit_amend: false,
             commit_running: false,
             commit_generation: 0,
+            commit_view: None,
+            patch_confirmation: None,
+            patch_running: false,
+            patch_generation: 0,
         });
         let objects = app.graph_objects();
         assert_eq!(objects.len(), 6);
@@ -6852,6 +7133,10 @@ mod tests {
             commit_amend: false,
             commit_running: false,
             commit_generation: 0,
+            commit_view: None,
+            patch_confirmation: None,
+            patch_running: false,
+            patch_generation: 0,
         });
         assert_eq!(app.graph.as_ref().unwrap().filtered_indices(), vec![0, 2]);
         app.graph.as_mut().unwrap().selected = 2;
@@ -7917,5 +8202,302 @@ mod tests {
         assert!(app.file_search.form.is_none());
         app.open_file_search_form();
         assert_eq!(app.file_search.form.as_ref().unwrap().query, "util");
+    }
+
+    #[tokio::test]
+    async fn graph_view_commit_changes_opens_the_patch_inside_the_page() {
+        let value = project("alpha");
+        let workspace = Workspace {
+            root: PathBuf::from("/tmp"),
+            kind: WorkspaceKind::Git,
+            projects: vec![value.clone()],
+        };
+        let mut app = App::new(workspace, 1);
+        app.screen = Screen::Graph;
+        app.graph = Some(GraphState {
+            project: value,
+            commits: vec![Commit {
+                oid: "aa11".into(),
+                parents: vec!["pp00".into()],
+                refs: Vec::new(),
+                author: "Ada".into(),
+                timestamp: 100,
+                subject: "fix the widget".into(),
+                body: "fix the widget\n\nlonger explanation".into(),
+            }],
+            selected: 0,
+            loading: false,
+            error: None,
+            generation: 1,
+            object_menu: false,
+            object_selected: 0,
+            action_menu: true,
+            action_selected: 0,
+            selected_object: Some(GraphObject {
+                kind: GraphObjectKind::Commit,
+                name: "commit aa11".into(),
+                oid: "aa11".into(),
+            }),
+            form: None,
+            message: None,
+            selected_oid: None,
+            locate_oid: None,
+            filter: GraphFilter::default(),
+            filter_form: None,
+            filter_error: None,
+            commit_message: String::new(),
+            commit_amend: false,
+            commit_running: false,
+            commit_generation: 0,
+            commit_view: None,
+            patch_confirmation: None,
+            patch_running: false,
+            patch_generation: 0,
+        });
+
+        // "View commit changes" opens the diff in the Graph page instead of
+        // navigating to the working-tree Changes page, which is empty for a
+        // clean tree and therefore read as "the repository has no changes".
+        app.select_graph_action();
+        assert_eq!(app.screen, Screen::Graph);
+        assert!(app.graph_commit_view_open());
+        let view = app.graph.as_ref().unwrap().commit_view.as_ref().unwrap();
+        assert_eq!(view.oid, "aa11");
+        assert!(view.loading);
+        let view_generation = view.generation;
+        let graph = app.graph.as_ref().unwrap();
+        assert!(!graph.action_menu);
+        assert!(graph.selected_object.is_none());
+
+        // A stale generation or a mismatched OID never lands in the view.
+        app.apply_graph_view_patch(RangeCommitResult {
+            generation: view_generation + 1,
+            oid: "aa11".into(),
+            result: Ok("stale\n".into()),
+        });
+        assert!(view_open_is_loading(&app));
+        app.apply_graph_view_patch(RangeCommitResult {
+            generation: view_generation,
+            oid: "bb22".into(),
+            result: Ok("mismatch\n".into()),
+        });
+        assert!(view_open_is_loading(&app));
+
+        let patch = " a.txt | 1 +\ndiff --git a/a.txt b/a.txt\n@@ -0,0 +1 @@\n+two\n";
+        app.apply_graph_view_patch(RangeCommitResult {
+            generation: view_generation,
+            oid: "aa11".into(),
+            result: Ok(patch.into()),
+        });
+        let view = app.graph.as_ref().unwrap().commit_view.as_ref().unwrap();
+        assert!(!view.loading);
+        assert_eq!(view.text, patch);
+        assert!(view.line_count >= 4);
+        assert_eq!(view.scroll, 0);
+
+        // Scrolling is bounded by the patch length and works in both directions.
+        app.scroll_graph_commit_view(-5);
+        assert_eq!(graph_scroll(&app), 0);
+        app.scroll_graph_commit_view(2);
+        assert_eq!(graph_scroll(&app), 2);
+        app.scroll_graph_commit_view(1000);
+        let line_count = app
+            .graph
+            .as_ref()
+            .unwrap()
+            .commit_view
+            .as_ref()
+            .unwrap()
+            .line_count;
+        assert_eq!(graph_scroll(&app), line_count - 1);
+
+        // Esc unwinds the view first and keeps the Graph page open.
+        app.close_graph_commit_view();
+        assert!(!app.graph_commit_view_open());
+        assert_eq!(app.screen, Screen::Graph);
+
+        // The generic back() path unwinds an open view instead of leaving.
+        {
+            let graph = app.graph.as_mut().unwrap();
+            graph.action_menu = true;
+            graph.action_selected = 0;
+            graph.selected_object = Some(GraphObject {
+                kind: GraphObjectKind::Commit,
+                name: "commit aa11".into(),
+                oid: "aa11".into(),
+            });
+        }
+        app.select_graph_action();
+        assert!(app.graph_commit_view_open());
+        app.back();
+        assert!(!app.graph_commit_view_open());
+        assert_eq!(app.screen, Screen::Graph);
+    }
+
+    fn view_open_is_loading(app: &App) -> bool {
+        app.graph
+            .as_ref()
+            .and_then(|graph| graph.commit_view.as_ref())
+            .is_some_and(|view| view.loading)
+    }
+
+    fn graph_scroll(app: &App) -> usize {
+        app.graph
+            .as_ref()
+            .and_then(|graph| graph.commit_view.as_ref())
+            .map_or(0, |view| view.scroll)
+    }
+
+    #[test]
+    fn graph_view_commit_changes_action_leads_commit_and_head_lists_only() {
+        use GraphActionChoice as C;
+        assert_eq!(
+            graph_actions(GraphObjectKind::Commit).first(),
+            Some(&C::ViewChanges)
+        );
+        assert_eq!(
+            graph_actions(GraphObjectKind::Head).first(),
+            Some(&C::ViewChanges)
+        );
+        for kind in [
+            GraphObjectKind::LocalBranch,
+            GraphObjectKind::RemoteBranch,
+            GraphObjectKind::Tag,
+            GraphObjectKind::Stash,
+        ] {
+            assert!(
+                !graph_actions(kind).contains(&C::ViewChanges),
+                "{kind:?} should not offer View commit changes"
+            );
+        }
+    }
+
+    #[test]
+    fn graph_checkout_and_create_patch_are_commit_only_actions() {
+        use GraphActionChoice as C;
+        for kind in [GraphObjectKind::Commit, GraphObjectKind::Head] {
+            let actions = graph_actions(kind);
+            assert!(actions.contains(&C::CheckoutCommit), "{kind:?}");
+            assert!(actions.contains(&C::CreatePatch), "{kind:?}");
+        }
+        for kind in [
+            GraphObjectKind::LocalBranch,
+            GraphObjectKind::RemoteBranch,
+            GraphObjectKind::Tag,
+            GraphObjectKind::Stash,
+        ] {
+            let actions = graph_actions(kind);
+            assert!(!actions.contains(&C::CheckoutCommit), "{kind:?}");
+            assert!(!actions.contains(&C::CreatePatch), "{kind:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn graph_create_patch_confirms_then_reports_the_written_size() {
+        let value = project("alpha");
+        let workspace = Workspace {
+            root: PathBuf::from("/tmp"),
+            kind: WorkspaceKind::Git,
+            projects: vec![value.clone()],
+        };
+        let mut app = App::new(workspace, 1);
+        app.screen = Screen::Graph;
+        app.graph = Some(GraphState {
+            project: value.clone(),
+            commits: vec![Commit {
+                oid: "aa11".into(),
+                parents: Vec::new(),
+                refs: Vec::new(),
+                author: "Ada".into(),
+                timestamp: 100,
+                subject: "fix the widget".into(),
+                body: String::new(),
+            }],
+            selected: 0,
+            loading: false,
+            error: None,
+            generation: 1,
+            object_menu: false,
+            object_selected: 0,
+            action_menu: true,
+            action_selected: 2,
+            selected_object: Some(GraphObject {
+                kind: GraphObjectKind::Commit,
+                name: "commit aa11".into(),
+                oid: "aa11".into(),
+            }),
+            form: None,
+            message: None,
+            selected_oid: None,
+            locate_oid: None,
+            filter: GraphFilter::default(),
+            filter_form: None,
+            filter_error: None,
+            commit_message: String::new(),
+            commit_amend: false,
+            commit_running: false,
+            commit_generation: 0,
+            commit_view: None,
+            patch_confirmation: None,
+            patch_running: false,
+            patch_generation: 0,
+        });
+
+        // "Create patch file" asks for confirmation and names the output path.
+        app.select_graph_action();
+        assert!(app.graph_patch_pending());
+        let spec = app
+            .graph
+            .as_ref()
+            .unwrap()
+            .patch_confirmation
+            .as_ref()
+            .unwrap();
+        assert_eq!(spec.oid, "aa11");
+        assert_eq!(spec.output, value.path.join("commit-aa11.patch"));
+        {
+            let graph = app.graph.as_ref().unwrap();
+            assert!(!graph.action_menu);
+            assert!(graph.selected_object.is_none());
+            assert!(graph.message.is_some());
+        }
+
+        // Cancelling never starts a write.
+        app.confirm_graph_patch(false);
+        assert!(!app.graph_patch_pending());
+        assert!(!app.graph.as_ref().unwrap().patch_running);
+
+        // Accepting starts it; a stale generation never lands.
+        app.graph.as_mut().unwrap().selected_object = Some(GraphObject {
+            kind: GraphObjectKind::Commit,
+            name: "commit aa11".into(),
+            oid: "aa11".into(),
+        });
+        app.select_graph_action();
+        assert!(app.graph_patch_pending());
+        app.confirm_graph_patch(true);
+        assert!(!app.graph_patch_pending());
+        let running = app.graph.as_ref().unwrap();
+        assert!(running.patch_running);
+        let patch_generation = running.patch_generation;
+        let graph_generation = running.generation;
+        app.apply_graph_patch(GraphPatchResult {
+            project_id: value.id.clone(),
+            graph_generation,
+            patch_generation: patch_generation + 1,
+            result: Ok(7),
+        });
+        assert!(app.graph.as_ref().unwrap().patch_running);
+        app.apply_graph_patch(GraphPatchResult {
+            project_id: value.id.clone(),
+            graph_generation,
+            patch_generation,
+            result: Ok(42),
+        });
+        let graph = app.graph.as_ref().unwrap();
+        assert!(!graph.patch_running);
+        let (error, message) = graph.message.as_ref().unwrap();
+        assert!(!error, "{message}");
+        assert!(message.contains("42"), "{message}");
     }
 }

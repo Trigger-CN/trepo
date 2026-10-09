@@ -20,6 +20,10 @@ impl Language {
     pub fn action(self, english: &str) -> &'static str {
         if !self.is_zh() {
             return match english {
+                "View commit changes" => "View commit changes",
+                "Checkout this commit" => "Checkout this commit",
+                "Create patch file" => "Create patch file",
+                "Checkout commit" => "Checkout commit",
                 "Open Changes" => "Open Changes",
                 "Commit staged changes" => "Commit staged changes",
                 "Amend current commit" => "Amend current commit",
@@ -92,6 +96,9 @@ impl Language {
             };
         }
         match english {
+            "View commit changes" => "查看提交改动",
+            "Checkout this commit" | "Checkout commit" => "检出该提交",
+            "Create patch file" => "创建 patch 文件",
             "Open Changes" => "打开改动",
             "Commit staged changes" => "提交已暂存改动",
             "Amend current commit" => "修订当前提交",

@@ -53,7 +53,7 @@ M1 是所有后续里程碑的共同数据与交互基础。M4 可以在 M2 后�
 - 从任意子目录识别 Repo 工作区或单 Git 仓库，并并发扫描状态。
 - Workspace、完整 all-refs Graph、Changes 和 Repository 管理页面均已可用。
 - Workspace 支持稳定 ProjectId 多选、命名搜索；`d` 独立切换全部、仅改动、改动仓库及文件、与远端有差异四种范围，`t` 独立切换每种范围的列表/树形布局并分别记忆。活动 merge/rebase/cherry-pick/revert 会显示在列表和 Inspector，并可经新鲜快照确认后终止。
-- Graph 支持 commit/HEAD/local branch/remote branch/tag/stash 两级上下文操作及 typed form；Commit 可从 commit/HEAD 对象进入，Amend 仅在 HEAD 对象提供。Subject 按显示列宽多行渲染，Inspector 保留 body 原始换行，本地分支直接提供普通 Push 与 Force push with lease。
+- Graph 支持 commit/HEAD/local branch/remote branch/tag/stash 两级上下文操作及 typed form；Commit 可从 commit/HEAD 对象进入，Amend 仅在 HEAD 对象提供。提交与 HEAD 对象另提供 `View commit changes`（页内 diff，`j`/`k`/`PageUp`/`PageDown` 滚动、`Esc` 返回，与 `Open Changes` 分开，故查看历史提交不再因工作树干净而显示无改动）、`Checkout this commit`（`git switch --detach -- <oid>`，分离 HEAD）与 `Create patch file`（`y`/`n` 确认后写仓库根 `commit-<short>.patch`，内容即页内 diff，merge 取第一父提交；不用会静默跳过 merge 的 `git format-patch`）。Subject 按显示列宽多行渲染，Inspector 保留 body 原始换行，本地分支直接提供普通 Push 与 Force push with lease。
 - Changes 支持文件多选批量 Stage/Unstage、selected-path Stash、完整 Discard 与导出 patch（`E`，有选择导出所选、否则全部，确认框先列文件与输出路径，写入仓库根 `changes.patch`），提供 Commit/Amend/Reword 显式编辑入口，并展示及终止活动 Git 操作；文件/hunk/changed-line、commit/stash/conflict、refs/integration 和 remotes 写操作受锁、token 和 generation 保护。
 - 提交消息模板存于仓库本地 `trepo.commitTemplate`，可在 Changes 按 `t` 编辑；模板只预填全新的 Commit 草稿，Amend/Reword 仍预载 HEAD message。
 - Repository → Remotes 提供独立 Push refspec 入口；Workspace 按 `p` 先从最新快照预填 Remote 与 `HEAD:refs/for/<branch>`（detached HEAD 回退 `master`），在可编辑表单中修改目标后才进入同一 RemoteWrite 确认流程。
