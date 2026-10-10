@@ -406,8 +406,8 @@ fn render_footer(frame: &mut Frame, app: &App, changes: &ChangesState, area: Rec
         Line::raw(format!(
             "{abort}[{mode}] {}",
             app.language.text(
-                "Space Select   A All   Tab Mode   j/k Move   r Refresh   Esc Back   ? Help",
-                "Space 选择   A 全选   Tab 模式   j/k 移动   r 刷新   Esc 返回   ? 帮助",
+                "Space Select  A All  Tab Mode  j/k Move  g/G Ends  PgUp/PgDn Diff  r Refresh  o Repo  Esc Back  ? Help",
+                "Space 选择  A 全选  Tab 模式  j/k 移动  g/G 首/末  PgUp/PgDn 翻页  r 刷新  o 仓库  Esc 返回  ? 帮助",
             )
         ))
     };

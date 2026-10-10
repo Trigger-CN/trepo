@@ -34,7 +34,7 @@ pub(super) fn render(frame: &mut Frame, app: &App) {
         .constraints([
             Constraint::Length(2),
             Constraint::Min(5),
-            Constraint::Length(1),
+            Constraint::Length(2),
         ])
         .split(area);
     render_header(frame, app, state, vertical[0]);
@@ -503,33 +503,51 @@ fn results_block(
 }
 
 fn render_footer(frame: &mut Frame, app: &App, state: &FileSearchState, area: Rect) {
-    let footer = if state
+    // The long lists use two rows so every bound key stays visible at 80
+    // columns; the short states still fit on one line.
+    let lines = if state
         .history
         .as_ref()
         .is_some_and(|history| history.commit_view.is_some())
     {
-        app.language.text(
-            "j/k Scroll   PgUp/PgDn Page   Esc Back to history",
-            "j/k 滚动   PgUp/PgDn 翻页   Esc 返回历史",
-        )
+        vec![Line::raw(app.language.text(
+            "j/k Scroll   PgUp/PgDn Page   Esc Back to history   ? Help",
+            "j/k 滚动   PgUp/PgDn 翻页   Esc 返回历史   ? 帮助",
+        ))]
     } else if state.history.is_some() {
-        app.language.text(
-            "Enter Detail   l Locate   j/k Move   g/G First/Last   Esc Back to results",
-            "Enter 详情   l 定位   j/k 移动   g/G 首/末   Esc 返回列表",
-        )
+        vec![
+            Line::raw(app.language.text(
+                "Enter Detail   l Locate   j/k Move   g/G First/Last   PgUp/PgDn Page",
+                "Enter 详情   l 定位   j/k 移动   g/G 首/末   PgUp/PgDn 翻页",
+            )),
+            Line::raw(
+                app.language
+                    .text("Esc Back to results   ? Help", "Esc 返回列表   ? 帮助"),
+            ),
+        ]
     } else if state.form.is_some() {
-        app.language
-            .text("Enter search   Esc cancel", "Enter 检索   Esc 取消")
+        vec![Line::raw(
+            app.language
+                .text("Enter search   Esc cancel", "Enter 检索   Esc 取消"),
+        )]
     } else if state.loading {
-        app.language
-            .text("Searching...   Esc back", "正在检索...   Esc 返回")
+        vec![Line::raw(app.language.text(
+            "Searching...   Esc back   ? Help",
+            "正在检索...   Esc 返回   ? 帮助",
+        ))]
     } else {
-        app.language.text(
-            "Enter History   j/k Move   g/G First/Last   f Filter   r Rerun   Esc Back",
-            "Enter 历史   j/k 移动   g/G 首/末   f 过滤   r 重跑   Esc 返回",
-        )
+        vec![
+            Line::raw(app.language.text(
+                "Enter History   j/k Move   g/G First/Last   PgUp/PgDn Page",
+                "Enter 历史   j/k 移动   g/G 首/末   PgUp/PgDn 翻页",
+            )),
+            Line::raw(app.language.text(
+                "f Filter   r Rerun   Esc Back   ? Help",
+                "f 过滤   r 重跑   Esc 返回   ? 帮助",
+            )),
+        ]
     };
-    frame.render_widget(Paragraph::new(Line::styled(footer, Color::DarkGray)), area);
+    frame.render_widget(Paragraph::new(lines), area);
 }
 
 fn viewport_start(selected: usize, budget: usize, total: usize) -> usize {

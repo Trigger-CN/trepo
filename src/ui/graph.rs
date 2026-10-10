@@ -40,7 +40,7 @@ pub fn render(frame: &mut Frame, app: &App) {
         .constraints([
             Constraint::Length(2),
             Constraint::Min(5),
-            Constraint::Length(1),
+            Constraint::Length(2),
         ])
         .split(area);
     frame.render_widget(
@@ -71,8 +71,8 @@ pub fn render(frame: &mut Frame, app: &App) {
         super::range_history::render_commit_view(frame, app, view, vertical[1]);
         frame.render_widget(
             Paragraph::new(Line::from(Span::raw(app.language.text(
-                "j/k Scroll  PageUp/PageDown Page  Esc Back",
-                "j/k 滚动  PageUp/PageDown 翻页  Esc 返回",
+                "j/k Scroll  PgUp/PgDn Page  Esc Back  ? Help",
+                "j/k 滚动  PgUp/PgDn 翻页  Esc 返回  ? 帮助",
             )))),
             vertical[2],
         );
@@ -90,33 +90,44 @@ pub fn render(frame: &mut Frame, app: &App) {
         render_commits(frame, app, graph, vertical[1]);
     }
 
-    let footer = if graph.loading {
-        Span::styled(
+    let status = if graph.loading {
+        Some(Span::styled(
             app.language.text("Loading commits...", "正在加载提交..."),
             Style::default().fg(Color::Yellow),
-        )
+        ))
     } else if app
         .repository
         .as_ref()
         .is_some_and(|state| state.action_running)
     {
-        Span::styled(
+        Some(Span::styled(
             app.language
                 .text("Running Git operation...", "正在执行 Git 操作..."),
             Style::default().fg(Color::Yellow),
-        )
+        ))
     } else if let Some((error, message)) = &graph.message {
-        Span::styled(
+        Some(Span::styled(
             message.clone(),
             Style::default().fg(if *error { Color::Red } else { Color::Green }),
-        )
-    } else {
-        Span::raw(app.language.text(
-            "Enter Objects  j/k Move  f Filter  / Search  x Clear  r Reload  Esc Back",
-            "Enter 对象  j/k 移动  f 过滤  / 搜索  x 清除  r 重载  Esc 返回",
         ))
+    } else {
+        None
     };
-    frame.render_widget(Paragraph::new(Line::from(footer)), vertical[2]);
+    // Two rows keep every bound key visible at 80 columns; a task status or
+    // message takes the first row and pushes the first key group down.
+    let row_one = app.language.text(
+        "Enter Objects  j/k Move  g/G First/Last  f Filter  / Search  x Clear",
+        "Enter 对象  j/k 移动  g/G 首/末  f 过滤  / 搜索  x 清除",
+    );
+    let row_two = app.language.text(
+        "c Changes  o Repo  r Reload  Esc Back  ? Help",
+        "c 改动  o 仓库  r 重载  Esc 返回  ? 帮助",
+    );
+    let lines = match status {
+        Some(status) => vec![Line::from(status), Line::raw(row_one)],
+        None => vec![Line::raw(row_one), Line::raw(row_two)],
+    };
+    frame.render_widget(Paragraph::new(lines), vertical[2]);
     if graph.object_menu {
         render_object_menu(frame, app, graph);
     }

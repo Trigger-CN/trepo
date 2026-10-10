@@ -104,6 +104,7 @@ Git 与 Repo 的参数面很大，而且会随版本、插件和服务端扩展�
 - `Space` 切换当前行选择，`v` 进入范围选择；批量动作只作用于已选择项。
 - `Ctrl+P` 打开命令面板，`Ctrl+R` 刷新当前范围，`?` 打开上下文帮助。
 - 底部状态栏只展示当前上下文最重要的动作、任务状态和错误计数；完整快捷键位于 Help。
+- 每个页面的底部提示行列出该页面实际绑定的按键，统一占两行：Workspace、Changes、Repository 的第一行兼显任务状态或错误；Graph、时间范围检索、文件检索（表单、结果、历史与提交详情各态）的第一行在无状态时显示第一组按键。两行按终端显示宽度排版，单行不超过 120 列（推荐宽度），窄终端下尾部由 Help 补齐（`?`）。
 - 快捷键可配置；文本输入态、列表态和弹窗态有独立 key scope，避免同键歧义。
 
 ## 5. Workspace 主页
@@ -123,7 +124,8 @@ Git 与 Repo 的参数面很大，而且会随版本、插件和服务端扩展�
 ├───────────────────────────────────────┬───────────────────────────────┤
 │ Summary: 12 dirty / 1 conflict        │ Selected repository inspector │
 │ 4 ahead / 7 behind / 2 detached       │ branch, commit, file summary  │
-└ Enter Open  Space Select  / Search  f Filter  a Actions  ? Help ─────┘
+└ Space Select  A All  S Stage  Z Stash  D Discard  d Scope  t List/Tree  p Push  q Quit ┘
+└ Enter Graph  c Changes  o Repo  F Files  H Range  a Repo  / Search  r Refresh  j/k  g/G ┘
 ```
 
 ### 5.2 仓库列与状态

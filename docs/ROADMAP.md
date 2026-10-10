@@ -431,6 +431,7 @@ cargo build
 - Repo 批处理保留凭据脱敏日志；Workspace Git 批任务保留逐仓库 pending/running/success/failure。两者均不承诺跨仓库回滚并在结束后复扫事实状态。
 - Graph Subject 和 Workspace 展开仓库使用真实视觉行高；Changes diff 每个源行固定一行，显示列宽安全层已覆盖中文宽字符、控制字符与长转短重绘残留。
 - Language 注入 App，默认 English；精确 `-zh`/`-en` 在 Clap 前规范化，标准 `--zh`/`--en` 同时受支持且互斥。
+- 每个页面的底部提示行列出该页当前状态下实际绑定的按键，统一占两行：Workspace、Changes、Repository 的首行兼显任务状态或错误；中英文文案按终端显示宽度排版，单行不超 120 列，并有 80x24/120x40 渲染断言覆盖关键键位。
 - 当前无任意命令面板或 PTY takeover；交互认证、外部 editor/mergetool 明确依赖 M5。
 
 ## 15. 下一执行点

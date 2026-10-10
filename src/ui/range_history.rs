@@ -34,7 +34,7 @@ pub(super) fn render(frame: &mut Frame, app: &App) {
         .constraints([
             Constraint::Length(2),
             Constraint::Min(5),
-            Constraint::Length(1),
+            Constraint::Length(2),
         ])
         .split(area);
     render_header(frame, app, state, vertical[0]);
@@ -550,24 +550,36 @@ fn result_notes(error_count: usize, capped_count: usize) -> String {
 }
 
 fn render_footer(frame: &mut Frame, app: &App, state: &RangeHistoryState, area: Rect) {
-    let footer = if state.view.is_some() {
-        app.language.text(
-            "j/k Scroll   PgUp/PgDn Page   l Locate in Graph   Esc Back to results",
-            "j/k 滚动   PgUp/PgDn 翻页   l 在提交图中定位   Esc 返回列表",
-        )
+    // Two rows keep every bound key visible at 80 columns; the short states
+    // still use a single line.
+    let lines = if state.view.is_some() {
+        vec![Line::raw(app.language.text(
+            "j/k Scroll   PgUp/PgDn Page   l Locate in Graph   Esc Back to results   ? Help",
+            "j/k 滚动   PgUp/PgDn 翻页   l 在提交图中定位   Esc 返回列表   ? 帮助",
+        ))]
     } else if state.form.is_some() {
-        app.language
-            .text("Enter run   Esc cancel", "Enter 执行   Esc 取消")
+        vec![Line::raw(app.language.text(
+            "Enter run   Tab field   Esc cancel",
+            "Enter 执行   Tab 字段   Esc 取消",
+        ))]
     } else if state.loading {
-        app.language
-            .text("Loading...   Esc back", "正在加载...   Esc 返回")
+        vec![Line::raw(app.language.text(
+            "Loading...   Esc back   ? Help",
+            "正在加载...   Esc 返回   ? 帮助",
+        ))]
     } else {
-        app.language.text(
-            "Enter Detail   l Locate   j/k Move   g/G First/Last   f Filter   r Rerun   Esc Back",
-            "Enter 详情   l 定位   j/k 移动   g/G 首/末   f 过滤   r 重跑   Esc 返回",
-        )
+        vec![
+            Line::raw(app.language.text(
+                "Enter Detail   l Locate   j/k Move   g/G First/Last   PgUp/PgDn Page",
+                "Enter 详情   l 定位   j/k 移动   g/G 首/末   PgUp/PgDn 翻页",
+            )),
+            Line::raw(app.language.text(
+                "f Filter   r Rerun   Esc Back   ? Help",
+                "f 过滤   r 重跑   Esc 返回   ? 帮助",
+            )),
+        ]
     };
-    frame.render_widget(Paragraph::new(Line::styled(footer, Color::DarkGray)), area);
+    frame.render_widget(Paragraph::new(lines), area);
 }
 
 fn viewport_start(selected: usize, budget: usize, total: usize) -> usize {

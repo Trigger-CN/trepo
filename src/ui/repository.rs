@@ -237,8 +237,8 @@ fn render_footer(frame: &mut Frame, app: &App, state: &RepositoryState, area: Re
         )
     } else {
         Span::raw(app.language.text(
-            "Tab/Shift-Tab Views  a Actions  j/k Move  r Refresh  Esc Back",
-            "Tab/Shift-Tab 视图  a 操作  j/k 移动  r 刷新  Esc 返回",
+            "Tab/Shift-Tab Views  a Actions  j/k Move  r Refresh  Esc Back  ? Help",
+            "Tab/Shift-Tab 视图  a 操作  j/k 移动  r 刷新  Esc 返回  ? 帮助",
         ))
     };
     frame.render_widget(

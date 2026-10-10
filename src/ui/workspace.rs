@@ -452,19 +452,26 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
     } else {
         ""
     };
-    let keys = format!(
+    let actions = format!(
         "{}{}",
         app.language.text(
-            "   Space Select  S Stage  Z Stash  D Discard  d Scope  t List/Tree  p Push refs/for  H Range  a Repo actions  / Search",
-            "   Space 选择  S 暂存  Z 储藏  D 丢弃  d 范围  t 列表/树形  p 推送 refs/for  H 时间范围  a Repo 操作  / 搜索",
+            "   Space Select  A All  S Stage  Z Stash  D Discard  d Scope  t List/Tree  p Push refs/for",
+            "   空格 选择  A 全选  S 暂存  Z 储藏  D 丢弃  d 范围  t 列表/树形  p 推送 refs/for",
         ),
         abort
     );
+    let navigation = app.language.text(
+        "  Enter Graph  c Changes  o Repo  F Files  H Range  a Repo  / Search  r Refresh  j/k Move  g/G Ends  Esc/q Quit  ? Help",
+        "  Enter 提交图  c 改动  o 仓库  F 文件  H 时间范围  a 批量  / 搜索  r 刷新  j/k 移动  g/G 首/末  Esc/q 退出  ? 帮助",
+    );
     frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(task, Style::default().fg(task_color)),
-            Span::raw(keys),
-        ])),
+        Paragraph::new(vec![
+            Line::from(vec![
+                Span::styled(task, Style::default().fg(task_color)),
+                Span::raw(actions),
+            ]),
+            Line::raw(navigation),
+        ]),
         area,
     );
 }

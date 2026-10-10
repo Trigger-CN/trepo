@@ -347,6 +347,34 @@ mod tests {
         for (width, height) in [(80, 24), (120, 40)] {
             assert!(draw_text(&app, width, height).contains("rebase"));
         }
+        // The footer advertises the keys the Workspace actually binds.
+        for expected in [
+            "Space Select",
+            "A All",
+            "S Stage",
+            "Z Stash",
+            "D Discard",
+            "d Scope",
+            "t List/Tree",
+            "p Push refs/for",
+            "Enter Graph",
+            "c Changes",
+            "o Repo",
+            "F Files",
+            "H Range",
+            "a Repo",
+            "/ Search",
+            "r Refresh",
+            "j/k Move",
+            "g/G",
+            "Esc/q Quit",
+            "? Help",
+        ] {
+            assert!(
+                draw_text(&app, 120, 40).contains(expected),
+                "workspace footer key missing: {expected}"
+            );
+        }
         app.repository = Some(repository_state(&app));
         app.repository.as_mut().unwrap().pending = Some(RepositoryAction::Abort {
             operation: GitOperationKind::Rebase,
@@ -355,6 +383,15 @@ mod tests {
             let text = draw_text(&app, width, height);
             assert!(text.contains("Confirm operation"));
             assert!(text.contains("Abort operation"));
+        }
+        app.repository.as_mut().unwrap().pending = None;
+        // An active operation adds the abort hint to the action row.
+        for expected in ["Ready", "x Abort operation"] {
+            let text = draw_text(&app, 120, 40);
+            assert!(
+                text.contains(expected),
+                "workspace footer missing: {expected}"
+            );
         }
     }
 
@@ -871,6 +908,25 @@ mod tests {
         assert!(text.contains("branch:main  query:no-such-commit  author:Ada"));
         assert!(text.contains("All refs commit graph (0/1)"));
         assert!(text.contains("No matching commits"));
+        // The empty-result footer still advertises every bound key.
+        for expected in [
+            "Enter Objects",
+            "j/k Move",
+            "g/G First/Last",
+            "f Filter",
+            "/ Search",
+            "x Clear",
+            "c Changes",
+            "o Repo",
+            "r Reload",
+            "Esc Back",
+            "? Help",
+        ] {
+            assert!(
+                text.contains(expected),
+                "graph footer key missing: {expected}"
+            );
+        }
     }
 
     #[test]
@@ -1116,6 +1172,31 @@ mod tests {
             assert!(text.contains("[x]"));
             assert!(text.contains("m Commit"));
             assert!(text.contains("a Amend HEAD"));
+        }
+        // The footer advertises every key the page binds, in both rows.
+        for expected in [
+            "w Reword HEAD",
+            "t Template",
+            "s Stage",
+            "u Unstage",
+            "z Stash",
+            "d Discard",
+            "E Export patch",
+            "Space Select",
+            "A All",
+            "Tab Mode",
+            "j/k Move",
+            "g/G Ends",
+            "PgUp/PgDn Diff",
+            "r Refresh",
+            "o Repo",
+            "Esc Back",
+            "? Help",
+        ] {
+            assert!(
+                draw_text(&app, 120, 40).contains(expected),
+                "changes footer key missing: {expected}"
+            );
         }
         app.changes.as_mut().unwrap().operation_running = true;
         for (width, height) in [(80, 24), (120, 40)] {
@@ -1643,6 +1724,22 @@ mod tests {
         for (width, height) in [(80, 24), (120, 40)] {
             assert_selected_text(&app, width, height, "Operation: merge");
         }
+        // The footer advertises the page keys plus the overlay key reminder.
+        for expected in [
+            "Tab/Shift-Tab Views",
+            "a Actions",
+            "j/k Move",
+            "r Refresh",
+            "Esc Back",
+            "? Help",
+            "Enter selects menu/form item",
+            "Space toggles option",
+        ] {
+            assert!(
+                draw_text(&app, 120, 40).contains(expected),
+                "repository footer key missing: {expected}"
+            );
+        }
         for tab in RepositoryTab::ALL {
             app.repository.as_mut().unwrap().tab = tab;
             draw(&app, 80, 24);
@@ -1801,6 +1898,23 @@ mod tests {
             error: None,
         }];
         app.rebuild_range_history_rows();
+        // The list footer advertises the keys the page binds.
+        for expected in [
+            "Enter Detail",
+            "l Locate",
+            "j/k Move",
+            "g/G First/Last",
+            "PgUp/PgDn Page",
+            "f Filter",
+            "r Rerun",
+            "Esc Back",
+            "? Help",
+        ] {
+            assert!(
+                draw_text(&app, 120, 40).contains(expected),
+                "range footer key missing: {expected}"
+            );
+        }
         // A second repository proves both group headers are laid out with the
         // name and the full directory on their own lines.
         let second = Project {
@@ -1902,6 +2016,22 @@ mod tests {
             },
         ];
         app.rebuild_file_search_rows();
+        // The result footer advertises the keys the page binds.
+        for expected in [
+            "Enter History",
+            "j/k Move",
+            "g/G First/Last",
+            "PgUp/PgDn Page",
+            "f Filter",
+            "r Rerun",
+            "Esc Back",
+            "? Help",
+        ] {
+            assert!(
+                draw_text(&app, 120, 40).contains(expected),
+                "file footer key missing: {expected}"
+            );
+        }
         for (width, height) in [(80, 24), (120, 40)] {
             let text = draw_text(&app, width, height);
             for expected in [
@@ -2042,6 +2172,14 @@ mod tests {
             assert!(
                 text.contains("Esc Back"),
                 "footer hint missing at {width}x{height}:\n{text}"
+            );
+            assert!(
+                text.contains("j/k Scroll") && text.contains("PgUp/PgDn Page"),
+                "scroll hints missing at {width}x{height}:\n{text}"
+            );
+            assert!(
+                text.contains("? Help"),
+                "help hint missing at {width}x{height}:\n{text}"
             );
         }
 

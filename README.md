@@ -102,6 +102,8 @@ git push origin v0.5.0
 | `q` | Exit from Workspace |
 | `?` | Toggle contextual help |
 
+Every page's bottom hint line lists the keys that page actually binds at that moment and always uses two rows: the first row of Workspace, Changes, and Repository also carries task status or errors. The hints are laid out to stay within 120 terminal columns per row, and the full list remains available in Help (`?`).
+
 ## Current scope
 
 Implemented:
