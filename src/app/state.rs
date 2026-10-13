@@ -9,15 +9,18 @@ use crate::app::repository::{
     choices, form_for, FormField, RepositoryChoice, RepositoryForm, RepositoryTab,
 };
 use crate::domain::{
-    BatchOperationItem, BatchOperationSpec, ChangeEntry, ChangePreview, Commit, CommitMode,
-    CommitOutcome, CommitPatchSpec, CommitSpec, ExportSpec, FileSearchSpec, GitOperationKind,
-    HunkSource, OperationKind, OperationOutcome, OperationSpec, OperationTarget, Project,
-    ProjectFileMatches, ProjectId, ProjectRangeHistory, ProjectSnapshot, RangeHistorySpec,
+    BatchOperationItem, BatchOperationSpec, ChangeEntry, ChangePreview, CommandState, Commit,
+    CommitMode, CommitOutcome, CommitPatchSpec, CommitSpec, ExportSpec, FileSearchSpec,
+    GitOperationKind, HunkSource, OperationKind, OperationOutcome, OperationSpec, OperationTarget,
+    Project, ProjectFileMatches, ProjectId, ProjectRangeHistory, ProjectSnapshot, RangeHistorySpec,
     RepoBatchAction, RepoBatchSpec, RepoProjectResult, RepoProjectState, RepositoryAction,
     RepositoryActionOutcome, RepositoryActionSpec, RepositorySnapshot, RiskLevel, Workspace,
     WorkspaceGitAction, WorkspaceGitSpec, WorkspaceKind, WorkspaceSummary,
 };
 use crate::i18n::Language;
+use crate::services::custom_command::{
+    self, CustomCommandEvent, CustomCommandEventKind, CustomCommandHandle,
+};
 use crate::services::file_search::{self, FileHistoryResult, FileSearchResult};
 use crate::services::operations::OperationRunner;
 use crate::services::range_history::{self, RangeHistoryResult};
@@ -1060,6 +1063,40 @@ pub struct RepoBatchState {
     pub scroll: usize,
     pub message: Option<(bool, String)>,
 }
+
+/// One repository's outcome for a custom command run.
+#[derive(Debug, Clone)]
+pub struct CustomCommandResult {
+    pub project: Project,
+    pub state: CommandState,
+    pub message: String,
+}
+
+/// A running (or finished) custom-command task. The command string is kept
+/// verbatim so the confirmation and the log view always show what was run.
+#[derive(Debug)]
+pub struct CustomCommandTask {
+    pub command: String,
+    pub targets: Vec<Project>,
+    pub results: Vec<CustomCommandResult>,
+    pub logs: Vec<String>,
+    pub running: bool,
+    pub cancelling: bool,
+    pub cancelled: bool,
+    pub generation: u64,
+}
+
+/// Workspace custom-command overlay: an input form, a confirmation step and the
+/// streamed log of the running task.
+#[derive(Debug, Default)]
+pub struct CustomCommandState {
+    pub form: Option<String>,
+    pub pending: Option<(String, Vec<Project>)>,
+    pub task: Option<CustomCommandTask>,
+    pub scroll: usize,
+    pub message: Option<(bool, String)>,
+}
+
 /// Editable workspace range-query form. Mirrors [`GraphFilter`] but is a
 /// standalone typed form because its scope spans every repository.
 #[derive(Debug, Clone, Default)]
@@ -1331,6 +1368,7 @@ pub struct App {
     pub repository: Option<RepositoryState>,
     pub selected_projects: HashSet<ProjectId>,
     pub repo_batch: RepoBatchState,
+    pub custom_command: CustomCommandState,
     pub workspace_git: WorkspaceGitState,
     pub range_history: RangeHistoryState,
     pub file_search: FileSearchState,
@@ -1376,6 +1414,10 @@ pub struct App {
     pub repo_batch_rx: mpsc::UnboundedReceiver<RepoBatchEvent>,
     repo_batch_handle: Option<RepoBatchHandle>,
     repo_batch_generation: u64,
+    custom_command_tx: mpsc::UnboundedSender<CustomCommandEvent>,
+    pub custom_command_rx: mpsc::UnboundedReceiver<CustomCommandEvent>,
+    custom_command_handle: Option<CustomCommandHandle>,
+    custom_command_generation: u64,
     workspace_git_prepare_tx: mpsc::UnboundedSender<WorkspaceGitPrepareResult>,
     pub workspace_git_prepare_rx: mpsc::UnboundedReceiver<WorkspaceGitPrepareResult>,
     workspace_git_tx: mpsc::UnboundedSender<WorkspaceGitEvent>,
@@ -1415,6 +1457,7 @@ impl App {
         let (repository_tx, repository_rx) = mpsc::unbounded_channel();
         let (repository_action_tx, repository_action_rx) = mpsc::unbounded_channel();
         let (repo_batch_tx, repo_batch_rx) = mpsc::unbounded_channel();
+        let (custom_command_tx, custom_command_rx) = mpsc::unbounded_channel();
         let (workspace_git_prepare_tx, workspace_git_prepare_rx) = mpsc::unbounded_channel();
         let (workspace_git_tx, workspace_git_rx) = mpsc::unbounded_channel();
         let (range_history_tx, range_history_rx) = mpsc::unbounded_channel();
@@ -1452,6 +1495,7 @@ impl App {
             repository: None,
             selected_projects: HashSet::new(),
             repo_batch: RepoBatchState::default(),
+            custom_command: CustomCommandState::default(),
             workspace_git: WorkspaceGitState::default(),
             range_history: RangeHistoryState::default(),
             file_search: FileSearchState::default(),
@@ -1491,6 +1535,10 @@ impl App {
             repo_batch_rx,
             repo_batch_handle: None,
             repo_batch_generation: 0,
+            custom_command_tx,
+            custom_command_rx,
+            custom_command_handle: None,
+            custom_command_generation: 0,
             workspace_git_prepare_tx,
             workspace_git_prepare_rx,
             workspace_git_tx,
@@ -2183,6 +2231,215 @@ impl App {
             || self.repo_batch.task.is_some()
             || self.repo_batch.message.is_some()
     }
+
+    /// Opens the custom-command form for the current repository selection.
+    pub fn open_custom_command(&mut self) {
+        if self
+            .custom_command
+            .task
+            .as_ref()
+            .is_some_and(|task| task.running)
+        {
+            self.custom_command.message = Some((true, "A command task is already running".into()));
+            return;
+        }
+        self.custom_command.form = Some(String::new());
+        self.custom_command.pending = None;
+        self.custom_command.message = None;
+        self.custom_command.scroll = 0;
+    }
+
+    pub fn edit_custom_command(&mut self, input: CommitInput) {
+        let Some(command) = self.custom_command.form.as_mut() else {
+            return;
+        };
+        match input {
+            CommitInput::Character(value) => command.push(value),
+            CommitInput::Text(value) => command.push_str(&value.replace(['\r', '\n'], " ")),
+            CommitInput::Backspace => {
+                command.pop();
+            }
+            _ => {}
+        }
+    }
+
+    pub fn submit_custom_command(&mut self) {
+        let command = self.custom_command.form.take().unwrap_or_default();
+        let command = match custom_command::validate_command(&command) {
+            Ok(command) => command,
+            Err(error) => {
+                self.custom_command.form = Some(command);
+                self.custom_command.message = Some((true, error.to_string()));
+                return;
+            }
+        };
+        let targets = self.custom_command_targets();
+        if targets.is_empty() {
+            self.custom_command.form = Some(command);
+            self.custom_command.message =
+                Some((true, "No repository is available to run in".into()));
+            return;
+        }
+        self.custom_command.scroll = 0;
+        self.custom_command.pending = Some((command, targets));
+        self.custom_command.message = None;
+    }
+
+    /// Custom commands run in every explicitly selected repository, falling back
+    /// to the repository under the cursor, so a single press is never a no-op.
+    fn custom_command_targets(&self) -> Vec<Project> {
+        if !self.selected_projects.is_empty() {
+            return self
+                .workspace
+                .projects
+                .iter()
+                .filter(|project| self.selected_projects.contains(&project.id))
+                .cloned()
+                .collect();
+        }
+        self.selected_project()
+            .map(|snapshot| vec![snapshot.project.clone()])
+            .unwrap_or_default()
+    }
+
+    pub fn confirm_custom_command(&mut self, confirmed: bool) {
+        let Some((command, targets)) = self.custom_command.pending.take() else {
+            return;
+        };
+        if confirmed {
+            self.start_custom_command(command, targets);
+        }
+    }
+
+    fn start_custom_command(&mut self, command: String, targets: Vec<Project>) {
+        self.custom_command_generation = self.custom_command_generation.wrapping_add(1);
+        let generation = self.custom_command_generation;
+        let results = targets
+            .iter()
+            .cloned()
+            .map(|project| CustomCommandResult {
+                project,
+                state: CommandState::Pending,
+                message: "Waiting to start".to_owned(),
+            })
+            .collect();
+        self.custom_command.scroll = 0;
+        self.custom_command.task = Some(CustomCommandTask {
+            command: command.clone(),
+            targets: targets.clone(),
+            results,
+            logs: Vec::new(),
+            running: true,
+            cancelling: false,
+            cancelled: false,
+            generation,
+        });
+        self.custom_command.message = None;
+        self.custom_command_handle = Some(custom_command::spawn(
+            custom_command::shell_program(),
+            command,
+            targets,
+            generation,
+            self.custom_command_tx.clone(),
+        ));
+    }
+
+    pub fn apply_custom_command(&mut self, event: CustomCommandEvent) {
+        let Some(task) = self.custom_command.task.as_mut() else {
+            return;
+        };
+        if event.generation != task.generation {
+            return;
+        }
+        match event.kind {
+            CustomCommandEventKind::Started { project, .. } => {
+                if let Some(result) = task
+                    .results
+                    .iter_mut()
+                    .find(|value| value.project.id == project.id)
+                {
+                    result.state = CommandState::Running;
+                    result.message = "Running".to_owned();
+                }
+            }
+            CustomCommandEventKind::Log { project_id, line } => {
+                let prefix = task
+                    .targets
+                    .iter()
+                    .find(|value| value.id == project_id)
+                    .map(|value| value.relative_path.display().to_string())
+                    .unwrap_or_else(|| project_id.0.display().to_string());
+                custom_command::push_log_bounded(&mut task.logs, format!("[{prefix}] {line}"));
+            }
+            CustomCommandEventKind::Finished {
+                project,
+                state,
+                message,
+            } => {
+                if let Some(result) = task
+                    .results
+                    .iter_mut()
+                    .find(|value| value.project.id == project.id)
+                {
+                    result.state = state;
+                    result.message = message;
+                }
+            }
+            CustomCommandEventKind::Complete { cancelled } => {
+                task.running = false;
+                task.cancelling = false;
+                task.cancelled = cancelled;
+                self.custom_command_handle = None;
+                self.refresh();
+            }
+        }
+    }
+
+    pub fn cancel_custom_command(&mut self) {
+        let Some(task) = self.custom_command.task.as_mut() else {
+            return;
+        };
+        if !task.running || task.cancelling {
+            return;
+        }
+        task.cancelling = true;
+        task.logs.push(
+            "[trepo] Cancellation requested; completed changes will not be rolled back".into(),
+        );
+        if let Some(handle) = &self.custom_command_handle {
+            handle.cancel();
+        }
+    }
+
+    pub fn scroll_custom_command(&mut self, delta: isize) {
+        self.custom_command.scroll = self.custom_command.scroll.saturating_add_signed(delta);
+    }
+
+    pub fn close_custom_command_overlay(&mut self) {
+        if self.custom_command.message.take().is_some() {
+            return;
+        }
+        if self.custom_command.form.take().is_some() || self.custom_command.pending.take().is_some()
+        {
+            return;
+        }
+        if self
+            .custom_command
+            .task
+            .as_ref()
+            .is_some_and(|task| !task.running)
+        {
+            self.custom_command.task = None;
+        }
+    }
+
+    pub fn custom_command_overlay_active(&self) -> bool {
+        self.custom_command.form.is_some()
+            || self.custom_command.pending.is_some()
+            || self.custom_command.task.is_some()
+            || self.custom_command.message.is_some()
+    }
+
     /// Whether some editor or form currently owns typed input, i.e. whether a
     /// clipboard paste has a destination. Mirrors the precedence of
     /// `handle_paste` in `main.rs`.
@@ -2199,6 +2456,7 @@ impl App {
                 .as_ref()
                 .is_some_and(|state| state.form.is_some())
             || self.repo_batch.form.is_some()
+            || self.custom_command.form.is_some()
             || self.range_history.form.is_some()
             || self.file_search.form.is_some()
             || self.search_mode
@@ -2256,6 +2514,10 @@ impl App {
                 }
                 if self.repo_batch.form.is_some() {
                     self.repo_batch.message = Some(message);
+                    return None;
+                }
+                if self.custom_command.form.is_some() {
+                    self.custom_command.message = Some(message);
                     return None;
                 }
                 if self.range_history.form.is_some() {

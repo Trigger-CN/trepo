@@ -102,6 +102,7 @@ Workspace 展示仓库状态、活动 merge/rebase/cherry-pick/revert、HEAD 和
 | `a` | 打开 Repo 批任务，仅 Android Repo 工作区有效 |
 | `H` | 打开跨仓库时间范围提交检索页（Since/Until + Author + Query），并发扫描范围内所有仓库 |
 | `F` | 打开跨仓库文件检索页（按文件名或不完整/完整路径搜索） |
+| `!` | 在选中的仓库中执行你输入的 shell 命令（无显式选择时用光标仓库）：以 `$SHELL -c <命令>` 运行，工作目录即各仓库目录，确认框列出目标仓库与命令原文并声明 trepo 不回滚 |
 | `r` | 重新扫描并刷新 Workspace |
 | `x` | 活动 Git 操作存在时，重新读取仓库状态并进入终止确认 |
 
@@ -139,6 +140,18 @@ Workspace 展示仓库状态、活动 merge/rebase/cherry-pick/revert、HEAD 和
 - 结果同样按仓库分组（组长两行：仓库名与匹配数、完整目录），组内保持 Git 的列出顺序；每仓库最多保留 4000 条匹配。
 - 结果页键位：`j/k` 或 `↑/↓` 移动选择、`g/G` 或 `Home/End` 跳到首/末、`PageUp/PageDown` 翻页、`Enter` 查看所选文件的提交记录、`f` 重新打开查询表单、`r` 用同一查询重跑、`Esc` 关闭表单或返回 Workspace；底部提示行完整列出这些键与 `?` 帮助。没有任何命中时显示 `No matching files`。
 - 文件历史页按时间降序列出涉及该文件的提交（`git log --follow`），跟随重命名：提交在不同名字下时展示当时记录的路径与 `--name-status` 状态字母（如 `R100` + `(was src/old_widget.rs)`）。历史页内 `j/k`、`PageUp/PageDown` 移动，`Enter` 打开该提交的完整信息与改动（与时间范围检索的详情页一致），`l` 定位到仓库提交图，`Esc` 逐层返回。
+
+
+### 在选中仓库中执行自定义命令（`!`）
+
+在 Workspace 按 `!` 打开命令输入框，输入一行命令后回车：
+
+- 目标范围遵循 Workspace 现有约定：存在 `Space`/`A` 显式选择时按仓库顺序逐个执行，否则对光标所在仓库执行；没有任何仓库时报错而不执行。
+- 命令以 `$SHELL -c <你输入的命令>` 运行（`$SHELL` 未设置时回退 `/bin/sh`），工作目录即每个仓库目录，因此 `sh`、`python`、`git` 以及管道、重定向、通配符都可照常书写。trepo 不向命令追加任何参数，也不注入占位路径。
+- 空命令（或含换行）会被拒绝，输入框保留内容并给出提示。
+- 回车后先进入确认框：列出目标仓库与实际命令原文，并声明「以上目录中以你的身份执行，trepo 不回滚」。按 `y` 开始，`n`/`Esc` 取消。
+- 运行中逐仓库串行执行并流式显示 stdout/stderr（日志保留最近 500 行，并按 `token`/`password`/`credential`/`authorization` 与 URL userinfo 规则脱敏）；`j/k`、`PageUp/PageDown` 滚动，`c` 请求取消（先发 SIGINT，2 秒宽限后 SIGKILL 整个进程组），完成后 `Esc` 关闭。
+- 主循环不会被命令阻塞：命令在后台任务中执行，界面仍可响应按键。
 
 ### Workspace Git 批任务流程
 

@@ -64,6 +64,7 @@ fn render_help(frame: &mut Frame, app: &App) {
             Line::raw("t / p           Git 配置模板 / 打开预填 refspec 表单"),
             Line::raw("H               工作区时间段提交检索；列表 Enter 看详情、l 定位"),
             Line::raw("F               工作区文件检索；列表 Enter 看该文件提交记录"),
+            Line::raw("!               工作区在选中仓库中执行 shell 命令（需确认）"),
             Line::raw("r               刷新当前页面"),
             Line::raw("Esc / q / ?     返回 / 退出 / 切换帮助"),
             Line::raw(""),
@@ -96,6 +97,9 @@ fn render_help(frame: &mut Frame, app: &App) {
             Line::raw("t / p          Commit template / prefilled refspec push form"),
             Line::raw("H              Workspace range search; Enter detail, l locate in graph"),
             Line::raw("F              Workspace file search; Enter shows that file's history"),
+            Line::raw(
+                "!              Workspace run a shell command in selected repositories (confirmed)",
+            ),
             Line::raw("r              Refresh current page"),
             Line::raw("Esc / q / ?    Back / quit Workspace / toggle help"),
             Line::raw(""),
@@ -339,6 +343,47 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn custom_command_overlay_shows_form_confirmation_and_log() {
+        let mut app = app();
+        assert!(!app.custom_command_overlay_active());
+
+        // The form owns typed input and rejects a blank command.
+        app.open_custom_command();
+        assert!(app.custom_command.form.is_some());
+        app.submit_custom_command();
+        assert!(app.custom_command.form.is_some());
+        assert!(app.custom_command.pending.is_none());
+        for character in "git log --oneline | head -3".chars() {
+            app.edit_custom_command(crate::app::state::CommitInput::Character(character));
+        }
+        app.submit_custom_command();
+        assert!(app.custom_command.form.is_none());
+        assert!(app.custom_command.pending.is_some());
+
+        for (width, height) in [(80, 24), (120, 40)] {
+            let text = draw_text(&app, width, height);
+            assert!(text.contains("git log --oneline | head -3"));
+            assert!(text.contains("Run now? y Yes"));
+        }
+
+        // Confirming starts the task; the log view keeps the exact command and
+        // offers cancellation while it runs.
+        app.confirm_custom_command(true);
+        assert!(app.custom_command.task.is_some());
+        for (width, height) in [(80, 24), (120, 40)] {
+            let text = draw_text(&app, width, height);
+            assert!(text.contains("git log --oneline | head -3"));
+            assert!(text.contains("c Cancel (no rollback)"));
+        }
+        app.cancel_custom_command();
+        assert!(app
+            .custom_command
+            .task
+            .as_ref()
+            .is_some_and(|task| task.cancelling));
+    }
+
     #[test]
     fn renders_workspace_at_supported_sizes() {
         let mut app = app();
@@ -363,6 +408,7 @@ mod tests {
             "F Files",
             "H Range",
             "a Repo",
+            "! Run cmd",
             "/ Search",
             "r Refresh",
             "j/k Move",
@@ -386,7 +432,7 @@ mod tests {
         }
         app.repository.as_mut().unwrap().pending = None;
         // An active operation adds the abort hint to the action row.
-        for expected in ["Ready", "x Abort operation"] {
+        for expected in ["Ready", "x Abort"] {
             let text = draw_text(&app, 120, 40);
             assert!(
                 text.contains(expected),

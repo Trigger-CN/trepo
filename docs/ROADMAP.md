@@ -404,6 +404,7 @@ cargo run -- doctor .
 | M4 Repo/Workspace batch | Done | Repo batch 与 Workspace Git Stage/Stash/Discard 的 stable multi-select、全批预检、逐项结果和 80x24/120x40 通过 |
 | UI 文本/语言/配色 | Done | 默认英文、-zh/-en、stash“储藏”/stage“暂存”术语、Workspace 三范围与独立 List/Tree、显示列宽/控制字符/重绘回归，以及四页面暗蓝灰选中态和双语言 80x24/120x40 通过 |
 | GitHub Release 与更新链路 | Done | tag/Cargo 校验、Linux/macOS tar.gz、Windows MSVC zip、SHA256SUMS、安装脚本、update 单测和双 Windows target check 通过 |
+| Workspace 自定义命令 | Done | `!` 在选中仓库（无选择则光标仓库）逐个以 `$SHELL -c` 执行用户输入的命令，确认、流式日志、取消与 80x24/120x40 通过 |
 | M5-M7 | Planned | 下一步从 M5 命令面板与终端接管开始 |
 
 M0-M4 最终验证（Rust 1.98、Git 2.43.0、Repo launcher 2.54）：
@@ -432,6 +433,7 @@ cargo build
 - Graph Subject 和 Workspace 展开仓库使用真实视觉行高；Changes diff 每个源行固定一行，显示列宽安全层已覆盖中文宽字符、控制字符与长转短重绘残留。
 - Language 注入 App，默认 English；精确 `-zh`/`-en` 在 Clap 前规范化，标准 `--zh`/`--en` 同时受支持且互斥。
 - 每个页面的底部提示行列出该页当前状态下实际绑定的按键，统一占两行：Workspace、Changes、Repository 的首行兼显任务状态或错误；中英文文案按终端显示宽度排版，单行不超 120 列，并有 80x24/120x40 渲染断言覆盖关键键位。
+- Workspace 的 `!` 在选中仓库（无显式选择则光标仓库）中逐个执行用户输入的 shell 命令：argv 固定为 `$SHELL -c <一行命令>`（未设置时回退 `/bin/sh`），工作目录为各仓库目录，不追加任何路径；先确认（列出目标与命令原文、声明不回滚），运行中流式输出（脱敏、保留最近 500 行）可 `c` 取消（SIGINT→2s→SIGKILL）；空命令与含换行输入被拒绝；普通 Git 与 Repo 工作区均可用。
 - 当前无任意命令面板或 PTY takeover；交互认证、外部 editor/mergetool 明确依赖 M5。
 
 ## 15. 下一执行点

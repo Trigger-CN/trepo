@@ -10,7 +10,9 @@ use ratatui::Frame;
 
 use super::change_tree::{change_tree_rows, ChangeTreeRow};
 use crate::app::state::{App, WorkspaceLayout, WorkspaceView};
-use crate::domain::{HeadState, RepoProjectState, ScanState, WorkspaceGitAction, WorkspaceKind};
+use crate::domain::{
+    CommandState, HeadState, RepoProjectState, ScanState, WorkspaceGitAction, WorkspaceKind,
+};
 
 pub fn render(frame: &mut Frame, app: &App) {
     let area = frame.area();
@@ -46,6 +48,7 @@ pub fn render(frame: &mut Frame, app: &App) {
     }
     render_footer(frame, app, vertical[2]);
     render_repo_batch_overlay(frame, app);
+    render_custom_command_overlay(frame, app);
     render_workspace_git_overlay(frame, app);
     if app
         .repository
@@ -448,15 +451,15 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
         .selected_project()
         .is_some_and(|snapshot| snapshot.operation.is_some())
     {
-        app.language.text("  x Abort operation", "  x 终止操作")
+        app.language.text("  x Abort", "  x 终止")
     } else {
         ""
     };
     let actions = format!(
         "{}{}",
         app.language.text(
-            "   Space Select  A All  S Stage  Z Stash  D Discard  d Scope  t List/Tree  p Push refs/for",
-            "   空格 选择  A 全选  S 暂存  Z 储藏  D 丢弃  d 范围  t 列表/树形  p 推送 refs/for",
+            "   Space Select  A All  S Stage  Z Stash  D Discard  d Scope  t List/Tree  p Push refs/for  ! Run cmd  x Abort",
+            "   空格 选择  A 全选  S 暂存  Z 储藏  D 丢弃  d 范围  t 列表/树形  p 推送 refs/for  ! 执行命令  x 终止",
         ),
         abort
     );
@@ -891,6 +894,197 @@ fn render_repo_batch_overlay(frame: &mut Frame, app: &App) {
             )],
         );
     }
+}
+
+fn render_custom_command_overlay(frame: &mut Frame, app: &App) {
+    let state = &app.custom_command;
+    if let Some(command) = &state.form {
+        let area = centered_rect(64, 30, frame.area());
+        render_overlay(
+            frame,
+            area,
+            app.language.text(" Run command ", " 执行命令 "),
+            vec![
+                Line::raw(format!("{}: {command}_", app.language.label("Command"))),
+                Line::raw(""),
+                Line::styled(
+                    app.language.text(
+                        "Runs in each target repository via $SHELL -c.",
+                        "通过 $SHELL -c 在每个目标仓库目录中执行。",
+                    ),
+                    Color::DarkGray,
+                ),
+                Line::styled(
+                    app.language
+                        .text("Enter Review   Esc Cancel", "Enter 检查   Esc 取消"),
+                    Color::DarkGray,
+                ),
+            ],
+        );
+        return;
+    }
+    if let Some((command, targets)) = &state.pending {
+        let area = centered_rect(82, 76, frame.area());
+        let mut lines = vec![
+            Line::styled(
+                app.language.label("Command"),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Line::raw(format!("  {command}")),
+            Line::raw(""),
+            Line::raw(format!(
+                "{}: {} {}",
+                app.language.label("Scope"),
+                targets.len(),
+                app.language.text("selected project(s)", "个所选仓库"),
+            )),
+        ];
+        lines.extend(
+            targets
+                .iter()
+                .map(|project| Line::raw(format!("  {}", project.relative_path.display()))),
+        );
+        lines.push(Line::raw(""));
+        lines.push(Line::styled(
+            app.language.text(
+                "Runs as you in each directory above; trepo does not roll back.",
+                "以上目录中以你的身份执行，trepo 不回滚。",
+            ),
+            Color::LightRed,
+        ));
+        lines.push(Line::styled(
+            app.language
+                .text("Run now? y Yes   n No", "现在执行？y 是   n 否"),
+            Color::Yellow,
+        ));
+        render_overlay(
+            frame,
+            area,
+            app.language.text(" Confirm command ", " 确认命令 "),
+            lines,
+        );
+        return;
+    }
+    if let Some(task) = &state.task {
+        let area = centered_rect(86, 82, frame.area());
+        let counts = task.results.iter().fold([0usize; 4], |mut counts, result| {
+            let index = match result.state {
+                CommandState::Pending => 0,
+                CommandState::Running => 1,
+                CommandState::Succeeded => 2,
+                CommandState::Failed | CommandState::Cancelled => 3,
+            };
+            counts[index] += 1;
+            counts
+        });
+        let mut lines = vec![
+            Line::styled(
+                format!(
+                    "{}  {}",
+                    app.language.label("Command"),
+                    app.language.label(if task.running {
+                        if task.cancelling {
+                            "cancelling"
+                        } else {
+                            "running"
+                        }
+                    } else if task.cancelled {
+                        "cancelled"
+                    } else {
+                        "complete"
+                    })
+                ),
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            Line::raw(format!("  {}", task.command)),
+            Line::raw(format!(
+                "{} {}  {} {}  {} {}  {} {}",
+                app.language.label("pending"),
+                counts[0],
+                app.language.label("running"),
+                counts[1],
+                app.language.label("success"),
+                counts[2],
+                app.language.label("failed"),
+                counts[3]
+            )),
+        ];
+        let mut detail = Vec::new();
+        detail.extend(task.results.iter().map(|result| {
+            command_result_line(
+                app,
+                &result.project.relative_path.display().to_string(),
+                result.state,
+                &result.message,
+            )
+        }));
+        detail.push(Line::raw(""));
+        detail.push(Line::styled(
+            app.language.label("Log"),
+            Style::default().fg(Color::Cyan),
+        ));
+        detail.extend(task.logs.iter().map(|line| Line::raw(line.clone())));
+        let budget = area.height.saturating_sub(8) as usize;
+        let max_scroll = detail.len().saturating_sub(budget);
+        let scroll = state.scroll.min(max_scroll);
+        lines.extend(detail.into_iter().skip(scroll).take(budget));
+        lines.push(Line::styled(
+            if task.running {
+                app.language.text(
+                    "j/k Scroll   c Cancel (no rollback)",
+                    "j/k 滚动   c 取消（不回滚）",
+                )
+            } else {
+                app.language
+                    .text("j/k Scroll   Esc Close", "j/k 滚动   Esc 关闭")
+            },
+            Color::DarkGray,
+        ));
+        render_overlay(
+            frame,
+            area,
+            app.language.text(" Command task ", " 命令任务 "),
+            lines,
+        );
+        return;
+    }
+    if let Some((error, message)) = &state.message {
+        let area = centered_rect(60, 24, frame.area());
+        render_overlay(
+            frame,
+            area,
+            app.language.text(" Command ", " 命令 "),
+            vec![Line::styled(
+                message.clone(),
+                if *error {
+                    Color::LightRed
+                } else {
+                    Color::Green
+                },
+            )],
+        );
+    }
+}
+
+fn command_result_line(
+    app: &App,
+    label: &str,
+    state: CommandState,
+    message: &str,
+) -> Line<'static> {
+    let color = match state {
+        CommandState::Succeeded => Color::Green,
+        CommandState::Failed => Color::LightRed,
+        CommandState::Running => Color::Yellow,
+        CommandState::Cancelled => Color::DarkGray,
+        CommandState::Pending => Color::Gray,
+    };
+    Line::from(vec![
+        Span::styled(format!("{:<9}", app.language.label(state.label())), color),
+        Span::raw(format!(" {label}: {message}")),
+    ])
 }
 
 fn batch_parameter(app: &App, spec: &crate::domain::RepoBatchSpec) -> String {

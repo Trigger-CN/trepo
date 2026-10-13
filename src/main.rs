@@ -279,6 +279,10 @@ fn route_pasted_text(app: &mut App, text: String) {
         app.edit_repo_batch_form(trepo::app::state::CommitInput::Text(text));
         return;
     }
+    if app.custom_command.form.is_some() {
+        app.edit_custom_command(trepo::app::state::CommitInput::Text(text));
+        return;
+    }
     if app.range_history.form.is_some() {
         app.edit_range_history_form(trepo::app::state::CommitInput::Text(text));
         return;
@@ -346,6 +350,9 @@ fn drain_background_messages(app: &mut App) {
     }
     while let Ok(event) = app.repo_batch_rx.try_recv() {
         app.apply_repo_batch(event);
+    }
+    while let Ok(event) = app.custom_command_rx.try_recv() {
+        app.apply_custom_command(event);
     }
     while let Ok(result) = app.range_history_rx.try_recv() {
         app.apply_range_history(result);
@@ -510,6 +517,34 @@ fn handle_key(app: &mut App, key: KeyEvent) {
             KeyCode::Char('f') if !running => app.retry_failed_repo_batch(),
             KeyCode::Char(character) if form => {
                 app.edit_repo_batch_form(trepo::app::state::CommitInput::Character(character))
+            }
+            _ => {}
+        }
+        return;
+    }
+    if app.screen == Screen::Workspace && app.custom_command_overlay_active() {
+        let form = app.custom_command.form.is_some();
+        let pending = app.custom_command.pending.is_some();
+        let running = app
+            .custom_command
+            .task
+            .as_ref()
+            .is_some_and(|task| task.running);
+        match key.code {
+            KeyCode::Esc if !running => app.close_custom_command_overlay(),
+            KeyCode::Char('y') | KeyCode::Char('Y') if pending => app.confirm_custom_command(true),
+            KeyCode::Char('n') | KeyCode::Char('N') if pending => app.confirm_custom_command(false),
+            KeyCode::Enter if form => app.submit_custom_command(),
+            KeyCode::Backspace if form => {
+                app.edit_custom_command(trepo::app::state::CommitInput::Backspace)
+            }
+            KeyCode::Down | KeyCode::Char('j') if !form => app.scroll_custom_command(1),
+            KeyCode::Up | KeyCode::Char('k') if !form => app.scroll_custom_command(-1),
+            KeyCode::PageDown if !form => app.scroll_custom_command(10),
+            KeyCode::PageUp if !form => app.scroll_custom_command(-10),
+            KeyCode::Char('c') if running => app.cancel_custom_command(),
+            KeyCode::Char(character) if form => {
+                app.edit_custom_command(trepo::app::state::CommitInput::Character(character))
             }
             _ => {}
         }
@@ -762,6 +797,7 @@ fn handle_key(app: &mut App, key: KeyEvent) {
             KeyCode::Char('?') => app.help = true,
             KeyCode::Char('/') => app.search_mode = true,
             KeyCode::Char('a') => app.open_repo_batch_menu(),
+            KeyCode::Char('!') => app.open_custom_command(),
             KeyCode::Char('H') => app.open_range_history(),
             KeyCode::Char('F') => app.open_file_search(),
             KeyCode::Char(' ') => app.toggle_project_selection(),

@@ -115,6 +115,28 @@ impl RepoProjectState {
     }
 }
 
+/// Per-project state shared by the Repo batch task and the custom-command task.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommandState {
+    Pending,
+    Running,
+    Succeeded,
+    Failed,
+    Cancelled,
+}
+
+impl CommandState {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Running => "running",
+            Self::Succeeded => "success",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct RepoProjectResult {
     pub project: Project,

@@ -468,7 +468,7 @@ async fn stream_lines<R>(
     }
 }
 
-fn redact_log_line(line: &str) -> String {
+pub(crate) fn redact_log_line(line: &str) -> String {
     let mut result = line.to_owned();
     let lower = result.to_ascii_lowercase();
     let mut ranges = Vec::new();
@@ -619,6 +619,13 @@ pub(crate) fn workspace_lock_for_project(path: &Path) -> Option<Arc<Mutex<()>>> 
     path.ancestors()
         .find(|candidate| candidate.join(".repo").is_dir())
         .map(|root| workspace_lock(root.to_path_buf()))
+}
+
+/// Returns the lock guarding a project's directory. A plain Git workspace has no
+/// `.repo` ancestor, so the project directory itself is the serialization scope
+/// for anything that runs inside it.
+pub(crate) fn project_directory_lock(path: &Path) -> Arc<Mutex<()>> {
+    workspace_lock_for_project(path).unwrap_or_else(|| workspace_lock(path.to_path_buf()))
 }
 
 pub(crate) fn workspace_lock(path: PathBuf) -> Arc<Mutex<()>> {

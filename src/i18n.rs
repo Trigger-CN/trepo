@@ -237,6 +237,7 @@ impl Language {
             "Commands" => "命令",
             "Commands started" => "已启动命令",
             "Log" => "日志",
+            "Command" => "命令",
             "Change" => "变更",
             "Output path" => "输出路径",
             "Value" => "值",

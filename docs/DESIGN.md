@@ -200,6 +200,17 @@ Git 与 Repo 的参数面很大，而且会随版本、插件和服务端扩展�
 - 文件历史：`Enter` 后用 `git::file_log` 执行 `git log --follow --date-order -z --name-status --pretty=<FILE_LOG_FORMAT> -- <path>`（单文件、固定 argv、`--` 分隔、拒绝空/`-` 开头/含 NUL 的路径）解析为 `FileLog { entries: Vec<FileHistoryEntry { commit, path, status }>, capped }`。`-z` 下 status 与路径是相邻的 NUL 字段，rename/copy 带源与目标两个路径（取最后一个 = 该提交内的名字）；merge 在 `--follow` 下可能没有 status/path 字段，解析器用状态字母判定而不把下一条记录的 OID 误读为路径。历史项再 `Enter` 复用提交详情/补丁通道（`FileHistoryView.commit_view`），`l` 复用 `locate_graph_commit`，`Esc` 按 提交详情 → 文件历史 → 结果列表 → 表单/返回 逐层退栈。
 - 异步：文件搜索与文件历史各自独立通道（`FileSearchResult`/`FileHistoryResult`/`RangeCommitResult`），文件历史结果同时校验 generation、project_id 与 path，过期或错文件的响应不落地。
 
+### 5.6 在选中仓库中执行自定义命令（`!`）
+
+Workspace 的 `!` 面向“我需要跑一两个现有菜单没覆盖的命令”。它不做命令白名单，而是把用户输入的一整行交给 shell，以可确认、可取消、不阻塞界面的方式在多个仓库目录中逐个执行。
+
+- 语义：执行 argv 固定为 `[<program>, "-c", <用户输入的一整行>]`，`<program>` 取 `$SHELL`（未设置空值时回退 `/bin/sh`）。选择 `-c` 而非自行拆词是唯一能同时支持 `git`、`python`、管道、重定向与通配符的方式；这也是唯一一处把用户文本交给 shell 解释的地方，且 trepo 不向其追加任何路径或占位参数，`-` 前缀问题不存在——它不构成 `AGENTS.md` 所禁止的“把用户数据拼进内部命令 argv”。
+- 作用域：存在 `Space`/`A` 显式选择时按工作区顺序使用该集合，否则回退到光标仓库，与 `S/Z/D` 一致；集合为空时不执行并给出提示。
+- 风险：自定义命令天然是任意写入，因此固定按需确认（无风险等级分支）：先渲染确认覆盖层，列出目标仓库与实际命令原文，并声明“以上目录中以你的身份执行，trepo 不回滚”，`y` 开始、`n`/`Esc` 取消。
+- 执行：`src/services/custom_command.rs` 逐仓库串行执行（复用 `repo_batch` 的进程组、SIGINT→SIGKILL 取消与逐行流式 pattern），每仓库先取 `project_directory_lock`（Repo 工作区取 `.repo` 祖先锁，普通 Git 工作区取仓库目录锁，与 `repo_batch` 共存），在锁内重新验证目录存在后再启动。stdout/stderr 经 `redact_log_line` 脱敏逐行回传，日志按最近 500 行封顶（`push_log_bounded`）。
+- 状态与世代：`CustomCommandState { form, pending, task, scroll, message }`；`App` 持有独立通道 `custom_command_tx/rx` 与 `custom_command_handle/generation`，事件 `Started/Log/Finished/Complete` 携带 generation，`apply_custom_command` 校验后落地，`Complete` 触发 `refresh()`。运行中 `c` 请求取消，完成后 `Esc` 关闭。
+- 交互：输入框允许 `Ctrl-V` 粘贴（`paste_target_active` 与 `apply_clipboard` 已覆盖该表单）；粘贴的多行文本按空格折叠为一行，因为这里要求的是单行命令。主循环仅排空事件通道，命令不阻塞绘制与按键。
+
 ## 6. Repository 页面
 
 ### 6.1 Graph 标签页

@@ -1,3 +1,4 @@
+pub mod custom_command;
 pub mod discovery;
 pub mod file_search;
 pub mod operations;

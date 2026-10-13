@@ -90,6 +90,7 @@ git push origin v0.5.0
 | `p` | Workspace: open a prefilled Push refspec form for the cursor repository after a fresh snapshot — Remote defaults to `origin` or the first remote, Refspec to `HEAD:refs/for/<current-branch>` (`master` when detached) — then confirm `git push <remote> <refspec>` |
 | `H` | Workspace: open the cross-repository commit range search page (Since/Until window with optional Author and message Query), scanning every repository in scope concurrently |
 | `F` | Workspace: open the cross-repository file search page (one case-insensitive path query), scanning every repository in scope concurrently |
+| `!` | Workspace: run a shell command you type in every targeted repository (the explicit `Space` / `A` selection, or the repository under the cursor when nothing is selected); the command runs as `$SHELL -c <command>` with each repository directory as the working directory, and starts only after a confirmation that lists the targets and warns that trepo performs no rollback |
 | `Enter` | Range history: open the selected commit's detail and diff; file search: open the selected file's commit history (and a history entry's commit detail); other pages: open graph, object menu, or insert a newline |
 | `l` | Range history / file history: jump to the owning repository's Graph page with that commit selected |
 | `Ctrl-A` / `Ctrl-U` / `Ctrl-G` | Toggle Commit/Amend compatibility mode / sign-off / signing in the Changes commit dialog |
